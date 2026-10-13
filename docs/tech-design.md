@@ -138,7 +138,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **artists**: id, name. Used for artist separation rules.
 - **tracks**: id, title, artist_id, duration_ms, file_path (relative to the media root, see §8.7), format, bitrate, sample_rate, quality_ok (bool), quality_notes, type_id (FK to `playlist_types`), file_checksum, created_at.
 - **track_playlists**: track_id, playlist_id (many-to-many). A track may belong to several playlists.
-- **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), updated_at.
+- **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), default_filler_mode (nullable: `random`, `playlist`, or `artist`; null falls back to the global filler setting), default_filler_source_id (nullable; a playlist id for `playlist`, an artist id for `artist`), updated_at. The default mode applies when the filler pool is empty or a filler reminder expires (§7); `ask` and `pool` are not allowed here because they would fall back to themselves.
 - **clock_elements**: id, clock_id, position, placement (enum: `flow` (default), `start`, `end`, `fixed`), fixed_minute (int 0 to 59, nullable; required when `placement = fixed`), fixed_tolerance_ms (int, default 60000; applies to the start of a fixed element), nominal_duration_ms, duration_tolerance_ms (int, default 30000), filler_mode (enum: `none`, `ask`, `random`, `playlist`, `artist`, `pool`), filler_source_id (nullable; a playlist id for `playlist` mode, an artist id for `artist` mode), created_at. Stored as rows; a JSONB column may hold optional per-element settings.
   - `filler_mode` is required on a clock that is saved short. A clock with `filler_mode = none` cannot be saved as complete if it is short.
   - The playlists of an element are stored in `clock_element_playlists`, not in this table.
@@ -149,7 +149,8 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **filler_requests**: id, clock_id, hour_start_utc, reason (`short_clock`, `pool_empty`), created_at, deadline_at, mode, answer_track_id (nullable), status (`pending`, `answered`, `defaulted`, `expired`).
   - At most one `pending` request per `(clock_id, hour_start_utc)`, enforced by a partial unique index.
 - **grid_slots**: id, weekday, hour, clock_id, valid_from, valid_to. Weekday and hour are in station local time (see §10.2). Covers up to 30 days ahead.
-- **scheduled_items**: id, grid_slot_id, clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, truncated (bool, default false), source (`clock`, `filler_pool`, `filler_random`, `filler_answer`, `reschedule`), status (`planned`, `queued`, `aired`, `missed`, `replaced`), outage_id (nullable, FK to `broadcast_outages`), missed_at (timestamptz, nullable), reschedule_of_id (nullable, self-reference to the missed item this item replaces), created_at. The rolling track plan, covering 24 to 48 hours ahead.
+- **scheduled_items**: id, grid_slot_id, clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, truncated (bool, default false), source (`clock`, `filler_pool`, `filler_random`, `filler_answer`, `reschedule`), status (`planned`, `queued`, `aired`, `missed`, `replaced`), outage_id (nullable, FK to `broadcast_outages`), missed_at (timestamptz, nullable), reschedule_of_id (nullable, FK to `play_log`: the missed item this item replaces; set only when `source = reschedule`), created_at. The rolling track plan, covering 24 to 48 hours ahead.
+  - `reschedule_of_id` points to `play_log`, not to `scheduled_items`, because a missed item is moved to `play_log` and removed from `scheduled_items` (§4.1).
   - `missed` means the item was planned but did not reach the air because of a broadcast outage (see §7.1).
 - **broadcast_outages**: id, started_at (timestamptz, UTC), ended_at (timestamptz, UTC, nullable while the outage is open), detected_by (`icecast`, `liquidsoap_callback`, `liquidsoap_control`, `backend`), component (`icecast`, `liquidsoap`, `backend`, `network`), reason (short text, nullable), reconciled_at (timestamptz, nullable). One row per interruption. An open outage has `ended_at` null.
 - **play_rules**: id, name, window_from (time, nullable), window_to (time, nullable), weekdays (array of 1 to 7, nullable; null means every day), min_interval_minutes (int, nullable), max_per_hour (int, nullable), notes, created_at. A reusable, named rule (see §7.3). Times are station local time (§10.2).
@@ -159,8 +160,10 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
   - A rule that is applied to any track or playlist cannot be deleted. The API refuses the request and lists the tracks and playlists that use it.
   - These tables replace the old `daypart_rules` table. A time window is one kind of play rule.
 - **separation_rules**: id, scope (track or artist), min_interval_hours (default 72), notes. The values are copied from the reference software and entered into this table. Rotation reads all separation values from here; none are hard-coded.
-- **play_log**: id, track_id, artist_id, status (`aired`, `truncated`, `missed`), planned_start_utc, started_at (nullable for missed items), planned_out_ms, actual_duration_ms (nullable for missed items), truncated (bool, default false), source (auto or live), clock_id, grid_slot_id, scheduled_item_id (nullable), outage_id (nullable, set for missed items), resolution (`open`, `rescheduled`, `dismissed`, nullable; used only for missed items), resolved_at (timestamptz, nullable), resolved_item_id (nullable, FK to `scheduled_items`, set when rescheduled). Records what aired and what did not. Aired rows are kept for 10 days (see §4.1). Missed rows are kept until resolved.
+- **play_log**: id, track_id, artist_id, status (`aired`, `truncated`, `missed`), planned_start_utc, started_at (nullable for missed items), planned_out_ms, actual_duration_ms (nullable for missed items), truncated (bool, default false), source (`auto`, `live`, or `emergency`; see §8.6), clock_id, grid_slot_id, scheduled_item_id (nullable), outage_id (nullable, set for missed items), resolution (`open`, `rescheduled`, `dismissed`, nullable; used only for missed items), resolved_at (timestamptz, nullable), resolved_item_id (nullable, set when rescheduled). Records what aired and what did not.
+  - `scheduled_item_id` and `resolved_item_id` are trace ids of `scheduled_items` rows, without a foreign key: those rows are deleted once they air or are missed (§4.1), so a foreign key would point at nothing. Aired rows are kept for 10 days (see §4.1). Missed rows are kept until resolved.
 - **settings**: key, value (JSONB), updated_at (timestamptz, UTC). Holds all backend settings edited in the admin panel, including the audio output profile (see §6.3 and §8.8), `fade_out_ms` (default 2500, allowed 2000 to 3000), and outage detection thresholds (see §6.3).
+- **Deletion and history.** A track, artist, or clock that is referenced by `play_log` or `scheduled_items` cannot be deleted (`ON DELETE RESTRICT`). The API refuses the request and says why. This keeps the played-tracks list and open missed items complete. A grid slot can be deleted; the history rows keep their other references and lose only `grid_slot_id`.
 - **operations**: id, kind, status (`running`, `completed`, `failed`), started_at, finished_at, error_message, result_summary (see §6.5).
 
 Indexes:
@@ -177,7 +180,7 @@ Indexes:
 - `filler_requests (clock_id, hour_start_utc) WHERE status = 'pending'` (unique).
 - `scheduled_items (planned_start_utc)` and `scheduled_items (track_id, planned_start_utc DESC)` for separation checks against planned items.
 - `scheduled_items (status, outage_id)` for outage reconciliation.
-- `broadcast_outages (started_at)` and a partial unique index `broadcast_outages (ended_at) WHERE ended_at IS NULL` so there is at most one open outage.
+- `broadcast_outages (started_at)` and a partial unique index `broadcast_outages (ended_at) NULLS NOT DISTINCT WHERE ended_at IS NULL` so there is at most one open outage. `NULLS NOT DISTINCT` is required, because in a plain unique index two NULLs never collide.
 - `grid_slots (weekday, hour)`.
 
 ### 4.1 Play log retention
@@ -489,7 +492,7 @@ An outage is a period when the station's audio did not reach listeners, for exam
 
 **Rescheduling and dismissing missed items**
 
-- The manager can reschedule an open missed item into a following clock. `POST /api/missed-items/{id}/reschedule` creates a `scheduled_items` row with `source = reschedule`, `reschedule_of_id` set to the missed item, and status `planned`. The row is placed in the target hour and element.
+- The manager can reschedule an open missed item into a following clock. `POST /api/missed-items/{id}/reschedule` creates a `scheduled_items` row with `source = reschedule`, `reschedule_of_id` set to the missed item's `play_log` row, and status `planned`. The row is placed in the target hour and element.
 - A rescheduled item goes through the same checks as any other item: the element playlists, the duration tolerance, separation rules, and play rules. The placement is chosen by the manager (start, end, or a fixed minute), and the hour is rebuilt around it using the rules of §7.2. If a segment cannot hold the item, the request is refused with a validation error on the request.
 - Rescheduling creates a one-time item for that hour only. The clock template is not changed (§7.2).
 - On success, the missed item's `resolution` becomes `rescheduled` and `resolved_item_id` is set. The missed row then follows the 10-day retention rule from `resolved_at` (§4.1).
@@ -851,6 +854,8 @@ The open questions from the previous version are closed. The decisions are recor
 19. **Play rules replace dayparting.** Time windows, minimum intervals, and plays per hour are one kind of reusable rule. The manager creates rules on a separate page and applies them to tracks or playlists (§4, §7.3). The `daypart_rules` table is superseded.
 20. **Rules limit, the clock demands.** A play rule only decides whether a track is allowed at a given moment. How often a jingle appears is set by the clock structure. Play rules are never relaxed. If every candidate of an element is blocked, the element is skipped with a warning (§7.3).
 21. **Track preview in the panel.** The backend streams a track by ID with Range support. Playback happens in the browser only and never reaches the air or the play log (§6.6).
+22. **References to plan rows.** Missed items live in `play_log`, so `scheduled_items.reschedule_of_id` references `play_log`. `play_log.scheduled_item_id` and `resolved_item_id` are trace ids without a foreign key, because `scheduled_items` rows are deleted after they air (§4, §4.1).
+23. **History blocks deletes.** Tracks, artists, and clocks referenced by the play log or the track plan cannot be deleted (§4).
 
 ## 12. Non-functional Requirements
 
