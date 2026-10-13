@@ -54,7 +54,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		if len(rest) != 1 || rest[0] != "up" {
 			return fmt.Errorf("%w: only `migrate up` exists (migrations are forward-only)", errUsage)
 		}
-		return errors.New("migrate up: not implemented yet (Phase 2)")
+		return migrateUp(ctx, stdout)
 	case "openapi":
 		return errors.New("openapi: not implemented yet (Phase 3)")
 	case "help", "-h", "--help":

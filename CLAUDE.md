@@ -36,7 +36,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | `make lint` | `go vet` + `golangci-lint` |
 | `make fmt` | gofumpt + goimports |
 | `make vuln` | govulncheck |
-| `make migrate` | `backend migrate up` (Phase 2) |
+| `make migrate` | `backend migrate up` against `DATABASE_URL` |
 | `make openapi` | Write `api/openapi.json` (Phase 3) |
 | `make db-up` / `make db-down` | Only PostgreSQL |
 | `docker compose -f docker-compose.dev.yml --profile app up --build` | Stack plus the backend container |
@@ -50,8 +50,9 @@ cmd/backend/          subcommand dispatch (main.go) and serve wiring
 internal/
   config/             env config (caarlos0/env + godotenv); the only place that reads env
   logging/            slog JSON, components, secret masking, async writer, daily UTC rotator
-  db/                 pgx pool (UTC session, timeouts); GORM + tx helper in Phase 2
-  migrations/         embedded *.up.sql + runner (Phase 2)
+  db/                 pgx pool (UTC session, timeouts), GORM on the same pool, WithTx / WithGormTx
+  dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)
+  migrations/         embedded NNNN_name.up.sql + runner (golang-migrate)
   httpapi/            chi router, middleware, health; dto/ and handlers/ from Phase 3
   ws/ operations/ settings/ library/ playrules/ separation/ media/ jobs/   (Phases 3–5)
   clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)

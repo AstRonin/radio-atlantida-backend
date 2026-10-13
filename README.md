@@ -15,6 +15,7 @@ Design documents are in [`docs/`](docs/): requirements (`base.md`), technical de
 ```sh
 make stack-up        # creates .env from .env.example, starts db + icecast + liquidsoap
 make media           # generates test MP3s into .dev/media
+make migrate         # applies the database migrations (backend migrate up)
 make run             # starts the backend on 127.0.0.1:8080
 curl localhost:8080/readyz
 ```
@@ -27,11 +28,19 @@ printf 'request.push /media/jingle-20s-a.mp3\nquit\n' | nc 127.0.0.1 1234
 
 Every track start and end is appended to `.dev/journal/journal-YYYY-MM-DD.jsonl`.
 
-To run the backend in a container instead of on the host:
+To run the backend in a container instead of on the host (the `migrate` service applies the migrations first, and `backend` starts only after it succeeds):
 
 ```sh
 docker compose -f docker-compose.dev.yml --profile app up --build
 ```
+
+### Migrations
+
+Migrations live in `internal/migrations` as `NNNN_name.up.sql`, are embedded in the binary, and are forward-only: there are no down files and no `migrate down`. An applied migration is never edited; a fix is a new migration (expand and contract, §9.2 of `docs/tech-design.md`).
+
+- `backend migrate up` needs only `DATABASE_URL`. It logs each applied version and exits non-zero on failure.
+- A database newer than the binary (after a rollback to an earlier release) is accepted with a warning, so the older `backend` still starts.
+- A "dirty" state means a migration failed part-way. Restore the pre-update dump (`update.bat restore` in production; in development, recreate the `pgdata` volume) and ship a fixed migration.
 
 ### Host names for `make run`
 

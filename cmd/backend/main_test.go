@@ -20,7 +20,6 @@ func TestRunArguments(t *testing.T) {
 		{"migrate down does not exist", []string{"migrate", "down"}, true},
 		{"migrate without direction", []string{"migrate"}, true},
 		{"serve with arguments", []string{"serve", "x"}, true},
-		{"migrate up not implemented yet", []string{"migrate", "up"}, false},
 		{"openapi not implemented yet", []string{"openapi"}, false},
 	}
 	for _, tt := range tests {

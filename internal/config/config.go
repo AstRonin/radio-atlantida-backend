@@ -49,21 +49,39 @@ func (Secrets) String() string { return "{***}" }
 // GoString hides secret values from %#v.
 func (s Secrets) GoString() string { return s.String() }
 
-// Load reads the configuration. Variables from dotenvPath are loaded first
-// without overriding variables that are already set; a missing file is not an
-// error. Pass an empty dotenvPath to skip the file.
+// Migrate is the configuration of `backend migrate up`. It needs only the
+// database, so the migrate container of the deploy stack needs no host paths.
+type Migrate struct {
+	// DatabaseURL is the PostgreSQL connection string.
+	DatabaseURL string `env:"DATABASE_URL,required,notEmpty"`
+}
+
+// Load reads the configuration of `backend serve`. Variables from dotenvPath
+// are loaded first without overriding variables that are already set; a
+// missing file is not an error. Pass an empty dotenvPath to skip the file.
 //
 // The returned error lists every missing or invalid variable at once.
 func Load(dotenvPath string) (Config, error) {
+	return load[Config](dotenvPath)
+}
+
+// LoadMigrate reads the configuration of `backend migrate up`, with the same
+// rules as Load.
+func LoadMigrate(dotenvPath string) (Migrate, error) {
+	return load[Migrate](dotenvPath)
+}
+
+func load[T any](dotenvPath string) (T, error) {
+	var zero T
 	if dotenvPath != "" {
 		if err := godotenv.Load(dotenvPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return Config{}, fmt.Errorf("load %s: %w", dotenvPath, err)
+			return zero, fmt.Errorf("load %s: %w", dotenvPath, err)
 		}
 	}
 
-	cfg, err := env.ParseAs[Config]()
+	cfg, err := env.ParseAs[T]()
 	if err != nil {
-		return Config{}, describe(err)
+		return zero, describe(err)
 	}
 	return cfg, nil
 }

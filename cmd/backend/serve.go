@@ -19,7 +19,7 @@ import (
 const shutdownTimeout = 15 * time.Second
 
 // serve runs the HTTP API until ctx is cancelled, then shuts down in order:
-// stop accepting requests and drain, close the database pool, flush logs.
+// stop accepting requests and drain, close the database, flush logs.
 func serve(ctx context.Context) error {
 	cfg, err := config.Load(".env")
 	if err != nil {
@@ -36,15 +36,15 @@ func serve(ctx context.Context) error {
 	apiLog := logging.For(log, logging.ComponentAPI)
 	dbLog := logging.For(log, logging.ComponentDB)
 
-	pool, err := db.OpenPool(ctx, cfg.DatabaseURL)
+	database, err := db.Open(ctx, cfg.DatabaseURL, dbLog)
 	if err != nil {
-		dbLog.Error("open database pool failed", logging.KeyError, err)
+		dbLog.Error("open database failed", logging.KeyError, err)
 		return err
 	}
-	defer pool.Close()
+	defer database.Close()
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	if err := pool.Ping(pingCtx); err != nil {
+	if err := database.Pool.Ping(pingCtx); err != nil {
 		// Not fatal: /readyz reports the state, and the pool reconnects.
 		dbLog.Warn("database not reachable at startup", logging.KeyError, err)
 	}
@@ -56,7 +56,7 @@ func serve(ctx context.Context) error {
 	requestsCtx, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRequests()
 	srv := httpapi.NewServer(requestsCtx, cfg.HTTPAddr,
-		httpapi.NewRouter(httpapi.Deps{Log: log, DB: pool}), apiLog)
+		httpapi.NewRouter(httpapi.Deps{Log: log, DB: database.Pool}), apiLog)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
@@ -74,7 +74,7 @@ func serve(ctx context.Context) error {
 		defer cancel()
 		if err := srv.Shutdown(sctx); err != nil {
 			// Drain timed out: cancel the remaining requests, so their
-			// queries stop and release connections before pool.Close.
+			// queries stop and release connections before the database closes.
 			cancelRequests()
 			_ = srv.Close()
 			return fmt.Errorf("http shutdown: %w", err)

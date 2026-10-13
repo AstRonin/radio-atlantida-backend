@@ -46,6 +46,18 @@ func TestLoadEmptyRequiredCountsAsMissing(t *testing.T) {
 	require.EqualError(t, err, "missing required environment variables: MEDIA_ROOT")
 }
 
+func TestLoadMigrateNeedsOnlyDatabase(t *testing.T) {
+	clearEnv(t)
+
+	_, err := LoadMigrate("")
+	require.EqualError(t, err, "missing required environment variables: DATABASE_URL")
+
+	t.Setenv("DATABASE_URL", "postgres://x")
+	cfg, err := LoadMigrate("")
+	require.NoError(t, err)
+	require.Equal(t, "postgres://x", cfg.DatabaseURL)
+}
+
 func TestLoadDefaultsAndSecrets(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://x")

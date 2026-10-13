@@ -86,11 +86,27 @@ services:
       retries: 10
       start_period: 10s
 
-  backend:
+  # Applies the migrations once and exits; backend starts only after it
+  # succeeds (§9.2). Same image as backend.
+  migrate:
     profiles: ["app"]
     build:
       context: .
       dockerfile: docker/Dockerfile
+    image: radio-atlantida-backend:dev
+    command: ["migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+    # The image health check probes the HTTP server, which migrate does not run.
+    healthcheck:
+      disable: true
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend:
+    profiles: ["app"]
     image: radio-atlantida-backend:dev
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
@@ -110,6 +126,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:
