@@ -14,13 +14,20 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
 	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
+	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
+	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
 	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
+	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
@@ -89,6 +96,18 @@ func serve(ctx context.Context) error {
 	}
 	cancel()
 
+	mediaLib := media.New(cfg.MediaRoot)
+	prober := media.NewProber(mediaLib)
+	if !prober.Available() {
+		apiLog.Warn("ffprobe not found on PATH: track metadata is not read from files")
+	}
+	librarySvc := library.NewService(database,
+		libraryrepo.NewTypes(database), libraryrepo.NewPlaylists(database),
+		libraryrepo.NewArtists(database), libraryrepo.NewTracks(database),
+		mediaLib, prober, log)
+	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool))
+	separationSvc := separation.NewService(separationrepo.New(database), separationLimit(settingsSvc))
+
 	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
 	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log, jobs.Retention(cleanup.Run))
@@ -106,6 +125,9 @@ func serve(ctx context.Context) error {
 		Operations: tracker,
 		Logs:       logging.NewFileReader(cfg.LogRoot),
 		Settings:   settingsSvc,
+		Library:    librarySvc,
+		PlayRules:  playRulesSvc,
+		Separation: separationSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -189,6 +211,19 @@ func retentionPeriods(svc *settings.Service) retention.PeriodsFunc {
 		}
 		day := 24 * time.Hour
 		return retention.Periods{PlayLog: time.Duration(playLog) * day, Operations: time.Duration(logDays) * day}, nil
+	}
+}
+
+// separationLimit caps separation intervals at the play log retention:
+// separation is checked against aired history, which is kept only that long
+// (§4.1).
+func separationLimit(svc *settings.Service) separation.MaxHoursFunc {
+	return func(ctx context.Context) (int, error) {
+		days, err := settings.Value(ctx, svc, settings.RetentionPlayLogDays)
+		if err != nil {
+			return 0, err
+		}
+		return days * 24, nil
 	}
 }
 

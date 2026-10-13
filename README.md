@@ -74,6 +74,24 @@ curl -X PUT localhost:8080/api/settings/liquidsoap.fade_out_ms \
 
 A refused value returns `422` with a field error on `value`. Every saved change is logged at INFO with its UTC time.
 
+### Library
+
+Playlist types, playlists, artists, tracks, play rules, and separation rules are edited through the API (`make openapi` writes the full contract to `api/openapi.json`):
+
+```sh
+curl localhost:8080/api/playlist-types                       # music, jingle, news, segment + custom types
+curl -X POST localhost:8080/api/playlists -H 'Content-Type: application/json' \
+     -d '{"name": "Pop", "type_id": 1}'
+curl -X POST localhost:8080/api/tracks -H 'Content-Type: application/json' \
+     -d '{"title": "Test", "file_path": "music-3m-a.mp3", "type_id": 1, "playlist_ids": [1]}'
+curl -o /dev/null -w '%{http_code}\n' -H 'Range: bytes=0-99' localhost:8080/api/tracks/1/audio   # 206
+```
+
+- A track is registered by its path relative to `MEDIA_ROOT` (forward slashes, no `..`, no absolute paths). If the file exists and `ffprobe` is on `PATH`, duration, format, bitrate, and sample rate that were left out are read from it. The runtime image has ffprobe; on a development host without it the backend logs one warning at startup and stores the metadata as entered.
+- `GET /api/tracks/{id}/audio` streams the file for the panel's preview player (Range requests, no request timeout). It never reaches the air or the play log.
+- Deletes that would break something are refused with `409` and a stable code (`playlist_type_in_use`, `playlist_in_use`, `play_rule_in_use`, `track_has_history`, ...); `used_by` names the blocking playlists, tracks, or clocks.
+- A separation interval is at most the play log retention (`retention.play_log_days` × 24 hours), because separation is checked against aired history.
+
 ## Make targets
 
 Run `make help`.

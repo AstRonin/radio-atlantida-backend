@@ -49,6 +49,9 @@ type Deps struct {
 	Operations handlers.OperationStore
 	Logs       handlers.LogFiles
 	Settings   handlers.Settings
+	Library    handlers.Library
+	PlayRules  handlers.PlayRules
+	Separation handlers.Separation
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -77,17 +80,17 @@ func NewRouter(d Deps) http.Handler {
 		r.Get(wsPath, d.Events.ServeHTTP)
 	}
 
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.Timeout(requestTimeout))
+	timed := r.With(middleware.Timeout(requestTimeout))
+	h := health{db: d.DB, log: logging.For(d.Log, logging.ComponentDB)}
+	timed.Get("/healthz", h.live)
+	timed.Get("/readyz", h.ready)
 
-		h := health{db: d.DB, log: logging.For(d.Log, logging.ComponentDB)}
-		r.Get("/healthz", h.live)
-		r.Get("/readyz", h.ready)
-
-		api := newAPI(r, d.Version)
-		handlers.Register(api, handlers.Deps{
-			Log: d.Log, Operations: d.Operations, Logs: d.Logs, Settings: d.Settings, Now: d.Now,
-		})
+	// Streaming operations (track preview) are registered on r, without
+	// the timeout; every other operation on timed.
+	api := newAPI(timed, r, d.Version)
+	handlers.Register(api, handlers.Deps{
+		Log: d.Log, Operations: d.Operations, Logs: d.Logs, Settings: d.Settings,
+		Library: d.Library, PlayRules: d.PlayRules, Separation: d.Separation, Now: d.Now,
 	})
 
 	return r

@@ -35,6 +35,9 @@ type Deps struct {
 	Operations OperationStore
 	Logs       LogFiles
 	Settings   Settings
+	Library    Library
+	PlayRules  PlayRules
+	Separation Separation
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -46,6 +49,22 @@ func Register(api huma.API, d Deps) {
 	registerLogs(api, log, d.Logs)
 	registerStatus(api, log, d.Now)
 	registerSettings(api, log, d.Settings)
+	registerPlaylistTypes(api, log, d.Library)
+	registerPlaylists(api, log, d.Library, d.PlayRules)
+	registerArtists(api, log, d.Library)
+	registerTracks(api, log, d.Library, d.PlayRules)
+	registerPlayRules(api, log, d.PlayRules)
+	registerSeparationRules(api, log, d.Separation)
+}
+
+// Streaming is the operation metadata key of routes that stream a response
+// (track preview). The router serves them without the request timeout.
+const Streaming = "streaming"
+
+// IsStreaming reports whether op streams its response.
+func IsStreaming(op *huma.Operation) bool {
+	v, _ := op.Metadata[Streaming].(bool)
+	return v
 }
 
 // register adds one operation. Errors returned by fn go through problemFor.
@@ -61,3 +80,20 @@ func register[I, O any](api huma.API, log *slog.Logger, op huma.Operation, fn fu
 
 // commonErrors are documented on every operation.
 var commonErrors = []int{http.StatusInternalServerError}
+
+// errorsWith documents the given statuses and the common errors.
+func errorsWith(statuses ...int) []int { return append(statuses, commonErrors...) }
+
+// idInput addresses a resource by its ID.
+type idInput struct {
+	ID int64 `path:"id" minimum:"1"`
+}
+
+// emptyIDs returns ids, or an empty list instead of nil, so the API sends []
+// rather than null.
+func emptyIDs(ids []int64) []int64 {
+	if ids == nil {
+		return []int64{}
+	}
+	return ids
+}
