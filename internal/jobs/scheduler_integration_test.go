@@ -16,6 +16,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 )
 
 type nopPublisher struct{}
@@ -25,7 +26,9 @@ func (nopPublisher) Publish(any) {}
 func TestSchedulerRunsOnIntervalAndStops(t *testing.T) {
 	d := dbtest.Migrated(t)
 	var runs atomic.Int32
-	tracker := operations.NewTracker(operationsrepo.New(d.Pool), nopPublisher{}, dbtest.Logger(t), time.Now)
+	pool := workerpool.New(1, 1)
+	t.Cleanup(pool.Close)
+	tracker := operations.NewTracker(operationsrepo.New(d.Pool), nopPublisher{}, pool, dbtest.Logger(t), time.Now)
 	job := jobs.Job{
 		Kind: operations.KindRetention, Component: logging.ComponentRetention,
 		FirstRun: time.Millisecond, Interval: 20 * time.Millisecond, Timeout: 5 * time.Second,

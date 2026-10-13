@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -116,19 +117,24 @@ const (
 
 // Tracker starts, finishes, and reads operations.
 //
-// Goroutines started by Run are counted in wg; Wait blocks until they end.
+// Operations started by Run execute on pool, so a burst of requests never
+// starts more goroutines than the pool has workers. Tasks submitted by Run
+// are counted in wg; Wait blocks until they end.
 type Tracker struct {
 	store Store
 	pub   Publisher
+	pool  *workerpool.Pool
 	log   *slog.Logger // root logger; failures are logged with their component
 	now   func() time.Time
 
 	wg sync.WaitGroup
 }
 
-// NewTracker returns a tracker. log is the root logger; now is the clock.
-func NewTracker(store Store, pub Publisher, log *slog.Logger, now func() time.Time) *Tracker {
-	return &Tracker{store: store, pub: pub, log: log, now: now}
+// NewTracker returns a tracker. pool runs the operations started by Run (the
+// caller owns it and closes it on shutdown); log is the root logger; now is
+// the clock.
+func NewTracker(store Store, pub Publisher, pool *workerpool.Pool, log *slog.Logger, now func() time.Time) *Tracker {
+	return &Tracker{store: store, pub: pub, pool: pool, log: log, now: now}
 }
 
 // Start stores a new running operation and returns its ID.
@@ -207,22 +213,33 @@ func (t *Tracker) finish(ctx context.Context, id int64, status Status, at time.T
 	return kind, nil
 }
 
-// Run starts an operation and runs fn in a new goroutine. It returns the
-// operation ID as soon as the row is stored.
+// Run starts an operation and queues fn on the worker pool. It returns the
+// operation ID as soon as the row is stored and fn is queued; when the queue
+// is full it waits for a free slot.
 //
 // ctx must be the service context, never a request context: the work
 // outlives the request that started it (§6.5). Copy request values such as
-// the request ID into it explicitly. A panic in fn fails the operation.
+// the request ID into it explicitly. A panic in fn fails the operation, and
+// so does a pool that refuses fn (shutdown): the row never stays running.
 func (t *Tracker) Run(ctx context.Context, kind Kind, component logging.Component, fn Func) (int64, error) {
 	id, err := t.Start(ctx, kind)
 	if err != nil {
 		return 0, err
 	}
-	t.wg.Go(func() {
+	t.wg.Add(1)
+	err = t.pool.Submit(ctx, func() {
+		defer t.wg.Done()
 		// execute logs a failure to store the outcome; nobody else waits
 		// for it.
 		_ = t.execute(ctx, id, component, fn)
 	})
+	if err != nil {
+		t.wg.Done()
+		// The outcome is the operation's failure, reported like any other.
+		_ = t.execute(ctx, id, component, func(context.Context) (string, error) {
+			return "", fmt.Errorf("queue operation: %w", err)
+		})
+	}
 	return id, nil
 }
 
@@ -237,8 +254,7 @@ func (t *Tracker) Do(ctx context.Context, kind Kind, component logging.Component
 	return id, t.execute(ctx, id, component, fn)
 }
 
-// Wait blocks until every goroutine started by Run has finished. Call it on
-// shutdown after cancelling the service context.
+// Wait blocks until every operation started by Run has finished.
 func (t *Tracker) Wait() { t.wg.Wait() }
 
 func (t *Tracker) execute(ctx context.Context, id int64, component logging.Component, fn Func) error {

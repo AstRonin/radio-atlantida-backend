@@ -297,10 +297,10 @@ func TestSetAccepts(t *testing.T) {
 		{"liquidsoap.music_gain", `0.2`, 0.2},
 		{"liquidsoap.music_gain", `0`, 0.0},
 		{"stream.loudness_target_lufs", `-23`, -23.0},
-		{"playout.emergency_playlist_id", `7`, ptr(int64(7))},
+		{"playout.emergency_playlist_id", `7`, new(int64(7))},
 		{"playout.emergency_playlist_id", `null`, (*int64)(nil)},
 		{"filler.fallback", `{"mode":"random"}`, settings.FillerFallback{Mode: "random"}},
-		{"filler.fallback", `{"mode":"artist","source_id":4}`, settings.FillerFallback{Mode: "artist", SourceID: ptr(int64(4))}},
+		{"filler.fallback", `{"mode":"artist","source_id":4}`, settings.FillerFallback{Mode: "artist", SourceID: new(int64(4))}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
@@ -376,5 +376,3 @@ func TestStoreErrorsAreWrapped(t *testing.T) {
 	_, err = svc.Set(t.Context(), "station.name", json.RawMessage(`"X"`))
 	require.ErrorContains(t, err, "save setting station.name")
 }
-
-func ptr[T any](v T) *T { return &v }

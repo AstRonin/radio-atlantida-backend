@@ -84,16 +84,10 @@ func Up(ctx context.Context, databaseURL string, log *slog.Logger) error {
 	}
 
 	// Stop between migrations when ctx is cancelled (golang-migrate has no
-	// context API).
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			m.GracefulStop <- true
-		case <-done:
-		}
-	}()
+	// context API). GracefulStop has a buffer of one and AfterFunc fires at
+	// most once, so the send never blocks.
+	stop := context.AfterFunc(ctx, func() { m.GracefulStop <- true })
+	defer stop()
 
 	// One step at a time, so every applied version is logged.
 	for {

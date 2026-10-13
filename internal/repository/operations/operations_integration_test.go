@@ -18,8 +18,6 @@ import (
 
 var t0 = time.Date(2026, 10, 13, 6, 44, 0, 0, time.UTC)
 
-func ptr[T any](v T) *T { return &v }
-
 func TestStore(t *testing.T) {
 	d := dbtest.Migrated(t)
 	store := operationsrepo.New(d.Pool)
@@ -38,7 +36,7 @@ func TestStore(t *testing.T) {
 
 	t.Run("finish stores the outcome once", func(t *testing.T) {
 		kind, err := store.Finish(ctx, operations.Finish{
-			ID: id, Status: operations.StatusCompleted, FinishedAt: t0.Add(time.Minute), ResultSummary: ptr("ok"),
+			ID: id, Status: operations.StatusCompleted, FinishedAt: t0.Add(time.Minute), ResultSummary: new("ok"),
 		})
 		require.NoError(t, err)
 		require.Equal(t, operations.KindRetention, kind)
@@ -50,7 +48,7 @@ func TestStore(t *testing.T) {
 		require.Equal(t, "ok", *op.ResultSummary)
 
 		_, err = store.Finish(ctx, operations.Finish{
-			ID: id, Status: operations.StatusFailed, FinishedAt: t0, ErrorMessage: ptr("x"),
+			ID: id, Status: operations.StatusFailed, FinishedAt: t0, ErrorMessage: new("x"),
 		})
 		require.ErrorIs(t, err, operations.ErrNotRunning)
 	})
