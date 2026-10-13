@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/dbtest"
@@ -47,49 +46,130 @@ func TestSessionSettings(t *testing.T) {
 	require.Equal(t, []string{"UTC", "0", "10s"}, []string{tz, stmt, lock})
 }
 
-func TestWithTx(t *testing.T) {
+func openWithTable(t *testing.T) (*db.DB, context.Context) {
+	t.Helper()
 	url := dbtest.StartPostgres(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	d, err := db.Open(ctx, url, dbtest.Logger(t))
 	require.NoError(t, err)
 	t.Cleanup(d.Close)
-	_, err = d.Pool.Exec(ctx, `CREATE TABLE t (v int NOT NULL)`)
+	_, err = d.Pool.Exec(ctx, `
+		CREATE TABLE t (
+			v int NOT NULL,
+			CONSTRAINT uq_t_v UNIQUE (v),
+			CONSTRAINT ck_t_v_positive CHECK (v > 0)
+		)`)
 	require.NoError(t, err)
+	return d, ctx
+}
 
+func TestWithTx(t *testing.T) {
+	d, ctx := openWithTable(t)
 	errBoom := errors.New("boom")
-	count := func() int {
-		var n int
-		require.NoError(t, d.Pool.QueryRow(ctx, `SELECT count(*) FROM t`).Scan(&n))
-		return n
+	values := func() []int {
+		rows, err := d.Pool.Query(ctx, `SELECT v FROM t ORDER BY v`)
+		require.NoError(t, err)
+		vs, err := pgx.CollectRows(rows, pgx.RowTo[int])
+		require.NoError(t, err)
+		return vs
+	}
+	// insertBoth writes a through pgx and b through GORM in tx.
+	insertBoth := func(ctx context.Context, tx db.Tx, a, b int) error {
+		if _, err := tx.Pgx().Exec(ctx, `INSERT INTO t VALUES ($1)`, a); err != nil {
+			return err
+		}
+		return tx.Gorm().Exec(`INSERT INTO t VALUES (?)`, b).Error
 	}
 
-	require.NoError(t, db.WithTx(ctx, d.Pool, func(tx pgx.Tx) error {
-		_, execErr := tx.Exec(ctx, `INSERT INTO t VALUES (1)`)
-		return execErr
-	}))
-	require.Equal(t, 1, count(), "pgx commit")
-
-	err = db.WithTx(ctx, d.Pool, func(tx pgx.Tx) error {
-		if _, execErr := tx.Exec(ctx, `INSERT INTO t VALUES (2)`); execErr != nil {
-			return execErr
-		}
-		return errBoom
+	t.Run("pgx and GORM commit together and see each other", func(t *testing.T) {
+		require.NoError(t, d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			if err := insertBoth(ctx, tx, 1, 2); err != nil {
+				return err
+			}
+			var n int
+			require.NoError(t, tx.Gorm().Raw(`SELECT count(*) FROM t`).Scan(&n).Error)
+			require.Equal(t, 2, n, "GORM sees the pgx write")
+			require.NoError(t, tx.Pgx().QueryRow(ctx, `SELECT count(*) FROM t`).Scan(&n))
+			require.Equal(t, 2, n, "pgx sees the GORM write")
+			// Outside the transaction nothing is visible yet.
+			require.Empty(t, values())
+			return nil
+		}))
+		require.Equal(t, []int{1, 2}, values())
 	})
-	require.ErrorIs(t, err, errBoom)
-	require.Equal(t, 1, count(), "pgx rollback")
 
-	require.NoError(t, db.WithGormTx(ctx, d.Gorm, func(tx *gorm.DB) error {
-		return tx.Exec(`INSERT INTO t VALUES (3)`).Error
-	}))
-	require.Equal(t, 2, count(), "gorm commit")
-
-	err = db.WithGormTx(ctx, d.Gorm, func(tx *gorm.DB) error {
-		if execErr := tx.Exec(`INSERT INTO t VALUES (4)`).Error; execErr != nil {
-			return execErr
-		}
-		return errBoom
+	t.Run("an error rolls back both", func(t *testing.T) {
+		err := d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			if err := insertBoth(ctx, tx, 3, 4); err != nil {
+				return err
+			}
+			return errBoom
+		})
+		require.ErrorIs(t, err, errBoom)
+		require.Equal(t, []int{1, 2}, values())
 	})
-	require.ErrorIs(t, err, errBoom)
-	require.Equal(t, 2, count(), "gorm rollback")
+
+	t.Run("a panic rolls back and propagates", func(t *testing.T) {
+		require.PanicsWithValue(t, "kaboom", func() {
+			_ = d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
+				if err := insertBoth(ctx, tx, 5, 6); err != nil {
+					return err
+				}
+				panic("kaboom")
+			})
+		})
+		require.Equal(t, []int{1, 2}, values())
+	})
+
+	t.Run("a failed statement aborts the transaction", func(t *testing.T) {
+		err := d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			_, _ = tx.Pgx().Exec(ctx, `INSERT INTO t VALUES (1)`) // duplicate, ignored
+			return tx.Gorm().Exec(`INSERT INTO t VALUES (7)`).Error
+		})
+		require.Error(t, err)
+		require.Equal(t, []int{1, 2}, values())
+	})
+
+	t.Run("connections go back to the pool idle", func(t *testing.T) {
+		require.Zero(t, d.Pool.Stat().AcquiredConns())
+		var open int
+		require.NoError(t, d.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE state LIKE 'idle in transaction%'`).Scan(&open))
+		require.Zero(t, open)
+	})
+}
+
+func TestConstraintError(t *testing.T) {
+	d, ctx := openWithTable(t)
+	_, err := d.Pool.Exec(ctx, `INSERT INTO t VALUES (1)`)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		err  func() error
+		want db.ConstraintError
+	}{
+		{"pgx unique", func() error {
+			_, err := d.Pool.Exec(ctx, `INSERT INTO t VALUES (1)`)
+			return err
+		}, db.ConstraintError{Kind: db.Unique, Constraint: "uq_t_v", Table: "t"}},
+		{"GORM check", func() error {
+			return d.Gorm.WithContext(ctx).Exec(`INSERT INTO t VALUES (0)`).Error
+		}, db.ConstraintError{Kind: db.Check, Constraint: "ck_t_v_positive", Table: "t"}},
+		{"inside WithTx", func() error {
+			return d.WithTx(ctx, func(_ context.Context, tx db.Tx) error {
+				return tx.Gorm().Exec(`INSERT INTO t VALUES (1)`).Error
+			})
+		}, db.ConstraintError{Kind: db.Unique, Constraint: "uq_t_v", Table: "t"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ce, ok := db.AsConstraintError(tt.err())
+			require.True(t, ok)
+			require.Equal(t, tt.want.Kind, ce.Kind)
+			require.Equal(t, tt.want.Constraint, ce.Constraint)
+			require.Equal(t, tt.want.Table, ce.Table)
+		})
+	}
 }

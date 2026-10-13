@@ -17,9 +17,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
@@ -58,15 +55,15 @@ const (
 	StatusFailed    Status = "failed"
 )
 
-// Operation is one row of the operations table.
+// Operation is the stored state of one operation.
 type Operation struct {
-	ID            int64      `db:"id"`
-	Kind          string     `db:"kind"`
-	Status        Status     `db:"status"`
-	StartedAt     time.Time  `db:"started_at"`
-	FinishedAt    *time.Time `db:"finished_at"`
-	ErrorMessage  *string    `db:"error_message"`
-	ResultSummary *string    `db:"result_summary"`
+	ID            int64
+	Kind          string
+	Status        Status
+	StartedAt     time.Time
+	FinishedAt    *time.Time
+	ErrorMessage  *string
+	ResultSummary *string
 }
 
 // Errors returned by the tracker.
@@ -83,11 +80,29 @@ type Publisher interface {
 	Publish(event any)
 }
 
-// Querier runs SQL. *pgxpool.Pool implements it.
-type Querier interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+// Store persists operations (internal/repository/operations).
+type Store interface {
+	// Insert stores a running operation and returns its ID.
+	Insert(ctx context.Context, kind Kind, startedAt time.Time) (int64, error)
+	// Finish moves a running operation to its final state and returns its
+	// kind, or ErrNotRunning if it is not running.
+	Finish(ctx context.Context, f Finish) (Kind, error)
+	// FailRunning fails every running operation with message and returns
+	// the number of rows changed.
+	FailRunning(ctx context.Context, at time.Time, message string) (int64, error)
+	// Get returns one operation or ErrNotFound.
+	Get(ctx context.Context, id int64) (Operation, error)
+	// List returns operations in ID order.
+	List(ctx context.Context, f ListFilter) ([]Operation, error)
+}
+
+// Finish is the final state of an operation.
+type Finish struct {
+	ID            int64
+	Status        Status
+	FinishedAt    time.Time
+	ErrorMessage  *string
+	ResultSummary *string
 }
 
 const (
@@ -103,28 +118,24 @@ const (
 //
 // Goroutines started by Run are counted in wg; Wait blocks until they end.
 type Tracker struct {
-	db  Querier
-	pub Publisher
-	log *slog.Logger // root logger; failures are logged with their component
-	now func() time.Time
+	store Store
+	pub   Publisher
+	log   *slog.Logger // root logger; failures are logged with their component
+	now   func() time.Time
 
 	wg sync.WaitGroup
 }
 
 // NewTracker returns a tracker. log is the root logger; now is the clock.
-func NewTracker(db Querier, pub Publisher, log *slog.Logger, now func() time.Time) *Tracker {
-	return &Tracker{db: db, pub: pub, log: log, now: now}
+func NewTracker(store Store, pub Publisher, log *slog.Logger, now func() time.Time) *Tracker {
+	return &Tracker{store: store, pub: pub, log: log, now: now}
 }
 
 // Start stores a new running operation and returns its ID.
 func (t *Tracker) Start(ctx context.Context, kind Kind) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	var id int64
-	err := t.db.QueryRow(ctx,
-		`INSERT INTO operations (kind, status, started_at) VALUES ($1, 'running', $2) RETURNING id`,
-		string(kind), t.now().UTC(),
-	).Scan(&id)
+	id, err := t.store.Insert(ctx, kind, t.now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("start %s operation: %w", kind, err)
 	}
@@ -187,21 +198,13 @@ func (t *Tracker) Progress(id int64, kind Kind, done, total int, message string)
 func (t *Tracker) finish(ctx context.Context, id int64, status Status, at time.Time, errMsg, summary *string) (Kind, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	var kind string
-	err := t.db.QueryRow(ctx, `
-		UPDATE operations
-		SET status = $2, finished_at = $3, error_message = $4, result_summary = $5
-		WHERE id = $1 AND status = 'running'
-		RETURNING kind`,
-		id, string(status), at, errMsg, summary,
-	).Scan(&kind)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("finish operation %d: %w", id, ErrNotRunning)
-	}
+	kind, err := t.store.Finish(ctx, Finish{
+		ID: id, Status: status, FinishedAt: at, ErrorMessage: errMsg, ResultSummary: summary,
+	})
 	if err != nil {
 		return "", fmt.Errorf("finish operation %d: %w", id, err)
 	}
-	return Kind(kind), nil
+	return kind, nil
 }
 
 // Run starts an operation and runs fn in a new goroutine. It returns the
@@ -280,30 +283,16 @@ func call(ctx context.Context, fn Func) (summary string, err error) {
 func (t *Tracker) FailInterrupted(ctx context.Context) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	tag, err := t.db.Exec(ctx, `
-		UPDATE operations
-		SET status = 'failed', finished_at = $1, error_message = $2
-		WHERE status = 'running'`,
-		t.now().UTC(), interruptedMessage,
-	)
+	n, err := t.store.FailRunning(ctx, t.now().UTC(), interruptedMessage)
 	if err != nil {
 		return 0, fmt.Errorf("fail interrupted operations: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return n, nil
 }
 
-const selectColumns = `SELECT id, kind, status, started_at, finished_at, error_message, result_summary FROM operations`
-
-// Get returns one operation.
+// Get returns one operation, or ErrNotFound.
 func (t *Tracker) Get(ctx context.Context, id int64) (Operation, error) {
-	rows, err := t.db.Query(ctx, selectColumns+` WHERE id = $1`, id)
-	if err != nil {
-		return Operation{}, fmt.Errorf("get operation %d: %w", id, err)
-	}
-	op, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[Operation])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Operation{}, fmt.Errorf("get operation %d: %w", id, ErrNotFound)
-	}
+	op, err := t.store.Get(ctx, id)
 	if err != nil {
 		return Operation{}, fmt.Errorf("get operation %d: %w", id, err)
 	}
@@ -322,50 +311,13 @@ type ListFilter struct {
 	Limit int
 }
 
-// List returns operations in ID order. The table holds at most the retention
-// period of rows, so it has no index besides the primary key.
+// List returns operations in ID order.
 func (t *Tracker) List(ctx context.Context, f ListFilter) ([]Operation, error) {
-	rows, err := t.db.Query(ctx, selectColumns+`
-		WHERE id > $1 AND (started_at >= $2 OR finished_at >= $2)
-		ORDER BY id
-		LIMIT $3`,
-		f.AfterID, f.Since.UTC(), f.Limit,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list operations: %w", err)
-	}
-	ops, err := pgx.CollectRows(rows, pgx.RowToStructByName[Operation])
+	ops, err := t.store.List(ctx, f)
 	if err != nil {
 		return nil, fmt.Errorf("list operations: %w", err)
 	}
 	return ops, nil
-}
-
-// DeleteFinishedBefore deletes finished operations older than cutoff, in
-// batches of batchSize, each with its own deadline. Running operations are
-// kept. It returns the number of rows deleted.
-func (t *Tracker) DeleteFinishedBefore(ctx context.Context, cutoff time.Time, batchSize int) (int64, error) {
-	var total int64
-	for {
-		bctx, cancel := context.WithTimeout(ctx, dbTimeout)
-		tag, err := t.db.Exec(bctx, `
-			DELETE FROM operations
-			WHERE id IN (
-				SELECT id FROM operations
-				WHERE status <> 'running' AND finished_at < $1
-				LIMIT $2
-			)`,
-			cutoff.UTC(), batchSize,
-		)
-		cancel()
-		if err != nil {
-			return total, fmt.Errorf("delete old operations: %w", err)
-		}
-		total += tag.RowsAffected()
-		if tag.RowsAffected() < int64(batchSize) {
-			return total, nil
-		}
-	}
 }
 
 func truncate(s string, n int) string {

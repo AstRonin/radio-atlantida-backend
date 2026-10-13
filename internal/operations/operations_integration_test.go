@@ -18,6 +18,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/dbtest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -75,7 +76,7 @@ func newTracker(t *testing.T) (*operations.Tracker, *recorder, *syncBuffer) {
 	pub := &recorder{}
 	logs := &syncBuffer{}
 	log := slog.New(logging.NewHandler(logs, slog.LevelDebug))
-	return operations.NewTracker(d.Pool, pub, log, func() time.Time { return now }), pub, logs
+	return operations.NewTracker(operationsrepo.New(d.Pool), pub, log, func() time.Time { return now }), pub, logs
 }
 
 func TestOperations(t *testing.T) {
@@ -201,28 +202,4 @@ func TestFailInterruptedAndList(t *testing.T) {
 	none, err := tracker.List(ctx, operations.ListFilter{Since: now.Add(time.Second), Limit: 10})
 	require.NoError(t, err)
 	require.Empty(t, none)
-}
-
-func TestDeleteFinishedBefore(t *testing.T) {
-	tracker, _, _ := newTracker(t)
-	ctx := t.Context()
-	var ids []int64
-	for range 5 {
-		id, err := tracker.Start(ctx, operations.KindRetention)
-		require.NoError(t, err)
-		ids = append(ids, id)
-	}
-	for _, id := range ids[:4] {
-		require.NoError(t, tracker.Complete(ctx, id, "ok"))
-	}
-
-	// Batches of 3 over 4 finished rows; the running one stays.
-	deleted, err := tracker.DeleteFinishedBefore(ctx, now.Add(time.Second), 3)
-	require.NoError(t, err)
-	require.EqualValues(t, 4, deleted)
-
-	left, err := tracker.List(ctx, operations.ListFilter{Limit: 10})
-	require.NoError(t, err)
-	require.Len(t, left, 1)
-	require.Equal(t, ids[4], left[0].ID)
 }

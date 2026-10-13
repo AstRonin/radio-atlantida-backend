@@ -8,7 +8,7 @@
 # Startup configuration of every service is set here through `environment:`
 # (values from .env). The connection values the backend uses to reach Icecast
 # and Liquidsoap (host names, ports, mount) are admin settings whose code
-# defaults must match this file (internal/settings, Phase 4).
+# defaults must match this file (internal/settings, Phase 5).
 #
 # All published ports are bound to 127.0.0.1 only.
 

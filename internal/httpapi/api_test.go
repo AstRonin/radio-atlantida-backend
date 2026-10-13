@@ -59,8 +59,12 @@ func newAPIRouter(t *testing.T, ops *fakeOperations, logRoot string) (http.Handl
 		Operations: ops,
 		Logs:       logging.NewFileReader(logRoot),
 		Events:     ws.NewHub(log),
+		Now:        func() time.Time { return testNow },
 	}), logs
 }
+
+// testNow is the router's clock in tests; not UTC, so the API's conversion shows.
+var testNow = time.Date(2026, 10, 13, 10, 44, 5, 0, time.FixedZone("AMT", 4*60*60))
 
 func do(t *testing.T, h http.Handler, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -95,6 +99,19 @@ func TestGetOperation(t *testing.T) {
 	require.JSONEq(t, `{"id":12,"kind":"retention","status":"completed",
 		"started_at":"2026-10-13T06:44:00Z","finished_at":"2026-10-13T06:45:00Z",
 		"result_summary":"deleted 3 play log rows and 1 operations"}`, rec.Body.String())
+}
+
+// Until playout and outage detection exist, everything but the time is
+// unknown, and unknown is an explicit null (the update script treats it as on air).
+func TestLiveStatusUnknown(t *testing.T) {
+	t.Parallel()
+	h, _ := newAPIRouter(t, &fakeOperations{}, t.TempDir())
+
+	rec := do(t, h, http.MethodGet, "/api/status/live")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"on_air":null,"open_outage_id":null,"current_clock":null,
+		"time":"2026-10-13T06:44:05Z"}`, rec.Body.String())
 }
 
 func TestOperationErrors(t *testing.T) {
@@ -265,7 +282,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &doc))
 	require.Equal(t, "3.1.0", doc.OpenAPI)
 	require.Equal(t, "1.2.3", doc.Info.Version)
-	for _, p := range []string{"/api/operations", "/api/operations/{id}", "/api/logs/files", "/api/logs/files/{name}", "/api/ws"} {
+	for _, p := range []string{"/api/operations", "/api/operations/{id}", "/api/logs/files", "/api/logs/files/{name}", "/api/status/live", "/api/ws"} {
 		require.Contains(t, doc.Paths, p)
 	}
 

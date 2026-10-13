@@ -44,7 +44,7 @@ Migrations live in `internal/migrations` as `NNNN_name.up.sql`, are embedded in 
 
 ### Host names for `make run`
 
-From Phase 4 the backend reaches Icecast and Liquidsoap through admin settings whose defaults are the compose service names (`icecast`, `liquidsoap`). For a backend started on the host, add this line to `/etc/hosts` (the ports are published on `127.0.0.1`):
+From Phase 5 the backend reaches Icecast and Liquidsoap through admin settings whose defaults are the compose service names (`icecast`, `liquidsoap`). For a backend started on the host, add this line to `/etc/hosts` (the ports are published on `127.0.0.1`):
 
 ```
 127.0.0.1 icecast liquidsoap

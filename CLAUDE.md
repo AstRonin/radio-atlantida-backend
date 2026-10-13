@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–5.
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6.
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -51,8 +51,9 @@ cmd/backend/          subcommand dispatch (main.go) and serve wiring
 internal/
   config/             env config (caarlos0/env + godotenv); the only place that reads env
   logging/            slog JSON, components, secret masking, async writer, daily UTC rotator
-  db/                 pgx pool (UTC session, timeouts), GORM on the same pool, WithTx / WithGormTx
+  db/                 pgx pool (UTC session, timeouts), GORM on the same pool, DB.WithTx (one Tx for pgx and GORM), ConstraintError
   dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)
+  architecture/       architecture test: SQL and driver imports only in the allowed packages; handlers and jobs never import repositories
   migrations/         embedded NNNN_name.up.sql + runner (golang-migrate)
   httpapi/            chi router, middleware, health, huma API (api.go: OpenAPI, event schemas)
     errcodes/         stable problem and field error codes (never renamed; published as enums)
@@ -60,8 +61,11 @@ internal/
     handlers/         huma operations; problemFor maps domain errors to HTTP in one place
   ws/                 WebSocket hub at /api/ws and the event types
   operations/         async operations: operations row + one terminal <kind>.completed/.failed event
-  jobs/               scheduler (advisory-locked singleton runs, each an operation) and retention
-  settings/ library/ playrules/ separation/ media/   (Phases 4–5)
+  jobs/               scheduler (advisory-locked singleton runs, each an operation) and job schedules; no business rules
+  retention/          retention rules (play log, operations); jobs schedules it
+  repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
+    operations/ retention/ jobs/                   (jobs: the advisory locks)
+  settings/ library/ playrules/ separation/ media/   (Phases 5–6)
   clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
@@ -79,6 +83,7 @@ docs/                 requirements, design, phase plans
 - Database structs are never API payloads. Every endpoint has its own request/response DTOs. Validate DTOs before any write; return field errors per field.
 - Multi-table writes use explicit transactions.
 - GORM for admin CRUD; pgx for hot paths (play log, rotation, separation, reconciliation). Never GORM auto-migrate.
+- **Repository layer (§5.1).** All SQL lives in `internal/repository/<domain>`; domain code, handlers, jobs, and `cmd` contain none and import neither `gorm.io/...` nor `github.com/jackc/pgx...`. `internal/architecture` enforces it (only `internal/repository`, `internal/db`, `internal/dbtest`, `internal/migrations` are exempt; an exception needs an `allowList` entry with a reason and a comment at the code).
 - Logging never blocks. Secrets are never logged (the handler masks keys matching `password|secret|token|credential`).
 - No authentication anywhere. Listen on localhost or a private network.
 - Tests: unit tests next to the code; integration tests (`//go:build integration`) against real PostgreSQL via testcontainers-go. No DB mocks for repository tests.
@@ -105,6 +110,17 @@ docs/                 requirements, design, phase plans
 - `slog` with structured attributes, always with a `component` (`logging.For(log, logging.ComponentX)`; one component per logger — derive from the root logger, never re-tag). Error key: `err`.
 - Tests: table-driven where there are several cases, `t.Parallel()` where safe, `testify/require`.
 
+### Repository layer
+
+- A new domain package gets a repository package with the same name (`internal/library` → `internal/repository/library`), renamed together with it. Import it aliased `<domain>repo` (`operationsrepo`) where both are used.
+- One file per aggregate (`playlists.go`, `tracks.go`). It holds the SQL, the row structs for scanning, and the mapping to domain types. No business rules, DTOs, network calls, or transaction boundaries.
+- The domain declares the small interface it uses (`operations.Store`, `retention.Store`, `jobs.Locker`); the repository implements it and returns domain types and sentinels. No generic or base repository.
+- Handlers (`internal/httpapi`) and jobs (`internal/jobs`) call domain services, never repositories, not even for a plain read: they import no `internal/repository/...` package. Only `cmd` wires repositories into services; tests are exempt. `internal/architecture` enforces it.
+- Constructor `New(q db.Querier)` (or `New(d *db.DB)` for GORM), and `WithTx(tx db.Tx)` returning a bound copy. The domain service opens the transaction with `d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {...})` and passes `tx` to every repository it touches; a repository never begins or commits.
+- Errors: `pgx.ErrNoRows` → the domain's `ErrNotFound`; `db.AsConstraintError(err)` gives kind (`23505`/`23503`/`23514`/`23P01`) and constraint name → the domain's sentinel. Anything else is wrapped with context. A domain never sees `pgconn.PgError` or a GORM error.
+- SQL keywords are upper case (`SELECT`, `INSERT INTO`, …): the architecture test matches them that way, so English messages are not mistaken for SQL.
+- Tests: integration tests per repository (testcontainers via `internal/dbtest`); SQL is fine in tests for fixtures and assertions. Domain services get unit tests with fake stores.
+
 ### PostgreSQL and SQL
 
 - Parameterized queries only. Dynamic identifiers (sort column) from a fixed whitelist. No `SELECT *`.
@@ -124,4 +140,4 @@ docs/                 requirements, design, phase plans
 - Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
 - All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`request.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
 - Liquidsoap writes the journal to `.dev/journal/journal-YYYY-MM-DD.jsonl` (one JSON line per track `start`/`end`, UTC) and POSTs the same line to `BACKEND_CALLBACK_URL` (endpoint arrives in the Liquidsoap phase; 404 until then, harmless).
-- Connection settings (Icecast/Liquidsoap hosts and ports) become admin settings in Phase 4 with code defaults equal to the compose service names and ports. For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.
+- Connection settings (Icecast/Liquidsoap hosts and ports) become admin settings in Phase 5 with code defaults equal to the compose service names and ports. For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.

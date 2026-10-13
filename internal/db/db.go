@@ -58,7 +58,7 @@ func Open(ctx context.Context, databaseURL string, log *slog.Logger) (*DB, error
 	// and one limit on connections.
 	sqlDB := stdlib.OpenDBFromPool(pool)
 	gdb, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{
-		// Transactions are explicit (WithGormTx).
+		// Transactions are explicit (DB.WithTx).
 		SkipDefaultTransaction: true,
 		// Constraint violations come back as gorm.ErrDuplicatedKey etc.,
 		// still wrapping *pgconn.PgError with the constraint name.

@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
@@ -268,7 +267,7 @@ func TestConstraints(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 
-			err := inRolledBackTx(ctx, d, func(tx pgx.Tx) error {
+			err := inRolledBackTx(ctx, d, func(tx db.Querier) error {
 				if _, err := tx.Exec(ctx, fixture); err != nil {
 					t.Fatalf("fixture: %v", err)
 				}
@@ -291,10 +290,10 @@ var errRollback = errors.New("rollback")
 
 // inRolledBackTx runs fn in a transaction that is always rolled back, and
 // returns fn's error.
-func inRolledBackTx(ctx context.Context, d *db.DB, fn func(pgx.Tx) error) error {
+func inRolledBackTx(ctx context.Context, d *db.DB, fn func(db.Querier) error) error {
 	var fnErr error
-	err := db.WithTx(ctx, d.Pool, func(tx pgx.Tx) error {
-		fnErr = fn(tx)
+	err := d.WithTx(ctx, func(_ context.Context, tx db.Tx) error {
+		fnErr = fn(tx.Pgx())
 		return errRollback
 	})
 	if !errors.Is(err, errRollback) {

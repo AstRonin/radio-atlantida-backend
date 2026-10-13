@@ -48,6 +48,8 @@ type Deps struct {
 	// Operations and Logs back the REST handlers.
 	Operations handlers.OperationStore
 	Logs       handlers.LogFiles
+	// Now is the clock of the live status.
+	Now func() time.Time
 }
 
 // NewRouter builds the HTTP handler with the common middleware chain.
@@ -82,7 +84,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/readyz", h.ready)
 
 		api := newAPI(r, d.Version)
-		handlers.Register(api, handlers.Deps{Log: d.Log, Operations: d.Operations, Logs: d.Logs})
+		handlers.Register(api, handlers.Deps{Log: d.Log, Operations: d.Operations, Logs: d.Logs, Now: d.Now})
 	})
 
 	return r

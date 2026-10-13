@@ -15,6 +15,10 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
+	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
+	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -56,7 +60,7 @@ func serve(ctx context.Context) error {
 	cancel()
 
 	hub := ws.NewHub(apiLog)
-	tracker := operations.NewTracker(database.Pool, hub, log, time.Now)
+	tracker := operations.NewTracker(operationsrepo.New(database.Pool), hub, log, time.Now)
 	// Operations run only inside this process: a row still running now was
 	// cut off by the previous shutdown or crash.
 	fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -66,8 +70,8 @@ func serve(ctx context.Context) error {
 		dbLog.Warn("operations interrupted by the previous shutdown marked failed", "count", n)
 	}
 	cancel()
-	retention := jobs.NewRetention(database.Pool, tracker, time.Now)
-	scheduler := jobs.NewScheduler(database.Pool, tracker, log, retention.Job())
+	cleanup := retention.New(retentionrepo.New(database.Pool), time.Now)
+	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log, jobs.Retention(cleanup.Run))
 
 	// Request contexts are not cancelled by the shutdown signal itself:
 	// in-flight requests may finish during the drain. They are cancelled when
@@ -81,6 +85,7 @@ func serve(ctx context.Context) error {
 		Events:     hub,
 		Operations: tracker,
 		Logs:       logging.NewFileReader(cfg.LogRoot),
+		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
 	// WebSockets when it starts.

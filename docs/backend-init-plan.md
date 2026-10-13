@@ -12,8 +12,8 @@ Last updated: 2026-10-13
   - `docs/backend-init-plan.md` — this plan. It says what to build now.
 - This plan is the task list for Claude Code. Work one phase at a time. Each phase ends with a green build, passing tests, and a commit (one PR per phase).
 - The technical design (`tech-design.md`) is the authority. If this plan and the design disagree, stop and ask.
-- Section 9 lists decisions and open points. Items marked **ASK** must be confirmed by the developers before the phase that needs them. Items marked **DEFAULT** are applied unless the developers say otherwise.
-- Scope of initialization: Phases 1 to 5. They produce a running service with the full schema, the API contract pipeline, settings, and the library CRUD. The rotation engine, Liquidsoap, outages, and live voice are later phases (Section 8), planned in their own documents.
+- Section 10 lists decisions and open points. Items marked **ASK** must be confirmed by the developers before the phase that needs them. Items marked **DEFAULT** are applied unless the developers say otherwise.
+- Scope of initialization: Phases 1 to 6. They produce a running service with the full schema, the API contract pipeline, the repository layer, settings, and the library CRUD. The rotation engine, Liquidsoap, outages, and live voice are later phases (Section 9), planned in their own documents.
 
 ## 1. Ground rules for the code
 
@@ -28,6 +28,7 @@ Last updated: 2026-10-13
 - Validation happens on DTOs before any write. Field errors are returned per field.
 - Multi-table writes use explicit transactions.
 - GORM for admin CRUD, pgx for hot paths (play log, rotation, separation, reconciliation). GORM auto-migrate is never used.
+- All SQL lives in the repository layer (`internal/repository/<domain>`, tech-design §5.1). Domain code, handlers, and jobs contain no SQL. Migration files and test fixtures are the only exceptions.
 - Logging never blocks. Secrets are never logged.
 - No authentication anywhere (by design). The server listens on localhost or a private network only.
 - Tests: unit tests next to the code; integration tests against a real PostgreSQL via testcontainers-go. No mocks of the database for repository tests.
@@ -36,7 +37,7 @@ Last updated: 2026-10-13
 
 **Structure and dependencies**
 
-- Packages are organized by domain (`library`, `playrules`, `rotation`), not by layer (`models`, `services`, `utils`). No `util` or `common` packages.
+- Packages are organized by domain (`library`, `playrules`, `rotation`), not by layer (`models`, `services`, `utils`). No `util` or `common` packages. The repository layer (`internal/repository/<domain>`) is the one deliberate exception; its packages are still named after the domains.
 - Interfaces are small and defined where they are used (by the consumer), not next to the implementation. Accept interfaces, return concrete types.
 - No global mutable state and no `init()` with side effects. Dependencies are passed through constructors (`NewService(db, log, clock)`). `main` wires everything.
 - Configuration is read once at startup. `os.Getenv` is not called anywhere else.
@@ -77,6 +78,7 @@ Last updated: 2026-10-13
 
 **Queries**
 
+- All SQL is written in the repository layer (`internal/repository/<domain>`, tech-design §5.1), and nowhere else.
 - Always use parameterized queries (`$1`, `$2`). Never build SQL by concatenating values. Dynamic identifiers (sort column) only from a fixed whitelist.
 - No `SELECT *`. List the columns explicitly.
 - Avoid N+1 queries: load related data with a join or one `WHERE id = ANY($1)` query. In GORM, use `Preload` or `Joins` deliberately.
@@ -121,7 +123,7 @@ radio-atlantida-backend/
   internal/
     config/                      # env config (caarlos0/env + godotenv)
     logging/                     # slog JSON, async writer, daily rotator, secret masking
-    db/                          # pgx pool, GORM handle, tx helper, UTC session
+    db/                          # pgx pool, GORM handle, tx helper, UTC session, SQLSTATE mapping (no SQL statements)
     migrations/                  # embedded *.up.sql + runner (golang-migrate, iofs)
     httpapi/                     # chi router, middleware, error format, OpenAPI wiring
       dto/                       # request/response DTOs per resource
@@ -133,8 +135,17 @@ radio-atlantida-backend/
     playrules/                   # play rules + targets
     separation/                  # separation rules
     media/                       # MEDIA_ROOT path resolution, file streaming (preview)
-    jobs/                        # in-process scheduler (retention etc.)
-    # later phases:
+    jobs/                        # in-process scheduler; holds no business rules
+    retention/                   # retention rules: play log, operations (jobs calls it)
+    repository/                  # the only place with SQL (tech-design §5.1); one package per domain, named as the domain
+      operations/
+      retention/
+      jobs/                      # advisory locks of the scheduler
+      settings/                  # Phase 5
+      library/                   # Phase 6
+      playrules/                 # Phase 6
+      separation/                # Phase 6
+    # later phases (each gets its repository package when it is built):
     clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/
   api/                           # generated openapi.json (CI artifact, not hand-edited)
   testdata/
@@ -157,7 +168,7 @@ radio-atlantida-backend/
   README.md
 ```
 
-`docker-compose.dev.yml` is for development and testing only. The production compose file stays in `radio-atlantida-deploy` (§1.1 of the design); see 9.5.
+`docker-compose.dev.yml` is for development and testing only. The production compose file stays in `radio-atlantida-deploy` (§1.1 of the design); see 10.5.
 
 ## 3. Phase 1 — Skeleton
 
@@ -169,7 +180,7 @@ Tasks:
 2. `internal/config`: config struct with `caarlos0/env/v11` tags; load `.env` with `godotenv` without overriding variables that are already set.
    - Required: `DATABASE_URL`, `MEDIA_ROOT`, `LOG_ROOT`.
    - Secrets (required later, optional in Phase 1): `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`.
-   - `HTTP_ADDR` (default `127.0.0.1:8080`) — see 9.4.
+   - `HTTP_ADDR` (default `127.0.0.1:8080`) — see 10.4.
    - Fail fast with a clear message listing every missing variable.
 3. `internal/logging`:
    - `log/slog` JSON handler. Fields: `time` (RFC 3339), `level`, `msg`, `component`, error fields; `request_id` for API logs.
@@ -187,13 +198,13 @@ Tasks:
    | Service | Image | Purpose | Ports (host) | Mounts |
    |---------|-------|---------|--------------|--------|
    | `db` | `postgres:17` (pinned minor) | Database | `127.0.0.1:5432` | named volume `pgdata` |
-   | `icecast` | `libretime/icecast:2.4.4-alpine` (see 9.5) | Stream server; the backend checks its mount (§7.1 of the design) | `127.0.0.1:8000` | none (configured by environment variables) |
+   | `icecast` | `libretime/icecast:2.4.4-alpine` (see 10.5) | Stream server; the backend checks its mount (§7.1 of the design) | `127.0.0.1:8000` | none (configured by environment variables) |
    | `liquidsoap` | `savonet/liquidsoap` (pinned 2.x tag) | Playout: request queue, fades, fallback, harbor input, callbacks, playout journal | `127.0.0.1:1234` (telnet control), `127.0.0.1:8005` (harbor) | `${MEDIA_ROOT}` → `/media` (ro), `./.dev/journal` → `/journal` (rw), `dev/liquidsoap/radio.liq` (ro) |
    | `backend` | built from `docker/Dockerfile` | The application in a container (profile `app`) | `127.0.0.1:8080` | `${MEDIA_ROOT}` (ro), `${LOG_ROOT}` (rw), `./.dev/journal` (ro) |
 
    Details:
    - `db`: user, password, and database from `.env` (dev values in `.env.example`). Health check `pg_isready`.
-   - **Startup configuration lives in the compose file** (9.5): everything a service needs to start is set in `docker-compose.dev.yml` through `environment:` (values from `.env`). No separate service config files except the Liquidsoap script.
+   - **Startup configuration lives in the compose file** (10.5): everything a service needs to start is set in `docker-compose.dev.yml` through `environment:` (values from `.env`). No separate service config files except the Liquidsoap script.
    - `icecast`: configured only through the image's environment variables: `ICECAST_SOURCE_PASSWORD`, `ICECAST_ADMIN_USERNAME`, `ICECAST_ADMIN_PASSWORD`, `ICECAST_RELAY_PASSWORD`, `ICECAST_HOSTNAME`, `ICECAST_MAX_CLIENTS`, `ICECAST_MAX_SOURCES`. Health check on `/status-json.xsl`. The mount `/radio` is created when Liquidsoap connects as a source.
    - `liquidsoap`: the dev script `radio.liq` reads its startup values from environment variables set in compose (`ICECAST_HOST=icecast`, `ICECAST_PORT=8000`, `ICECAST_MOUNT=/radio`, `ICECAST_SOURCE_PASSWORD`, `TELNET_PORT=1234`, `HARBOR_PORT=8005`, `JOURNAL_DIR=/journal`, `BACKEND_CALLBACK_URL`). The script is minimal but uses the same mechanisms as production (§8 of the design):
      - a request queue fed through the telnet control interface (`request.push`);
@@ -234,7 +245,7 @@ Tasks:
    - `broadcast_outages`, `scheduled_items`, `filler_requests`, `play_log`.
    - `settings`, `operations`.
    - All indexes from §4 of the design, including the partial unique indexes (`filler_requests` pending, `broadcast_outages` open).
-4. Schema conventions (see 9.3):
+4. Schema conventions (see 10.3):
    - Primary keys: `bigint GENERATED ALWAYS AS IDENTITY`.
    - Enum-like columns: `text` + `CHECK (... IN (...))`, not PostgreSQL enum types (easier expand/contract).
    - Every instant: `timestamptz NOT NULL DEFAULT now()` where applicable.
@@ -250,14 +261,15 @@ Tasks:
 
 Tasks:
 
-1. OpenAPI generation (library per 9.1). Every endpoint is registered with typed request/response DTOs, so the spec is produced from code. `backend openapi` prints the spec. CI stores `api/openapi.json` as a release artifact for `radio-atlantida-frontend`.
+1. OpenAPI generation (library per 10.1). Every endpoint is registered with typed request/response DTOs, so the spec is produced from code. `backend openapi` prints the spec. CI stores `api/openapi.json` as a release artifact for `radio-atlantida-frontend`.
 2. Error format (one shape for all errors), RFC 9457 problem details:
    ```json
-   { "type": "...", "title": "Validation failed", "status": 422,
-     "detail": "...", "errors": [ { "field": "elements[2].fixed_minute", "message": "..." } ],
+   { "type": "...", "title": "Validation failed", "status": 422, "code": "validation_failed",
+     "detail": "...", "errors": [ { "field": "elements[2].fixed_minute", "code": "range", "message": "..." } ],
      "request_id": "..." }
    ```
    Business refusals (for example, "type is in use") use the same shape with a list of the blocking entities in an `extensions`-style field (for example, `used_by: [{ "kind": "playlist", "id": 3, "name": "Pop" }]`).
+   - Every problem response carries a stable `code` (for example `playlist_type_in_use`, `system_type_not_deletable`, `play_rule_in_use`). Every field error carries a stable `code` too (for example `required`, `range`, `format`). The codes are constants in one Go package (`internal/httpapi/errcodes`), listed in the generated OpenAPI document as an enum, so the frontend can translate messages by code (see the frontend plan, 1.3). Codes are never renamed once released; new codes are added. `title` and `detail` are English and are for logs and developers only.
 3. `internal/ws`: hub with `coder/websocket` at `GET /api/ws`. Broadcast to all connected panels. Envelope:
    ```json
    { "type": "track_plan.built", "time": "2026-10-13T06:44:00Z", "operation_id": 12, "data": { } }
@@ -268,18 +280,40 @@ Tasks:
 5. Errors at ERROR level are also pushed to the panel as an `error.alert` event (§10.1 of the design).
 6. Logs API: `GET /api/logs/files`, `GET /api/logs/files/{name}?level=&component=&limit=&offset=`. File name must match `^app-\d{4}-\d{2}-\d{2}\.log$`; read only from `LOG_ROOT`.
 7. `internal/jobs`: a small in-process scheduler (ticker-based, UTC). First jobs: log file cleanup (already in the rotator) and `operations` retention (10 days). Play log retention is added here too (`DELETE ... WHERE status IN ('aired','truncated') AND started_at < now() - interval '10 days'`, plus resolved missed rows by `resolved_at`), because the table already exists.
+8. Live status endpoint `GET /api/status/live` (deploy plan, 8.5): returns `{ "on_air": bool|null, "open_outage_id": int|null, "current_clock": string|null, "time": "<UTC>" }`. Until the Liquidsoap and outage phases (Section 9, items 9 and 10) exist, `on_air`, `open_outage_id` and `current_clock` are `null`. `null` means unknown, never off-air; callers must treat it as on air. Documented in the OpenAPI spec and covered by one test.
 
-**Done when:** `backend openapi` outputs a valid spec (checked by a validator in CI); a test operation emits its event over WebSocket and is readable via REST; validation errors come back per field.
+**Done when:** `backend openapi` outputs a valid spec (checked by a validator in CI); a test operation emits its event over WebSocket and is readable via REST; validation errors come back per field; `GET /api/status/live` answers with the unknown-state values.
 
-## 6. Phase 4 — Settings
+## 6. Phase 4 — Repository layer
+
+**Goal:** all SQL is in one layer, `internal/repository/<domain>`, with one package per domain (tech-design §5.1). The queries written in Phases 1 to 3 move into it.
+
+Tasks:
+
+1. **Layer skeleton.** Create `internal/repository/operations` and `internal/repository/retention`. Package names equal the domain package names (`operations`, `retention`). Where both are imported in one file, the repository import is aliased `operationsrepo` or `retentionrepo`, so both names stay visible. One file per aggregate.
+2. **Domain interfaces.** `internal/operations` and `internal/retention` declare the small interfaces they need (for example `operations.Store`, `retention.Store`), next to where they are used. The repositories implement them and return domain types. No generic or base repository.
+3. **Transaction handle.** Extend `internal/db` so a transaction is passed explicitly: `db.WithTx(ctx, func(ctx context.Context, tx db.Tx) error)`, where `db.Tx` serves both pgx and GORM. Repositories get a bound copy through `WithTx(tx)`. A repository never begins or commits a transaction itself.
+4. **Error mapping.** `internal/db` translates SQLSTATE `23505`, `23503`, and `23514` together with the constraint name into a `db.ConstraintError`. Each repository maps it to its own domain sentinel error. Any other error is wrapped with context, never mapped.
+5. **Move the existing queries.**
+   - `operations` (Phase 3): insert of the running row, terminal status update, select by ID, and list since a time → `internal/repository/operations`.
+   - Retention (Phase 3, in `internal/jobs`): delete of `operations` older than 10 days, and delete of `play_log` rows with status `aired` or `truncated` older than 10 days → `internal/repository/retention`. The rule lives in `internal/retention`; `internal/jobs` only schedules it.
+   - Advisory lock of the scheduler (Phase 3, in `internal/jobs`): `pg_try_advisory_lock` and `pg_advisory_unlock` → `internal/repository/jobs`, behind the `jobs.Locker` interface. The repository package is named after the domain package `internal/jobs`.
+   - Not moved, because they are not query statements: the connection probe behind `/readyz` (stays in `internal/db`), the migration runner and its SQL files (`internal/migrations`), and log file cleanup (file I/O in `internal/logging`).
+6. **Architecture test.** A test in `internal/architecture` scans all non-test Go files. It fails if SQL statements (`SELECT`, `INSERT INTO`, `UPDATE … SET`, `DELETE FROM`, `ON CONFLICT`) or imports of `gorm.io/gorm` and `github.com/jackc/pgx` appear outside `internal/repository/`, `internal/db/`, `internal/dbtest/`, and `internal/migrations/`. The failure message names the file and line. A deliberate exception needs a comment and an entry in the test's allow list.
+7. **Repository tests.** Integration tests for each repository against PostgreSQL (testcontainers, through `internal/dbtest`). The existing operations and retention tests keep their behaviour; only the location of the SQL changes. Tests may use SQL for fixtures and assertions.
+8. **CLAUDE.md.** Add the layer rule (tech-design §5.1), the rule "a new domain package gets a repository package with the same name", and the updated layout of Section 2.
+
+**Done when:** the architecture test passes, and it fails when a SQL statement is added temporarily to `internal/operations` (checked once, then reverted); every repository has integration tests; `make lint test` passes.
+
+## 7. Phase 5 — Settings
 
 **Goal:** all runtime settings in the database, edited through the API (§6.3 of the design).
 
 Tasks:
 
-1. `internal/settings`: a registry of typed definitions: key, Go type, default, validator, `apply` mode (`immediate` or `reconnect`), and a `secret` flag (secrets are never stored here; the API only reports whether the env secret is set).
-2. Initial keys (grouped as in §6.3): station (timezone `Asia/Yerevan`, name), stream output (Icecast host, port, mount, codec, bitrate, sample rate, channels, loudness target, metadata, HLS flag), Liquidsoap (music gain, `fade_out_ms` 2500 in 2000..3000, harbor port, control host/port — see 9.4), rotation (horizons, lookahead 2..3, tolerance defaults, default filler mode), filler (reminder deadline, fallback `random`), outage detection (heartbeat 10 s, Icecast check 5 s, failures 2), retention (play log 10, logs 10), emergency playlist id.
-   - **Code defaults equal the dev compose values** (9.4, item 2). The connection settings to Icecast and Liquidsoap are stored in the database and edited in the admin panel; until the manager saves a value, the code default is used. Defaults: Icecast host `icecast`, port `8000`, mount `/radio`, codec MP3, bitrate 128 kbps, sample rate 44100, channels 2; Liquidsoap control host `liquidsoap`, port `1234`, harbor port `8005`. The host names are the compose service names, so the defaults work for the `app` profile and for the production stack in `radio-atlantida-deploy`, which uses the same service names.
+1. `internal/settings`: a registry of typed definitions. Persistence goes through `internal/repository/settings`; the registry itself holds no SQL: key, Go type, default, validator, `apply` mode (`immediate` or `reconnect`), and a `secret` flag (secrets are never stored here; the API only reports whether the env secret is set).
+2. Initial keys (grouped as in §6.3): station (timezone `Asia/Yerevan`, name), stream output (Icecast host, port, mount, codec, bitrate, sample rate, channels, loudness target, metadata, HLS flag), Liquidsoap (music gain, `fade_out_ms` 2500 in 2000..3000, harbor port, control host/port — see 10.4), rotation (horizons, lookahead 2..3, tolerance defaults, default filler mode), filler (reminder deadline, fallback `random`), outage detection (heartbeat 10 s, Icecast check 5 s, failures 2), retention (play log 10, logs 10), emergency playlist id.
+   - **Code defaults equal the dev compose values** (10.4, item 2). The connection settings to Icecast and Liquidsoap are stored in the database and edited in the admin panel; until the manager saves a value, the code default is used. Defaults: Icecast host `icecast`, port `8000`, mount `/radio`, codec MP3, bitrate 128 kbps, sample rate 44100, channels 2; Liquidsoap control host `liquidsoap`, port `1234`, harbor port `8005`. The host names are the compose service names, so the defaults work for the `app` profile and for the production stack in `radio-atlantida-deploy`, which uses the same service names.
    - For a backend started on the host with `make run`, the README tells the developer to add one line to the hosts file: `127.0.0.1 icecast liquidsoap` (the ports are published to `127.0.0.1`). The alternative is to change the two hosts in the admin panel.
    - The defaults are not seeded by a migration. Migrations seed only system rows (1.2), and `GET /api/settings` must be able to report `is_default` (§6.3 of the design: "Defaults are defined in code and used until a value is saved").
    - The values in `docker-compose.dev.yml` and the code defaults must match. A unit test compares the default keys with a small table of expected dev values, and a comment in the compose file points to `internal/settings`.
@@ -289,9 +323,9 @@ Tasks:
 
 **Done when:** reading an unsaved key returns its default; an invalid value returns a field error; secrets never appear in any response or log.
 
-## 7. Phase 5 — Library CRUD and track preview
+## 8. Phase 6 — Library CRUD and track preview
 
-**Goal:** the manager can build the library: playlist types, playlists, artists, tracks, play rules, separation rules. Endpoints follow §6.4 of the design.
+**Goal:** the manager can build the library: playlist types, playlists, artists, tracks, play rules, separation rules. Endpoints follow §6.4 of the design. Persistence goes through `internal/repository/library`, `playrules`, and `separation` (Phase 4).
 
 Tasks:
 
@@ -306,34 +340,34 @@ Tasks:
 
 **Done when:** the full library flow works through the API and the generated OpenAPI spec covers every endpoint.
 
-## 8. Later phases (outline only, separate plans)
+## 9. Later phases (outline only, separate plans)
 
-6. Clocks and grid: clock CRUD with elements and `playlist_ids`, placement (`flow/start/end/fixed`), segments, replacement of fixed elements, two-step save with dry check and filler choice (§6.0, §7.2), grid slots up to 30 days.
-7. Rotation engine: candidate union, separation and play rule checks against `play_log` + `scheduled_items`, tolerance fit, shortfall filler, overflow truncation, emergency steps; deterministic with a seed; rolling 24–48 h plan job; filler requests and reminders.
-8. Liquidsoap integration: control client (`request.push`, 2–3 ahead), callbacks endpoint, hour-boundary switching, music gain, emergency mode.
-9. Outages and missed items: detector (Icecast mount check, callbacks heartbeat, control link), marking, playout journal reconciliation, played-tracks list, reschedule and dismiss.
-10. Import pipeline: ffmpeg/ffprobe analysis, quality thresholds, transcoding to the broadcast standard.
-11. Live voice: WebRTC bridge to the Liquidsoap harbor input.
-12. CI/CD: `release.yml` builds and pushes `ghcr.io/astronin/radio-atlantida-backend:<tag>` on `v*` tags and publishes `openapi.json`. (A minimal `ci.yml` with lint, unit and integration tests is created in Phase 1.)
+7. Clocks and grid: clock CRUD with elements and `playlist_ids`, placement (`flow/start/end/fixed`), segments, replacement of fixed elements, two-step save with dry check and filler choice (§6.0, §7.2), grid slots up to 30 days.
+8. Rotation engine: candidate union, separation and play rule checks against `play_log` + `scheduled_items`, tolerance fit, shortfall filler, overflow truncation, emergency steps; deterministic with a seed; rolling 24–48 h plan job; filler requests and reminders.
+9. Liquidsoap integration: control client (`request.push`, 2–3 ahead), callbacks endpoint, hour-boundary switching, music gain, emergency mode.
+10. Outages and missed items: detector (Icecast mount check, callbacks heartbeat, control link), marking, playout journal reconciliation, played-tracks list, reschedule and dismiss.
+11. Import pipeline: ffmpeg/ffprobe analysis, quality thresholds, transcoding to the broadcast standard.
+12. Live voice: WebRTC bridge to the Liquidsoap harbor input.
+13. CI/CD: `release.yml` builds and pushes `ghcr.io/astronin/radio-atlantida-backend:<tag>` on `v*` tags and publishes `openapi.json`. (A minimal `ci.yml` with lint, unit and integration tests is created in Phase 1.)
 
-## 9. Decisions and open points
+## 10. Decisions and open points
 
-### 9.1 OpenAPI library — ASK
+### 10.1 OpenAPI library — ASK
 
 The design leaves the choice open. Recommendation: **huma v2** (`github.com/danielgtaylor/huma/v2`) with the chi adapter (`humachi`). It generates OpenAPI 3.1 from Go types, validates requests from struct tags, and returns RFC 9457 errors out of the box, which matches §6, §6.2 and §6.4 of the design. Alternatives: swaggo (comment-based, OpenAPI 2, weaker typing), ogen (spec-first, the opposite of "generated from Go code"). WebSocket event schemas are registered in the huma schema registry manually.
 
-### 9.2 Greenfield schema — DEFAULT
+### 10.2 Greenfield schema — DEFAULT
 
 The v7-7 and v7-8 migration notes in §9.2 of the design (copying from `categories` and `daypart_rules`) describe a migration from an earlier version. This project starts from an empty database, so `0001_init` creates the final model directly. No `categories` or `daypart_rules` tables are created.
 
-### 9.3 Schema conventions — DEFAULT
+### 10.3 Schema conventions — DEFAULT
 
 `bigint` identity keys, `text` + `CHECK` instead of PostgreSQL enums, `timestamptz` everywhere, PostgreSQL 17.
 
-### 9.4 Items missing from the design — ASK
+### 10.4 Items missing from the design — ASK
 
 1. **HTTP listen address** is not listed among environment variables. Proposal: `HTTP_ADDR` in env, default `127.0.0.1:8080` (in Docker: `0.0.0.0:8080` on the internal network).
-2. **Liquidsoap control host/port and callback URL** — **DECIDED.** Connection settings (Icecast host, port, mount, stream format; Liquidsoap control host and port, harbor port) are admin settings in the database, with code defaults equal to the dev compose values (Phase 4, task 2). Credentials stay in env. The callback URL is a startup setting of Liquidsoap and is set in the compose file (`BACKEND_CALLBACK_URL`).
+2. **Liquidsoap control host/port and callback URL** — **DECIDED.** Connection settings (Icecast host, port, mount, stream format; Liquidsoap control host and port, harbor port) are admin settings in the database, with code defaults equal to the dev compose values (Phase 5, task 2). Credentials stay in env. The callback URL is a startup setting of Liquidsoap and is set in the compose file (`BACKEND_CALLBACK_URL`).
 3. **Clock default filler mode.** §7 and §7.2 refer to "the clock's default mode", but `clocks` has no such column. Proposal: add `clocks.default_filler_mode` (nullable; falls back to the global setting).
 4. **`play_log.source`** is "auto or live" in §4, but §8.6 logs `source = emergency`. Proposal: `auto`, `live`, `emergency`.
 5. **Playout journal access.** Reconciliation (§7.1) reads the Liquidsoap journal, but §9 mounts the journal only into `liquidsoap`. Proposal: mount the same host directory read-only into `backend`; path via env `PLAYOUT_JOURNAL_ROOT` (another host path, like `MEDIA_ROOT`).
@@ -341,16 +375,28 @@ The v7-7 and v7-8 migration notes in §9.2 of the design (copying from `categori
 7. **Missed marking scans `aired` items in `scheduled_items`**, but aired items are moved to `play_log` (§4.1). Proposal: marking scans `planned` and `queued` only; aired items are already confirmed.
 8. **§9.2 step 8** says "does not start the new `api`"; the service is named `backend`. Fix in the design.
 
-### 9.5 Dev stack and service configuration — DECIDED
+### 10.5 Dev stack and service configuration — DECIDED
 
 1. **Two kinds of configuration.**
    - *Startup configuration* of a service (passwords, ports, host name, limits) lives in the compose file of each repository (`environment:` with values from `.env`). Icecast needs no config file. Liquidsoap needs its script, which reads the startup values from the environment.
-   - *Connection configuration* (how the backend reaches Icecast and Liquidsoap, and the stream format) lives in the database and is edited in the admin panel, so the manager can change it without touching files. Code defaults match the dev compose values (Phase 4).
+   - *Connection configuration* (how the backend reaches Icecast and Liquidsoap, and the stream format) lives in the database and is edited in the admin panel, so the manager can change it without touching files. Code defaults match the dev compose values (Phase 5).
 2. **Liquidsoap script.** The backend repository keeps a minimal dev script in `dev/liquidsoap/radio.liq`. The deploy repository keeps the production script in `config/`. When the interface the backend relies on changes (telnet commands, callback payload, journal format), both scripts are updated in the same release.
 3. **Icecast image:** `libretime/icecast:2.4.4-alpine` (small Alpine image, stable Icecast 2.4.4, configured by environment variables, also published as `ghcr.io/libretime/icecast`). The same tag is used in `radio-atlantida-deploy`. The image maintainers rebuild tags when base packages change, so for reproducible builds the tag may be pinned with its sha256 digest.
 4. **Liquidsoap version:** pin one 2.x tag of `savonet/liquidsoap` for both repositories; the dev script is written for that version. Claude Code picks the latest stable 2.x tag and reports it.
 
-## 10. Prompt for the first Claude Code session
+### 10.6 Stable error codes — DECIDED
+
+1. Problem responses and field errors carry stable machine-readable codes (Phase 3, task 2). The frontend translates messages by code, so the UI can be shown in any language (frontend plan, 1.3). The English `title` and `detail` are a fallback for logs and for developers.
+2. Codes live in one package, `internal/httpapi/errcodes`, and are published in the OpenAPI document as enums. A new refusal needs a new code, added in the same change as the rule that raises it.
+3. Renaming or removing a released code is a breaking change for the frontend and needs a coordinated release.
+
+### 10.7 Repository layer — DECIDED
+
+1. All SQL lives in `internal/repository/<domain>` (tech-design §5.1). Each repository package is named after its domain package and is renamed together with it.
+2. Domain packages declare the interfaces they need; repositories implement them. No generic or base repository.
+3. An architecture test enforces the rule (Phase 4, task 6).
+
+## 11. Prompt for the first Claude Code session
 
 Before the session, copy `base.md`, `tech-design.md`, and `backend-init-plan.md` into `docs/` of the empty repository.
 
@@ -362,4 +408,4 @@ Before the session, copy `base.md`, `tech-design.md`, and `backend-init-plan.md`
 >
 > Implement Phase 1 of `docs/backend-init-plan.md`. Follow Section 1 (ground rules, including 1.1 Go and 1.2 PostgreSQL/SQL best practices) and Section 2 (layout). Build the full dev stack of task 9 (`db`, `icecast`, `liquidsoap`, `backend` profile) with pinned image versions, and the test media script. Write `CLAUDE.md` as described in task 11, including the project context summary of `docs/base.md`.
 >
-> Apply the DEFAULT and DECIDED items of Section 9. For ASK items, use the proposals unless told otherwise, and list in your final message which ones you applied and which image tags you pinned. If the requirements, the design, and the plan disagree, stop and ask. Do not start Phase 2. Finish with `make stack-up` healthy, `make lint test` passing, and a short summary of what was created.
+> Apply the DEFAULT and DECIDED items of Section 10. For ASK items, use the proposals unless told otherwise, and list in your final message which ones you applied and which image tags you pinned. If the requirements, the design, and the plan disagree, stop and ask. Do not start Phase 2. Finish with `make stack-up` healthy, `make lint test` passing, and a short summary of what was created.

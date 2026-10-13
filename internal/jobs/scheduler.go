@@ -1,5 +1,6 @@
 // Package jobs runs background jobs in the backend process: a small
-// ticker-based scheduler and the jobs themselves (retention).
+// ticker-based scheduler and the schedules of the jobs. It holds no business
+// rules; each job runs a function of its domain package (retention).
 //
 // Every run is an asynchronous operation (§6.5): it has an operations row
 // and ends with a <kind>.completed or <kind>.failed event. A job is a
@@ -15,7 +16,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
@@ -40,17 +40,27 @@ type Operations interface {
 	Do(ctx context.Context, kind operations.Kind, component logging.Component, fn operations.Func) (int64, error)
 }
 
+// ErrLocked reports that another session holds the lock of a job.
+var ErrLocked = errors.New("advisory lock held by another session")
+
+// Locker runs fn while holding a PostgreSQL session-level advisory lock on
+// key (internal/repository/jobs). It returns ErrLocked without running fn if
+// another session holds the lock.
+type Locker interface {
+	WithLock(ctx context.Context, key int64, fn func() error) error
+}
+
 // Scheduler runs jobs on their intervals until its context ends.
 type Scheduler struct {
-	pool *pgxpool.Pool
-	ops  Operations
-	log  *slog.Logger // root logger
-	jobs []Job
+	locks Locker
+	ops   Operations
+	log   *slog.Logger // root logger
+	jobs  []Job
 }
 
 // NewScheduler returns a scheduler for jobs.
-func NewScheduler(pool *pgxpool.Pool, ops Operations, log *slog.Logger, jobs ...Job) *Scheduler {
-	return &Scheduler{pool: pool, ops: ops, log: log, jobs: jobs}
+func NewScheduler(locks Locker, ops Operations, log *slog.Logger, jobs ...Job) *Scheduler {
+	return &Scheduler{locks: locks, ops: ops, log: log, jobs: jobs}
 }
 
 // Run starts one goroutine per job and returns when ctx is cancelled and
@@ -91,56 +101,23 @@ func (s *Scheduler) runOnce(ctx context.Context, j Job) {
 	rctx, cancel := context.WithTimeout(ctx, j.Timeout)
 	defer cancel()
 
-	err := withAdvisoryLock(rctx, s.pool, lockKey(j.Kind), func() error {
+	err := s.locks.WithLock(rctx, lockKey(j.Kind), func() error {
 		// The outcome of the job is stored, logged, and published by Do;
 		// an error here means the operation itself could not be stored.
 		_, err := s.ops.Do(rctx, j.Kind, j.Component, j.Run)
 		return err
 	})
 	switch {
-	case errors.Is(err, errLocked):
+	case errors.Is(err, ErrLocked):
 		log.Info("job skipped: another run holds the lock", "kind", string(j.Kind))
 	case err != nil && ctx.Err() == nil:
 		log.Error("job run failed", "kind", string(j.Kind), logging.KeyError, err)
 	}
 }
 
-var errLocked = errors.New("advisory lock held by another session")
-
 // lockKey derives the advisory lock key of a job kind.
 func lockKey(kind operations.Kind) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte("jobs/" + kind))
 	return int64(h.Sum64()) //nolint:gosec // G115: a hash; wrapping to negative keys is fine
-}
-
-// withAdvisoryLock runs fn while holding a session-level advisory lock on a
-// dedicated connection, or returns errLocked if another session holds it.
-// The connection is held for the whole run, so fn should use other
-// connections from the pool.
-func withAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, key int64, fn func() error) error {
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire connection for lock: %w", err)
-	}
-	defer conn.Release()
-
-	var locked bool
-	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&locked); err != nil {
-		return fmt.Errorf("take advisory lock: %w", err)
-	}
-	if !locked {
-		return errLocked
-	}
-	defer func() {
-		// Unlock even when ctx is cancelled; a failed unlock is released
-		// when the connection closes.
-		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if _, err := conn.Exec(uctx, `SELECT pg_advisory_unlock($1)`, key); err != nil {
-			// Drop the connection instead; the lock goes with it.
-			_ = conn.Conn().Close(uctx)
-		}
-	}()
-	return fn()
 }

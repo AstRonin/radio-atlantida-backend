@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-8)
+Status: Draft (v7-10)
 Last updated: 2026-10-13
 
 ## 1. Overview
@@ -75,9 +75,10 @@ Responsibilities:
 
 | Component   | Responsibility |
 |-------------|----------------|
-| Angular     | Management UI: library with track preview player, playlists, playlist types, clocks, grid, play rules, filler dialogs, played-tracks list (aired, truncated, missed), live control, monitoring. Uses a TypeScript client generated from the backend OpenAPI specification |
+| Angular     | Management UI: library with track preview player, playlists, playlist types, clocks (including each clock's default filler mode), grid, play rules, filler dialogs, played-tracks list (aired, truncated, missed), live control, monitoring. Uses a TypeScript client generated from the backend OpenAPI specification |
 | Go          | Decides what plays next, enforces rules, fills short clocks, detects outages, marks missed items, reconciles the play log, relays live voice, publishes the API contract |
 | PostgreSQL  | Source of truth for library metadata, rules, grid, track plan, filler pools, play history, missed items, outage periods, settings |
+| Repository layer (inside Go) | The only code that contains SQL: one package per domain under `internal/repository` (§5.1). Business logic reaches the database only through it |
 | Liquidsoap  | Plays audio in real time, mixes live voice with music, applies fades, handles fallback, keeps a local playout journal |
 | Icecast     | Distributes the audio stream to listeners and reports its own connection state |
 | Docker      | Packages and runs all services except the media files |
@@ -92,7 +93,7 @@ Responsibilities:
 | UI events         | WebSocket                                 | Now playing, progress, live state, alerts, filler requests, outage and missed-item events |
 | Live voice        | WebRTC into a Go bridge                   | Feeds a Liquidsoap input |
 | Database          | PostgreSQL                                | Relational core, JSONB for optional element settings |
-| DB access         | GORM for admin CRUD; pgx for hot paths    | See §5 |
+| DB access         | GORM for admin CRUD; pgx for hot paths    | See §5 and §5.1 |
 | Playout           | Liquidsoap                                | Linux container |
 | Stream server     | Icecast                                   | Test instance in Docker; production server configured in the admin panel |
 | Audio tooling     | ffmpeg                                    | Transcoding and quality analysis on import |
@@ -114,7 +115,7 @@ Responsibilities:
 
 **Configuration split**
 
-- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (Icecast source password, Liquidsoap control credentials), and the host paths `MEDIA_ROOT` and `LOG_ROOT`. These are set once in the Compose `.env` file and never change. All other backend settings are managed in the admin panel (see §6.3).
+- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`), and the host paths `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. The host paths are set once in the Compose `.env` file and never change. `PLAYOUT_JOURNAL_ROOT` is the host directory to which Liquidsoap writes its playout journal (§7.1); the backend mounts it read-only. All other backend settings are managed in the admin panel (see §6.3).
 - **Admin settings (PostgreSQL)**: the Icecast output profile, station timezone, fade length, outage detection thresholds, and other backend settings are edited in the Angular admin panel and stored in the database (see §6.3).
 
 **Precedence (highest first)**
@@ -138,7 +139,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **artists**: id, name. Used for artist separation rules.
 - **tracks**: id, title, artist_id, duration_ms, file_path (relative to the media root, see §8.7), format, bitrate, sample_rate, quality_ok (bool), quality_notes, type_id (FK to `playlist_types`), file_checksum, created_at.
 - **track_playlists**: track_id, playlist_id (many-to-many). A track may belong to several playlists.
-- **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), default_filler_mode (nullable: `random`, `playlist`, or `artist`; null falls back to the global filler setting), default_filler_playlist_id (nullable, FK to `playlists`; set only for `playlist`), default_filler_artist_id (nullable, FK to `artists`; set only for `artist`), updated_at. The default mode applies when the filler pool is empty or a filler reminder expires (§7); `ask` and `pool` are not allowed here because they would fall back to themselves.
+- **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), default_filler_mode (nullable: `random`, `playlist`, or `artist`; null falls back to the global filler setting, §6.3), default_filler_playlist_id (nullable, FK to `playlists`; set only for `playlist`), default_filler_artist_id (nullable, FK to `artists`; set only for `artist`), updated_at. The default mode is chosen in the clock editor (§6.2). It applies when the filler pool is empty or a filler reminder expires (§7); `ask` and `pool` are not allowed here because they would fall back to themselves.
 - **clock_elements**: id, clock_id, position, placement (enum: `flow` (default), `start`, `end`, `fixed`), fixed_minute (int 0 to 59, nullable; required when `placement = fixed`), fixed_tolerance_ms (int, default 60000; applies to the start of a fixed element), nominal_duration_ms, duration_tolerance_ms (int, default 30000), filler_mode (enum: `none`, `ask`, `random`, `playlist`, `artist`, `pool`), filler_playlist_id (nullable, FK to `playlists`; set only for `playlist` mode), filler_artist_id (nullable, FK to `artists`; set only for `artist` mode), created_at. Stored as rows; a JSONB column may hold optional per-element settings.
   - `filler_mode` is required on a clock that is saved short. A clock with `filler_mode = none` cannot be saved as complete if it is short.
   - The playlists of an element are stored in `clock_element_playlists`, not in this table.
@@ -199,10 +200,24 @@ The play log keeps aired history only for the last 10 days. Missed items are an 
 
 ## 5. Database Access
 
+- Every query is written in the repository layer (§5.1), never in domain code, handlers, or jobs.
 - **GORM** is used for administrative CRUD: tracks, playlists, playlist types, clocks, clock elements, filler pools, grid, separation rules, play rules. It fits well because these are simple entities with associations. Nested inserts (for example, a track with its playlists, or a clock with its elements, their playlists, and the pool) run inside explicit transactions.
 - **pgx** (optionally with **sqlc** for generated type-safe queries) is used for hot paths: play log writes, track plan generation, rotation candidate queries, separation and play rule checks against both `play_log` and `scheduled_items`, and outage reconciliation.
 - Inserts that touch several tables are always done in an explicit transaction, so order and rollback are under control.
 - Migrations are versioned and forward-only (golang-migrate, `.up.sql` files only; see §9.2). GORM auto-migrate is not used.
+
+### 5.1 Repository layer
+
+All database access goes through a repository layer. Business logic never contains SQL, and SQL never leaves the repository layer.
+
+- **Location and naming.** Repositories live in `internal/repository/<domain>`. The package name equals the name of the domain package it serves (`library`, `playrules`, `separation`, `clocks`, `grid`, `rotation`, `filler`, `playout`, `outage`, `live`, `settings`, `operations`, `retention`). When a domain is renamed, its repository is renamed in the same change. The layer is organized by layer, but it uses the domain vocabulary only, so it adds no second set of names.
+- **What a repository contains.** The SQL of its domain (GORM and pgx code, sqlc-generated code included), the row structs used for scanning, and the mapping from rows to domain types. One file per aggregate, for example `playlists.go` and `tracks.go`.
+- **What a repository must not contain.** Business rules (eligibility, separation, fitting, tolerance decisions), HTTP or DTO types, network calls, and transaction boundaries. A repository never begins or commits a transaction.
+- **Interfaces.** The domain package declares the interface it needs, next to where it is used (for example `library.PlaylistStore`). The repository implements it. Interfaces are small and contain only the methods that domain uses.
+- **Transactions.** The domain service opens a transaction with `db.WithTx` and passes the transaction handle to each repository it touches through `WithTx(tx)`. A multi-table write therefore has one transaction that spans every repository involved (§5, explicit transactions).
+- **Errors.** Repositories map SQLSTATE codes and constraint names to the domain's sentinel errors (`ErrNotFound`, `ErrInUse`, `ErrValidation`) and wrap every other error with context. A domain never sees a driver error (`pgconn.PgError`) or a GORM error.
+- **Testing.** Each repository has integration tests against a real PostgreSQL (testcontainers). Tests may use SQL for fixtures and assertions.
+- **Enforcement.** An architecture test fails if SQL statements, or imports of `gorm.io/gorm` and `github.com/jackc/pgx`, appear outside `internal/repository`, `internal/db`, `internal/dbtest`, and `internal/migrations`. Migrations are not queries, so their SQL files stay where they are.
 
 ## 6. API and Data Transfer
 
@@ -223,8 +238,8 @@ Saving a clock is a two-step exchange, so the operator cannot miss a shortfall.
    - `shortfall_ms` (0 if the clock is full);
    - `warnings` (for example, a playlist with too few tracks for the separation window, or an hour of the day in which no track passes the play rules, see §7.3);
    - `requires_filler_choice: true` when `shortfall_ms > 0`.
-   
-   The request body lists the elements, and each element carries `playlist_ids` (one or more).
+
+   The request body lists the elements, and each element carries `playlist_ids` (one or more). The clock itself may carry `default_filler_mode` with its `default_filler_playlist_id` or `default_filler_artist_id`.
 2. If `requires_filler_choice` is true, the panel opens a blocking dialog. The operator chooses a mode and then calls one of:
    - `POST /api/clocks/{id}/save-with-filler`: body includes `filler_mode`, `filler_source_id` (if needed), and optionally `pool_track_ids` (ordered list, for `pool` mode). The clock is saved with `status = complete`.
    - `POST /api/clocks/{id}/save-incomplete`: the clock is saved with `status = incomplete`. The backend creates reminders (see §7).
@@ -236,9 +251,9 @@ Validation errors from the dry check are returned per field, so the panel can hi
 
 Every admin page (library, playlists, playlist types, clocks, grid, play rules, separation rules, play log, track plan, filler reminders, missed items, logs, settings) has a help button in its header. The manager may forget what a page is for, so the help explains it on demand.
 
-- **Help panel**: clicking the help button opens a side panel or popover with what the page is, what its entities mean, how to use them, typical steps, and common mistakes. For example, the Clocks page explains what a clock is, what its 60-minute structure means, how tolerances work, how an element can use several playlists, and what filler modes do. The Playlists page explains that a playlist is a pool and not a queue (the order of tracks inside it is not important, the system chooses the track), that a track can be in several playlists, and how playlists feed clock elements and rotation. The Playlist types page explains what a type is and how to add one. The Play rules page explains that a rule limits when a track may play, how the time window, the minimum interval, and the per-hour limit combine, how to apply a rule to tracks or playlists, and that how often a jingle appears is set by the clock, not by the rule. The Played tracks page explains what "missed" means and how to reschedule or dismiss a missed item.
+- **Help panel**: clicking the help button opens a side panel or popover with what the page is, what its entities mean, how to use them, typical steps, and common mistakes. For example, the Clocks page explains what a clock is, what its 60-minute structure means, how tolerances work, how an element can use several playlists, what filler modes do, and what the clock's default filler mode is: it is used when the filler pool is empty or a filler reminder expires, and if the clock has none, the global fallback applies. The Playlists page explains that a playlist is a pool and not a queue (the order of tracks inside it is not important, the system chooses the track), that a track can be in several playlists, and how playlists feed clock elements and rotation. The Playlist types page explains what a type is and how to add one. The Play rules page explains that a rule limits when a track may play, how the time window, the minimum interval, and the per-hour limit combine, how to apply a rule to tracks or playlists, and that how often a jingle appears is set by the clock, not by the rule. The Played tracks page explains what "missed" means and how to reschedule or dismiss a missed item.
 - **Per-operation notes**: create, edit, and delete modes can each show a short note. For example, deleting a playlist that is used by clock elements is blocked, deleting a playlist type that is used by playlists or tracks is blocked, and deleting a play rule that is applied to tracks or playlists is blocked. The note says why.
-- **Field hints**: individual form fields show short tooltips (for example, "nominal duration", "tolerance", "filler mode", "min interval hours", "playlist type", "minimum interval", "plays per hour") and link to the full page help.
+- **Field hints**: individual form fields show short tooltips (for example, "nominal duration", "tolerance", "filler mode", "default filler mode", "min interval hours", "playlist type", "minimum interval", "plays per hour") and link to the full page help.
 - **Content location**: help texts are static content in the Angular project (for example, i18n JSON files keyed by page ID such as `help.clocks`). They ship with each release and stay in sync with the UI, and they do not depend on the backend or the database. The files live in `radio-atlantida-frontend`.
 - **Writing style**: plain language, one short worked example per page.
 
@@ -256,6 +271,7 @@ Validation happens in two layers. The frontend gives immediate feedback, and the
   - Checkboxes or a multi-select for weekdays, instead of free text.
   - A select for the timezone, populated from IANA names, instead of typing.
   - A select for `filler_mode`, with options that match the backend enum.
+  - In the clock editor, a select for the clock's default filler mode (`random`, `playlist`, `artist`, or none, meaning the global fallback). A playlist or artist picker is shown only for the matching mode. `ask` and `pool` are not offered, because they cannot be a fallback (§4).
   - A select for the playlist type, populated from `GET /api/playlist-types`, so a new type appears in the lists as soon as it is added.
   - A multi-select for the playlists of a clock element. It offers playlists of all types, so one element can combine, for example, music and jingle playlists.
   - A multi-select for play rules on the track form and the playlist form, and a multi-select of tracks and playlists on the play rule page.
@@ -279,13 +295,13 @@ Validation happens in two layers. The frontend gives immediate feedback, and the
 
 ### 6.3 Settings Administration
 
-Everything the backend needs is managed by the manager in the Angular admin panel, except the database connection, secrets, and the two host paths. The manager should not have to edit files or environment variables during normal use.
+Everything the backend needs is managed by the manager in the Angular admin panel, except the database connection, secrets, and the host paths. The manager should not have to edit files or environment variables during normal use.
 
 **Environment only (not editable in the UI)**
 
 - Database connection (`DATABASE_URL` and credentials).
-- Secrets: Icecast source password, Liquidsoap control credentials.
-- Host paths: `MEDIA_ROOT` and `LOG_ROOT`. They are needed by Docker bind mounts before the backend starts, so they are set once in the Compose `.env` file and never change.
+- Secrets: `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`.
+- Host paths: `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. They are needed by Docker bind mounts before the backend starts, so they are set once in the Compose `.env` file and never change.
 
 **Managed in the UI (settings pages)**
 
@@ -293,13 +309,13 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Playlist types**: the list of types (system and custom). The manager can add a type, rename it, and delete a custom type that is not in use. System types can be renamed but not deleted (§4).
 - **Stream output (Icecast)**: host, port, mount point, codec, bitrate, sample rate, channels, loudness target, stream metadata, HLS on or off.
 - **Liquidsoap**: default music gain, fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port.
-- **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults, default filler mode.
+- **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults. The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
 - **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
 - **Retention**: play log days (default 10), application log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1).
 - Any future backend setting follows the same pattern.
 
-Playlist types are data in the `playlist_types` table, not entries in the `settings` table. They are listed on the settings pages for convenience, and they are served by their own endpoints (§6.4).
+Playlist types are data in the `playlist_types` table, not entries in the `settings` table. They are listed on the settings pages for convenience, and they are served by their own endpoints (§6.4). A clock's default filler mode is data of the clock (§4), so it is edited in the clock editor, not on the settings pages.
 
 **Storage and validation**
 
@@ -351,7 +367,7 @@ The backend is the single source of truth for the API. There is no separate fron
 | `POST /api/playlists`, `PUT /api/playlists/{id}`, `DELETE /api/playlists/{id}` | Playlist CRUD. `type_id` is required. Delete is refused if the playlist is used by a clock element, and the error names the clocks |
 | `PUT /api/playlists/{id}/tracks` | Sets the tracks of a playlist (list of track IDs) |
 
-Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead of a single category.
+Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead of a single category, and accept the clock's `default_filler_mode` with its source.
 
 **Endpoints added in v7-8 (play rules and track preview)**
 
@@ -436,6 +452,8 @@ Separation and play rule checks query both `play_log` (what aired, status `aired
 - `ask`: create a `filler_request` for the hour. The operator is asked in the panel. If there is no answer by `deadline_at`, the clock's default mode applies and the status becomes `defaulted`.
 - `none`: not allowed for a short clock that is saved as complete. For an incomplete clock, it means no filler is created, and the warning stays visible.
 
+The clock's default mode (`clocks.default_filler_mode`) is the fallback used by `pool` and `ask`. If the clock has none, the global fallback from §6.3 applies.
+
 **Filler reminders.** Every incomplete clock creates a `filler_request` for each of its hours that falls inside the planning window. Reminders cannot be turned off. An operator closes one by answering it or by letting its deadline pass. `deadline_at` is calculated from air time, not from creation time, so a request created a week ahead still fires at the right moment.
 
 **Grid and clock changes.** When a clock or the grid changes:
@@ -480,7 +498,7 @@ An outage is a period when the station's audio did not reach listeners, for exam
 
 **Reconciliation after backend downtime**
 
-- Liquidsoap keeps a local playout journal on disk: one line per track start and end, with the UTC time and the actual duration. The journal is written independently of the backend, so it survives a backend outage.
+- Liquidsoap keeps a local playout journal on disk in `PLAYOUT_JOURNAL_ROOT`: one line per track start and end, with the UTC time and the actual duration. The journal is written independently of the backend, so it survives a backend outage.
 - When the backend reconnects, it reads the journal from the last reconciled point and updates the playout state:
   - items confirmed by the journal are set to `aired` or `truncated` and written to `play_log`;
   - items with no confirmation are handled by the outage rules above.
@@ -525,7 +543,7 @@ An outage is a period when the station's audio did not reach listeners, for exam
 1. Place the fixed elements at their target minutes. Reject the save if a fixed element's window (`fixed_minute` ± tolerance) falls outside the hour, or overlaps another fixed element's window (see "Replacement" below).
 2. Place the `start` elements in the first segment and the `end` elements in the last segment.
 3. Fill each segment with its flow elements, selecting tracks by the rules of §7.
-4. Check each segment for shortfall and open the filler dialog for each short segment (§6.0). Filler for a segment uses the `filler_mode` of the element that ends the segment, or the clock default if there is none.
+4. Check each segment for shortfall and open the filler dialog for each short segment (§6.0). Filler for a segment uses the `filler_mode` of the element that ends the segment, or the clock's default mode if there is none, or the global fallback.
 5. Check the crossing rule (§7, "Overflow") at every segment end.
 
 **Refusal on save.** The save is refused, with the error shown on the responsible element, when:
@@ -594,7 +612,7 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 
 - Liquidsoap reports actual playback events to Go (an HTTP callback on track start and end). Go writes them to `play_log`, including `truncated` and the actual duration. The log reflects what aired, not what was planned.
 - Liquidsoap also reports its Icecast output state (connected or not) in the same callbacks, so the outage detector knows whether listeners could receive the stream (§7.1).
-- Liquidsoap writes every track start and end to a local playout journal on disk, independently of the callbacks (§7.1). If a callback cannot be delivered, the journal still holds the event, and reconciliation uses it after the backend recovers.
+- Liquidsoap writes every track start and end to a local playout journal in `PLAYOUT_JOURNAL_ROOT`, independently of the callbacks (§7.1). If a callback cannot be delivered, the journal still holds the event, and reconciliation uses it after the backend recovers.
 
 ### 8.4 Live voice
 
@@ -661,7 +679,7 @@ Services in a single `docker-compose.yml` (kept in `radio-atlantida-deploy`):
 
 - `backend`: Go backend (image `radio-atlantida-backend`, built from `radio-atlantida-backend`).
 - `db`: PostgreSQL with a named volume for database data.
-- `liquidsoap`: Liquidsoap image (Linux), media directory mounted read-only, and a named or bind-mounted volume for the playout journal (see §7.1).
+- `liquidsoap`: Liquidsoap image (Linux), media directory mounted read-only, and a bind mount of `PLAYOUT_JOURNAL_ROOT` for the playout journal (see §7.1).
 - `icecast`: test stream server with default configuration.
 - `frontend`: Angular build served by a static server (image `radio-atlantida-frontend`, built from `radio-atlantida-frontend`).
 - `proxy` (optional): reverse proxy for the panel and API.
@@ -673,14 +691,14 @@ Guidelines:
 - Media files are never inside a container image or a named volume (see §8.7).
 - Health checks are defined for `db`, `backend`, and `liquidsoap`.
 - The log directory (`LOG_ROOT`) is a host bind mount writable by `backend`. Logs are never kept only inside a container (see §10.1).
-- The playout journal directory is on the host, so it survives container recreation and is included in the backup set (§10).
+- The playout journal directory (`PLAYOUT_JOURNAL_ROOT`) is on the host. `liquidsoap` writes to it read-write, and `backend` mounts the same directory read-only for reconciliation (§7.1). It survives container recreation and is included in the backup set (§10).
 - Services communicate over an internal Docker network. Only the panel port and the Icecast listener port are published to the host.
 
 ### 9.1 Development and runtime platforms
 
 - **Development**: macOS. Docker Desktop runs the Linux containers.
 - **Runtime**: Windows 10 or 11 PC on SSD storage, running Docker Desktop. The Docker engine inside is Linux (WSL2 backend), so all containers are Linux containers.
-- Because development is on macOS and runtime is on Windows, the `MEDIA_ROOT` path is set per machine in `.env`. Paths in the database stay relative (§8.7).
+- Because development is on macOS and runtime is on Windows, the `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT` paths are set per machine in `.env`. Paths in the database stay relative (§8.7).
 - Bind-mounted files from the Windows filesystem are accessed through the WSL2 layer. Read performance is adequate for playout.
 - File paths and line endings are checked in the build pipeline because they differ between macOS and Windows.
 
@@ -716,6 +734,7 @@ The Compose file references images by tag, for example `image: ghcr.io/astronin/
 - The v7-6 changes (`broadcast_outages`, the `missed` status, the new `play_log` columns) are added as a single expand migration. The previous code ignores the new columns and the new status values, so it still works after rollback.
 - The v7-7 changes (the rename of categories to playlists, `playlist_types`, `clock_element_playlists`) follow the same rule. The expand migration creates `playlist_types`, `playlists`, `track_playlists`, and `clock_element_playlists`, seeds the four system types, and copies the data from the old category tables (`categories`, `track_categories`, and `clock_elements.category_id`, which becomes one `clock_element_playlists` row per element). The old tables and columns are left in place and are removed by a contract migration in a later release. Until then, the previous code keeps working against the old tables.
 - The v7-8 changes (`play_rules`, `track_play_rules`, `playlist_play_rules`) use the same approach. The expand migration creates the new tables and copies each row of `daypart_rules` into a `play_rules` row (time window and weekdays) with a matching target row (a track or a playlist; the old `jingle` target is copied as a track). `daypart_rules` stays in place until a contract migration in a later release.
+- The v7-9 changes (`clocks.default_filler_mode`, `default_filler_playlist_id`, `default_filler_artist_id`, and the typed filler columns of `clock_elements`) are added as an expand migration with nullable columns. The previous code ignores them.
 
 **Forward-only migrations (no rollback)**
 
@@ -746,7 +765,7 @@ Steps, in order:
 5. **Login to the registry** with the token from `.env` (`docker login ghcr.io`), if not already logged in.
 6. **Pull the images**: `docker compose pull`.
 7. **Backup the database (mandatory)**: `docker compose exec db pg_dump -Fc` into `backups/db-YYYY-MM-DDTHHMMSSZ.dump`. The file name uses the UTC time (§10.2). A dump is made on every update, including updates without migrations, and the script has no flag to skip it. If the dump fails, the update stops. The dump path is saved in `state.json` for this run, so a restore uses exactly this dump. The script keeps the last 14 dumps and deletes older ones.
-8. **Migrate**: `docker compose run --rm migrate`. If it fails, the script stops, does not start the new `api`, and reports the error.
+8. **Migrate**: `docker compose run --rm migrate`. If it fails, the script stops, does not start the new `backend`, and reports the error.
 9. **Restart services**: `docker compose up -d`. Compose recreates only containers whose image or configuration changed, so `liquidsoap` and `icecast` keep running if their images did not change.
 10. **Health check**: wait for the healthchecks of `db`, `backend`, and `liquidsoap` to pass, with a timeout.
 11. **On failure**: set `IMAGE_TAG` back to the recorded previous tag, run `docker compose up -d`, and report the error. Migrations are not rolled back, and the script never runs down migrations. Because of the expand and contract rule, the previous code still works with the new schema. If the migration itself failed, the database is restored with `update.bat restore`, using the dump recorded for this run (see "Forward-only migrations" above).
@@ -773,7 +792,7 @@ Steps, in order:
 - Logs are written as JSON Lines: one JSON object per line. The panel and tools like `jq` can read them directly.
 - Library: `log/slog` from the Go standard library, with its JSON handler. It needs no extra dependency and is fast enough for this volume. `zap` or `zerolog` are alternatives if profiling shows a need.
 - Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `filler`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`. API errors also carry `request_id`.
-- Secrets (Icecast source password, Liquidsoap control credentials) are never logged. A handler masks any field with a sensitive name.
+- Secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`) are never logged. A handler masks any field with a sensitive name.
 
 **What is logged**
 
@@ -842,7 +861,7 @@ The open questions from the previous version are closed. The decisions are recor
 4. **Live voice latency budget.** Target of at most 1 second from microphone to air. The system runs locally on one machine with local Docker (§8.4).
 5. **Production Icecast details.** Entered in the admin panel and stored in the database, like all other output settings. Nothing is set in code or files (§8.8, §6.3).
 6. **Windows host.** Windows 10 or 11 with Docker Desktop (WSL2 backend), SSD storage. No separate performance test is required before going live (§9.1).
-7. **Host paths.** `MEDIA_ROOT` and `LOG_ROOT` are set once in the Compose `.env` file and never change. They are not editable in the UI (§6.3, §3.1).
+7. **Host paths.** `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT` are set once in the Compose `.env` file and never change. They are not editable in the UI (§6.3, §3.1).
 8. **Viper.** Removed. Runtime configuration lives in the admin settings, and no YAML profile is used (§3.1).
 9. **Source repositories.** Three repositories: `radio-atlantida-backend`, `radio-atlantida-frontend`, `radio-atlantida-deploy`. Their roles and release coupling are described in §1.1.
 10. **Missed items are not automatically re-aired.** A missed item is never pushed back into the plan by the system. Only the manager decides whether to reschedule or dismiss it (§7.1). Reason: an automatic repeat could place content in a wrong context, for example a news segment after its time.
@@ -859,6 +878,10 @@ The open questions from the previous version are closed. The decisions are recor
 21. **Track preview in the panel.** The backend streams a track by ID with Range support. Playback happens in the browser only and never reaches the air or the play log (§6.6).
 22. **References to plan rows.** Missed items live in `play_log`, so `scheduled_items.reschedule_of_id` references `play_log`. `play_log.scheduled_item_id` and `resolved_item_id` are trace ids without a foreign key, because `scheduled_items` rows are deleted after they air (§4, §4.1).
 23. **History blocks deletes.** Tracks, artists, and clocks referenced by the play log or the track plan cannot be deleted (§4).
+24. **Default filler mode belongs to the clock.** The fallback mode for a clock is set in the clock editor and stored on the clock. The global setting in §6.3 is only the fallback for clocks that have none (§4, §6.2, §7).
+25. **Journal path is an environment variable.** `PLAYOUT_JOURNAL_ROOT` is a host path set in `.env`, like `MEDIA_ROOT` and `LOG_ROOT`. Liquidsoap writes the journal to it, and the backend reads it read-only (§3.1, §7.1, §9).
+
+26. **Repository layer.** All SQL lives in `internal/repository/<domain>`, one package per domain, named as the domain package. Domain code depends on interfaces it declares itself, and the repositories implement them. Reason: business rules stay free of SQL and driver errors, and a domain rename changes the domain and its repository in the same change (§5.1).
 
 ## 12. Non-functional Requirements
 

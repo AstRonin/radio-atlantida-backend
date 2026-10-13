@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -33,6 +34,8 @@ type Deps struct {
 	Log        *slog.Logger
 	Operations OperationStore
 	Logs       LogFiles
+	// Now is the clock of the live status.
+	Now func() time.Time
 }
 
 // Register adds every operation to api.
@@ -40,6 +43,7 @@ func Register(api huma.API, d Deps) {
 	log := logging.For(d.Log, logging.ComponentAPI)
 	registerOperations(api, log, d.Operations)
 	registerLogs(api, log, d.Logs)
+	registerStatus(api, log, d.Now)
 }
 
 // register adds one operation. Errors returned by fn go through problemFor.
