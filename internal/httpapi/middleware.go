@@ -63,7 +63,7 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 func recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
+			defer func() { //nolint:contextcheck // false positive on the deferred closure; it uses r.Context()
 				rec := recover()
 				if rec == nil {
 					return

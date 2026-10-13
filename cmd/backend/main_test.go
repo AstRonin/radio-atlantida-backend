@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"testing"
 
@@ -28,7 +27,7 @@ func TestRunArguments(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := run(context.Background(), tt.args, &bytes.Buffer{})
+			err := run(t.Context(), tt.args, &bytes.Buffer{})
 
 			require.Error(t, err)
 			require.Equal(t, tt.wantUsage, errors.Is(err, errUsage))
@@ -40,7 +39,7 @@ func TestRunHelp(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 
-	require.NoError(t, run(context.Background(), []string{"help"}, &out))
+	require.NoError(t, run(t.Context(), []string{"help"}, &out))
 
 	require.Equal(t, usage, out.String())
 }

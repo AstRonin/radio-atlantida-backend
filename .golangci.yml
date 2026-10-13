@@ -8,6 +8,7 @@ linters:
   default: standard # errcheck, govet, ineffassign, staticcheck, unused
   enable:
     - bodyclose
+    - contextcheck # functions must pass on the context they receive
     - errorlint
     - gosec
     - misspell

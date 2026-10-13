@@ -50,7 +50,13 @@ func serve(ctx context.Context) error {
 	}
 	cancel()
 
-	srv := httpapi.NewServer(cfg.HTTPAddr, httpapi.NewRouter(httpapi.Deps{Log: log, DB: pool}), apiLog)
+	// Request contexts are not cancelled by the shutdown signal itself:
+	// in-flight requests may finish during the drain. They are cancelled when
+	// the drain deadline passes (see below).
+	requestsCtx, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRequests()
+	srv := httpapi.NewServer(requestsCtx, cfg.HTTPAddr,
+		httpapi.NewRouter(httpapi.Deps{Log: log, DB: pool}), apiLog)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
@@ -67,6 +73,10 @@ func serve(ctx context.Context) error {
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(gctx), shutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(sctx); err != nil {
+			// Drain timed out: cancel the remaining requests, so their
+			// queries stop and release connections before pool.Close.
+			cancelRequests()
+			_ = srv.Close()
 			return fmt.Errorf("http shutdown: %w", err)
 		}
 		return nil

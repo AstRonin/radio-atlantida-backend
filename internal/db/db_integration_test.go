@@ -18,7 +18,7 @@ const postgresImage = "postgres:17.11"
 
 func startPostgres(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	ctr, err := postgres.Run(ctx, postgresImage,
 		postgres.WithDatabase("radio"),
 		postgres.WithUsername("radio"),
@@ -37,7 +37,7 @@ func startPostgres(t *testing.T) string {
 
 func TestOpenPoolSessionSettings(t *testing.T) {
 	url := startPostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	pool, err := OpenPool(ctx, url)

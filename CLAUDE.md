@@ -84,7 +84,13 @@ docs/                 requirements, design, phase plans
 - No global mutable state, no `init()` with side effects. Dependencies via constructors; `main` wires everything. `os.Getenv` only in `internal/config`.
 - Every new third-party dependency needs a reason in the PR description. Prefer the standard library.
 - Errors: never ignored; wrap with context (`fmt.Errorf("load playlist %d: %w", id, err)`). Domain errors are sentinels/types (`ErrNotFound`, `ErrInUse`, `ErrValidation`) checked with `errors.Is/As` and mapped to HTTP in one place. Log an error once, where it is handled. `panic` only for programmer errors at startup.
-- `context.Context` first in every I/O function; respect cancellation; never store it in a struct.
+- `context.Context` first in every I/O function; respect cancellation; never store it in a struct. Which context to use:
+  - **HTTP handlers**: `r.Context()`, passed to every DB and I/O call. It is cancelled when the client disconnects, by the 30 s route timeout, or when a graceful shutdown runs past its drain deadline (`BaseContext` in `httpapi.NewServer`). Add a shorter `context.WithTimeout` for calls that should fail faster (e.g. `/readyz` pings with 2 s).
+  - **Database**: every query gets a context with a deadline. Background work wraps each query or transaction in its own `context.WithTimeout`. The server-side `statement_timeout` (30 s) is only a backstop.
+  - **Async operations started by a request** (§6.5): never use `r.Context()`, because it is cancelled as soon as the `accepted` response is sent. Run them on the service context (from `serve`, cancelled on shutdown) and copy over request values (request ID) explicitly.
+  - **Scheduled jobs**: each run gets a new context derived from the service context, with a per-job timeout (`context.WithTimeout(serviceCtx, job.timeout)`), cancelled when the run ends. Never reuse one context across runs. Never use `context.Background()`, because shutdown must be able to stop a run.
+  - **Outgoing calls** (Icecast, Liquidsoap telnet/HTTP): `http.NewRequestWithContext`, `net.Dialer.DialContext`, and a per-call deadline.
+  - `context.Background()` only in `main` and in tests (use `t.Context()`). `context.WithoutCancel` only for cleanup that must outlive a cancelled parent (shutdown drain, final writes), always with a timeout.
 - Every goroutine has an owner and a stop path; use `errgroup`. Shared state: mutex or single owner, documented. Tests run with `-race`.
 - Domain code never calls `time.Now()`: inject a `Clock`. Randomness: `math/rand/v2` with an injected seeded source (rotation must be deterministic per seed).
 - HTTP: explicit server timeouts (streaming routes clear their write deadline via `http.ResponseController`); request bodies size-limited; close response bodies; thin handlers (decode, validate, call service, encode).

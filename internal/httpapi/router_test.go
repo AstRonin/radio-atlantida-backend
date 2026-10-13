@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
@@ -153,10 +155,55 @@ func TestLimitBody(t *testing.T) {
 func TestNewServerHasTimeouts(t *testing.T) {
 	t.Parallel()
 
-	s := NewServer("127.0.0.1:0", http.NotFoundHandler(), slog.New(slog.DiscardHandler))
+	type key struct{}
+	base := context.WithValue(t.Context(), key{}, "base")
+
+	s := NewServer(base, "127.0.0.1:0", http.NotFoundHandler(), slog.New(slog.DiscardHandler))
 
 	require.Positive(t, s.ReadHeaderTimeout)
 	require.Positive(t, s.ReadTimeout)
 	require.Positive(t, s.WriteTimeout)
 	require.Positive(t, s.IdleTimeout)
+	require.Equal(t, "base", s.BaseContext(nil).Value(key{}))
+}
+
+func TestShutdownTimeoutCancelsStuckRequests(t *testing.T) {
+	t.Parallel()
+	base, cancelRequests := context.WithCancel(context.WithoutCancel(t.Context()))
+	defer cancelRequests()
+	started := make(chan struct{})
+	cancelled := make(chan error, 1)
+	stuck := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done() // stands in for a long database query
+		cancelled <- r.Context().Err()
+	})
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := NewServer(base, ln.Addr().String(), stuck, slog.New(slog.DiscardHandler))
+	go func() { _ = srv.Serve(ln) }()
+
+	go func() {
+		req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+ln.Addr().String(), nil)
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-started
+
+	// A graceful shutdown alone does not cancel the in-flight request...
+	sctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, srv.Shutdown(sctx), context.DeadlineExceeded)
+	require.Empty(t, cancelled)
+
+	// ...cancelling the base context after the drain deadline does.
+	cancelRequests()
+	select {
+	case err := <-cancelled:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("request context was not cancelled")
+	}
+	_ = srv.Close()
 }

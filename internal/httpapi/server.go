@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -18,8 +20,13 @@ const (
 
 // NewServer returns an http.Server with explicit timeouts. Errors of the
 // server itself (TLS, accept, malformed requests) go to log at WARN.
-func NewServer(addr string, h http.Handler, log *slog.Logger) *http.Server {
+//
+// Every request context derives from baseCtx. The caller cancels baseCtx
+// only when a graceful shutdown runs out of time, so stuck handlers and their
+// database queries are cancelled instead of holding the shutdown.
+func NewServer(baseCtx context.Context, addr string, h http.Handler, log *slog.Logger) *http.Server {
 	return &http.Server{
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: readHeaderTimeout,
