@@ -1,4 +1,5 @@
-// Package httpapi holds the HTTP server: router, middleware, and handlers.
+// Package httpapi holds the HTTP server: router, middleware, the huma API
+// that produces the OpenAPI document, and the error format.
 package httpapi
 
 import (
@@ -11,6 +12,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/handlers"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 )
 
@@ -21,8 +25,9 @@ const (
 	// maxRequestBody limits JSON request bodies.
 	maxRequestBody = 1 << 20
 
-	contentTypeJSON    = "application/json"
-	contentTypeProblem = "application/problem+json"
+	contentTypeJSON = "application/json"
+
+	wsPath = "/api/ws"
 )
 
 // Pinger reports whether a dependency is reachable.
@@ -36,6 +41,13 @@ type Deps struct {
 	Log *slog.Logger
 	// DB is checked by /readyz.
 	DB Pinger
+	// Version is the release version shown in the OpenAPI document.
+	Version string
+	// Events serves the WebSocket at /api/ws.
+	Events http.Handler
+	// Operations and Logs back the REST handlers.
+	Operations handlers.OperationStore
+	Logs       handlers.LogFiles
 }
 
 // NewRouter builds the HTTP handler with the common middleware chain.
@@ -50,6 +62,17 @@ func NewRouter(d Deps) http.Handler {
 		recoverer(apiLog),
 		limitBody(maxRequestBody),
 	)
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		writeProblem(w, r, http.StatusNotFound, errcodes.NotFound)
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		writeProblem(w, r, http.StatusMethodNotAllowed, errcodes.MethodNotAllowed)
+	})
+
+	// Long-lived: no request timeout. The hub clears the server deadlines.
+	if d.Events != nil {
+		r.Get(wsPath, d.Events.ServeHTTP)
+	}
 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Timeout(requestTimeout))
@@ -57,18 +80,18 @@ func NewRouter(d Deps) http.Handler {
 		h := health{db: d.DB, log: logging.For(d.Log, logging.ComponentDB)}
 		r.Get("/healthz", h.live)
 		r.Get("/readyz", h.ready)
+
+		api := newAPI(r, d.Version)
+		handlers.Register(api, handlers.Deps{Log: d.Log, Operations: d.Operations, Logs: d.Logs})
 	})
 
 	return r
 }
 
-// problem is the error body. It follows RFC 9457; the full error format is
-// added with the API contract (Phase 3).
-type problem struct {
-	Title     string `json:"title"`
-	Status    int    `json:"status"`
-	Detail    string `json:"detail,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
+func writeProblem(w http.ResponseWriter, r *http.Request, status int, code errcodes.Problem) {
+	p := dto.NewProblem(status, code, "")
+	p.RequestID = middleware.GetReqID(r.Context())
+	writeJSON(w, status, p, dto.ContentTypeProblem)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any, contentType string) {
@@ -78,3 +101,5 @@ func writeJSON(w http.ResponseWriter, status int, body any, contentType string) 
 	// only be dropped.
 	_ = json.NewEncoder(w).Encode(body)
 }
+
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }

@@ -37,7 +37,8 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | `make fmt` | gofumpt + goimports |
 | `make vuln` | govulncheck |
 | `make migrate` | `backend migrate up` against `DATABASE_URL` |
-| `make openapi` | Write `api/openapi.json` (Phase 3) |
+| `make openapi` | Write `api/openapi.json` |
+| `make openapi-lint` | `make openapi` + Redocly lint (`redocly.yaml`; needs Node.js, also runs in CI) |
 | `make db-up` / `make db-down` | Only PostgreSQL |
 | `docker compose -f docker-compose.dev.yml --profile app up --build` | Stack plus the backend container |
 
@@ -53,8 +54,14 @@ internal/
   db/                 pgx pool (UTC session, timeouts), GORM on the same pool, WithTx / WithGormTx
   dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)
   migrations/         embedded NNNN_name.up.sql + runner (golang-migrate)
-  httpapi/            chi router, middleware, health; dto/ and handlers/ from Phase 3
-  ws/ operations/ settings/ library/ playrules/ separation/ media/ jobs/   (Phases 3–5)
+  httpapi/            chi router, middleware, health, huma API (api.go: OpenAPI, event schemas)
+    errcodes/         stable problem and field error codes (never renamed; published as enums)
+    dto/              request/response bodies, Problem (RFC 9457)
+    handlers/         huma operations; problemFor maps domain errors to HTTP in one place
+  ws/                 WebSocket hub at /api/ws and the event types
+  operations/         async operations: operations row + one terminal <kind>.completed/.failed event
+  jobs/               scheduler (advisory-locked singleton runs, each an operation) and retention
+  settings/ library/ playrules/ separation/ media/   (Phases 4–5)
   clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
@@ -75,6 +82,7 @@ docs/                 requirements, design, phase plans
 - Logging never blocks. Secrets are never logged (the handler masks keys matching `password|secret|token|credential`).
 - No authentication anywhere. Listen on localhost or a private network.
 - Tests: unit tests next to the code; integration tests (`//go:build integration`) against real PostgreSQL via testcontainers-go. No DB mocks for repository tests.
+- API: every endpoint is a huma operation with DTO types (the OpenAPI document is generated from them). Errors are `dto.Problem` with a code from `errcodes`; a new refusal adds its code there in the same change. Domain errors map to HTTP only in `handlers.problemFor`. New WebSocket events are named schemas registered in `httpapi/api.go`; a new async operation kind is added to `operations.Kinds()`.
 
 ### Go
 

@@ -12,14 +12,19 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/config"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
+	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
 // shutdownTimeout bounds the drain of in-flight requests on SIGINT/SIGTERM.
 const shutdownTimeout = 15 * time.Second
 
-// serve runs the HTTP API until ctx is cancelled, then shuts down in order:
-// stop accepting requests and drain, close the database, flush logs.
+// serve runs the HTTP API, the WebSocket hub, and the background jobs until
+// ctx is cancelled, then shuts down in order: stop accepting requests and
+// drain (closing the WebSockets), stop the jobs, wait for running
+// operations, close the database, flush logs.
 func serve(ctx context.Context) error {
 	cfg, err := config.Load(".env")
 	if err != nil {
@@ -50,15 +55,43 @@ func serve(ctx context.Context) error {
 	}
 	cancel()
 
+	hub := ws.NewHub(apiLog)
+	tracker := operations.NewTracker(database.Pool, hub, log, time.Now)
+	// Operations run only inside this process: a row still running now was
+	// cut off by the previous shutdown or crash.
+	fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if n, err := tracker.FailInterrupted(fctx); err != nil {
+		dbLog.Warn("mark interrupted operations failed", logging.KeyError, err)
+	} else if n > 0 {
+		dbLog.Warn("operations interrupted by the previous shutdown marked failed", "count", n)
+	}
+	cancel()
+	retention := jobs.NewRetention(database.Pool, tracker, time.Now)
+	scheduler := jobs.NewScheduler(database.Pool, tracker, log, retention.Job())
+
 	// Request contexts are not cancelled by the shutdown signal itself:
 	// in-flight requests may finish during the drain. They are cancelled when
 	// the drain deadline passes (see below).
 	requestsCtx, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRequests()
-	srv := httpapi.NewServer(requestsCtx, cfg.HTTPAddr,
-		httpapi.NewRouter(httpapi.Deps{Log: log, DB: database.Pool}), apiLog)
+	srv := httpapi.NewServer(requestsCtx, cfg.HTTPAddr, httpapi.NewRouter(httpapi.Deps{
+		Log:        log,
+		DB:         database.Pool,
+		Version:    version,
+		Events:     hub,
+		Operations: tracker,
+		Logs:       logging.NewFileReader(cfg.LogRoot),
+	}), apiLog)
+	// Shutdown does not wait for hijacked connections: close the panels'
+	// WebSockets when it starts.
+	srv.RegisterOnShutdown(hub.Close)
 
 	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		forwardAlerts(gctx, logs.Alerts(), hub)
+		return nil
+	})
+	g.Go(func() error { return scheduler.Run(gctx) })
 	g.Go(func() error {
 		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -82,10 +115,27 @@ func serve(ctx context.Context) error {
 		return nil
 	})
 
-	if err := g.Wait(); err != nil {
-		apiLog.Error("server stopped with error", logging.KeyError, err)
-		return err
+	waitErr := g.Wait()
+	// Operations started by requests finish their final writes before the
+	// database closes.
+	tracker.Wait()
+	if waitErr != nil {
+		apiLog.Error("server stopped with error", logging.KeyError, waitErr)
+		return waitErr
 	}
 	apiLog.Info("stopped")
 	return nil
+}
+
+// forwardAlerts pushes ERROR log entries to the panels as error.alert events
+// (§10.1) until ctx ends.
+func forwardAlerts(ctx context.Context, alerts <-chan logging.Alert, hub *ws.Hub) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case a := <-alerts:
+			hub.Publish(ws.NewErrorAlert(a))
+		}
+	}
 }

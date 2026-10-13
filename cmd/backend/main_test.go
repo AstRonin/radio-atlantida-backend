@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestRunArguments(t *testing.T) {
 		{"migrate down does not exist", []string{"migrate", "down"}, true},
 		{"migrate without direction", []string{"migrate"}, true},
 		{"serve with arguments", []string{"serve", "x"}, true},
-		{"openapi not implemented yet", []string{"openapi"}, false},
+		{"openapi with arguments", []string{"openapi", "x"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -41,4 +42,15 @@ func TestRunHelp(t *testing.T) {
 	require.NoError(t, run(t.Context(), []string{"help"}, &out))
 
 	require.Equal(t, usage, out.String())
+}
+
+func TestRunOpenAPI(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+
+	require.NoError(t, run(t.Context(), []string{"openapi"}, &out))
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
+	require.Equal(t, "3.1.0", doc["openapi"])
 }

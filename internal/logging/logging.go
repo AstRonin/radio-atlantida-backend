@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,6 +57,9 @@ type Logging struct {
 
 	async   *AsyncWriter
 	rotator *DailyRotator
+
+	alerts        chan Alert
+	alertsDropped atomic.Uint64
 }
 
 // New creates the application logger. Entries go to stdout and to daily files
@@ -73,13 +77,25 @@ func New(logRoot string) (*Logging, error) {
 		return slog.New(NewHandler(w, level))
 	})
 
-	return &Logging{
-		Logger:  slog.New(NewHandler(async, level)),
+	l := &Logging{
 		Level:   level,
 		async:   async,
 		rotator: rotator,
-	}, nil
+		alerts:  make(chan Alert, alertBuffer),
+	}
+	l.Logger = slog.New(newAlertHandler(NewHandler(async, level), l.alerts, &l.alertsDropped))
+	return l, nil
 }
+
+// Alerts delivers every ERROR entry, for the panel's error popups (§10.1).
+// One consumer should read it for the life of the process; while nobody
+// reads, alerts are dropped (see AlertsDropped), never blocking the logger.
+// The channel is never closed.
+func (l *Logging) Alerts() <-chan Alert { return l.alerts }
+
+// AlertsDropped returns how many alerts were dropped because the queue was
+// full.
+func (l *Logging) AlertsDropped() uint64 { return l.alertsDropped.Load() }
 
 // Close flushes buffered entries and closes the current log file.
 func (l *Logging) Close() error {

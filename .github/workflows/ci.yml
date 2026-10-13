@@ -46,6 +46,26 @@ jobs:
         # testcontainers-go uses the Docker engine of the runner.
         run: go test -race -tags integration ./...
 
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: generate
+        run: |
+          mkdir -p api
+          go run ./cmd/backend openapi > api/openapi.json
+      - name: validate
+        run: npx --yes @redocly/cli@2.61.0 lint --config redocly.yaml api/openapi.json
+      # Input of the radio-atlantida-frontend client build (§6.4). The release
+      # workflow publishes it with the tagged images.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: api/openapi.json
+
   docker:
     runs-on: ubuntu-latest
     steps:

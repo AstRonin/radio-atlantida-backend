@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 )
 
@@ -81,11 +82,7 @@ func recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 				)
 				// Upgraded connections (WebSocket) cannot take a response.
 				if r.Header.Get("Connection") != "Upgrade" {
-					writeJSON(w, http.StatusInternalServerError, problem{
-						Title:     http.StatusText(http.StatusInternalServerError),
-						Status:    http.StatusInternalServerError,
-						RequestID: reqID,
-					}, contentTypeProblem)
+					writeProblem(w, r, http.StatusInternalServerError, errcodes.InternalError)
 				}
 			}()
 			next.ServeHTTP(w, r)

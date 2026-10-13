@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
 )
 
 const usage = `usage: backend <command>
@@ -22,6 +24,10 @@ commands:
   migrate up   apply database migrations and exit
   openapi      print the OpenAPI specification (JSON) to stdout
 `
+
+// version is the release version, set at build time with
+// -ldflags "-X main.version=1.2.3".
+var version = "dev"
 
 // errUsage marks a command-line error; the usage text is printed with it.
 var errUsage = errors.New("invalid arguments")
@@ -56,7 +62,15 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 		return migrateUp(ctx, stdout)
 	case "openapi":
-		return errors.New("openapi: not implemented yet (Phase 3)")
+		if len(rest) != 0 {
+			return fmt.Errorf("%w: openapi takes no arguments", errUsage)
+		}
+		doc, err := httpapi.OpenAPI(version)
+		if err != nil {
+			return err
+		}
+		_, err = stdout.Write(doc)
+		return err
 	case "help", "-h", "--help":
 		_, err := fmt.Fprint(stdout, usage)
 		return err

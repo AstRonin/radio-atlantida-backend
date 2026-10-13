@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 )
 
@@ -121,8 +122,8 @@ func TestRecovererReturnsProblemAndLogsOnce(t *testing.T) {
 	r.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/boom", nil))
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
-	require.Equal(t, contentTypeProblem, rec.Header().Get("Content-Type"))
-	require.JSONEq(t, `{"title":"Internal Server Error","status":500}`, rec.Body.String())
+	require.Equal(t, dto.ContentTypeProblem, rec.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"title":"Internal Server Error","status":500,"code":"internal_error"}`, rec.Body.String())
 
 	var errorsLogged int
 	for _, e := range logs.entries(t) {
