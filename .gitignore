@@ -31,3 +31,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Project
+bin/
+# Dev stack data: generated media, playout journal, logs
+.dev/
+# Generated OpenAPI specification (CI artifact, not hand-edited)
+api/

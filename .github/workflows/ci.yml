@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: line endings and paths
+        # Development is on macOS, runtime on Windows (§9.1): no CRLF and no
+        # file names that differ only by case.
+        run: |
+          if git ls-files --eol | grep -E '^i/crlf'; then
+            echo "files with CRLF line endings"; exit 1
+          fi
+          dups=$(git ls-files | tr '[:upper:]' '[:lower:]' | sort | uniq -d)
+          if [ -n "$dups" ]; then echo "case-insensitive duplicates: $dups"; exit 1; fi
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: unit and integration tests
+        # testcontainers-go uses the Docker engine of the runner.
+        run: go test -race -tags integration ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false

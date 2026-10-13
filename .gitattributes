@@ -1,0 +1,8 @@
+# Development is on macOS, runtime on Windows (§9.1 of the design).
+# Everything is stored and checked out with LF, so scripts and the Liquidsoap
+# script work inside Linux containers on both.
+* text=auto eol=lf
+
+*.mp3 binary
+*.wav binary
+*.png binary
