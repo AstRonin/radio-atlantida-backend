@@ -105,14 +105,11 @@ func (s *Store) Get(ctx context.Context, id int64) (operations.Operation, error)
 	if err != nil {
 		return operations.Operation{}, fmt.Errorf("select operation %d: %w", id, err)
 	}
-	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[row])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return operations.Operation{}, operations.ErrNotFound
-	}
+	op, err := db.CollectOne(rows, row.operation, operations.ErrNotFound)
 	if err != nil {
 		return operations.Operation{}, fmt.Errorf("select operation %d: %w", id, err)
 	}
-	return r.operation(), nil
+	return op, nil
 }
 
 // List returns operations in ID order. The table holds at most the retention
@@ -127,13 +124,9 @@ func (s *Store) List(ctx context.Context, f operations.ListFilter) ([]operations
 	if err != nil {
 		return nil, fmt.Errorf("select operations: %w", err)
 	}
-	rs, err := pgx.CollectRows(rows, pgx.RowToStructByName[row])
+	ops, err := db.CollectAll(rows, row.operation)
 	if err != nil {
 		return nil, fmt.Errorf("select operations: %w", err)
-	}
-	ops := make([]operations.Operation, len(rs))
-	for i, r := range rs {
-		ops[i] = r.operation()
 	}
 	return ops, nil
 }

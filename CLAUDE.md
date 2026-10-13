@@ -52,7 +52,7 @@ internal/
   config/             env config (caarlos0/env + godotenv); the only place that reads env
   settings/           admin settings: typed registry (defaults, limits, apply mode, secrets), Service, Value/OnChange
   logging/            slog JSON, components, secret masking, async writer, daily UTC rotator
-  db/                 pgx pool (UTC session, timeouts), GORM on the same pool, DB.WithTx (one Tx for pgx and GORM), ConstraintError
+  db/                 pgx pool (UTC session, timeouts), GORM on the same pool, DB.WithTx (one Tx for pgx and GORM), ConstraintError, CollectOne/CollectAll
   dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)
   architecture/       architecture test: SQL and driver imports only in the allowed packages; handlers and jobs never import repositories
   migrations/         embedded NNNN_name.up.sql + runner (golang-migrate)
@@ -64,6 +64,7 @@ internal/
   operations/         async operations: operations row + one terminal <kind>.completed/.failed event
   jobs/               scheduler (advisory-locked singleton runs, each an operation) and job schedules; no business rules
   retention/          retention rules (play log, operations); jobs schedules it
+  workerpool/         bounded worker pool (Pool: fixed workers + bounded queue) and ForEach for batches
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
     operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
   library/ playrules/ separation/ media/             (Phase 6)
@@ -92,7 +93,7 @@ docs/                 requirements, design, phase plans
 
 ### Go
 
-- Packages by domain (`library`, `playrules`, `rotation`), not by layer. No `util`/`common`.
+- Packages by domain (`library`, `playrules`, `rotation`), not by layer. No `util`/`common`/`helpers` packages: a package is named after what it provides, and a helper lives in the package whose job it serves (row collection in `db`, bounded concurrency in `workerpool`). A small helper used in two places is copied rather than shared ("a little copying is better than a little dependency"). Prefer the standard library and built-ins (`new(expr)` instead of a `ptr` helper, `slices`, `maps`).
 - Small interfaces defined by the consumer. Accept interfaces, return concrete types. No interface with one implementation unless a test needs a fake. No generic repositories.
 - No global mutable state, no `init()` with side effects. Dependencies via constructors; `main` wires everything. `os.Getenv` only in `internal/config`.
 - Every new third-party dependency needs a reason in the PR description. Prefer the standard library.
@@ -105,6 +106,11 @@ docs/                 requirements, design, phase plans
   - **Outgoing calls** (Icecast, Liquidsoap telnet/HTTP): `http.NewRequestWithContext`, `net.Dialer.DialContext`, and a per-call deadline.
   - `context.Background()` only in `main` and in tests (use `t.Context()`). `context.WithoutCancel` only for cleanup that must outlive a cancelled parent (shutdown drain, final writes), always with a timeout.
 - Every goroutine has an owner and a stop path; use `errgroup`. Shared state: mutex or single owner, documented. Tests run with `-race`.
+- **Bounded concurrency (`internal/workerpool`).** Never start one goroutine per request, item, file, or event: work whose count depends on input goes through a worker pool.
+  - Tasks that arrive over time (async operations, per-request background work): a `workerpool.Pool` created in `main`, passed through the constructor, closed on shutdown after the producers stop (`Close` runs the queued tasks and waits). Size workers and queue with a named constant and a comment why.
+  - A batch known up front (scan a directory, probe files, import tracks): `workerpool.ForEach(ctx, n, items, fn)`; the first error cancels the rest.
+  - `Submit` waits for a queue slot until its context ends; on an error the producer reports the task as failed (e.g. `operations.Tracker.Run` fails the operation), it never drops it silently. A task recovers its own panics when it runs foreign code.
+  - Not for fixed, long-lived goroutines (server, scheduler loops, a single drain/writer goroutine such as `logging.AsyncWriter`, a WebSocket client's write loop): those stay in `errgroup` or have one documented owner. A goroutine that only waits for cancellation is `context.AfterFunc`, not a hand-written `select` on a local `done` channel.
 - Domain code never calls `time.Now()`: inject a `Clock`. Randomness: `math/rand/v2` with an injected seeded source (rotation must be deterministic per seed).
 - HTTP: explicit server timeouts (streaming routes clear their write deadline via `http.ResponseController`); request bodies size-limited; close response bodies; thin handlers (decode, validate, call service, encode).
 - Format with gofumpt + goimports; `golangci-lint` and `go vet` clean — any `//nolint` needs a specific linter and an explanation. Exported identifiers have doc comments; comments explain why.

@@ -22,11 +22,20 @@ import (
 	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
+	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
 // shutdownTimeout bounds the drain of in-flight requests on SIGINT/SIGTERM.
 const shutdownTimeout = 15 * time.Second
+
+// Operations started by requests run on a bounded pool (§6.5). One manager
+// starts them by hand, so a few workers are plenty; the queue absorbs a
+// burst of clicks without a goroutine per click.
+const (
+	operationWorkers = 4
+	operationQueue   = 64
+)
 
 // serve runs the HTTP API, the WebSocket hub, and the background jobs until
 // ctx is cancelled, then shuts down in order: stop accepting requests and
@@ -68,7 +77,8 @@ func serve(ctx context.Context) error {
 	cancel()
 
 	hub := ws.NewHub(apiLog)
-	tracker := operations.NewTracker(operationsrepo.New(database.Pool), hub, log, time.Now)
+	opsPool := workerpool.New(operationWorkers, operationQueue)
+	tracker := operations.NewTracker(operationsrepo.New(database.Pool), hub, opsPool, log, time.Now)
 	// Operations run only inside this process: a row still running now was
 	// cut off by the previous shutdown or crash.
 	fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -132,9 +142,9 @@ func serve(ctx context.Context) error {
 	})
 
 	waitErr := g.Wait()
-	// Operations started by requests finish their final writes before the
-	// database closes.
-	tracker.Wait()
+	// Operations started by requests (queued ones too) finish their final
+	// writes before the database closes.
+	opsPool.Close()
 	if waitErr != nil {
 		apiLog.Error("server stopped with error", logging.KeyError, waitErr)
 		return waitErr

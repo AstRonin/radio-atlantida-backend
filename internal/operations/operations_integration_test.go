@@ -19,6 +19,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -76,7 +77,9 @@ func newTracker(t *testing.T) (*operations.Tracker, *recorder, *syncBuffer) {
 	pub := &recorder{}
 	logs := &syncBuffer{}
 	log := slog.New(logging.NewHandler(logs, slog.LevelDebug))
-	return operations.NewTracker(operationsrepo.New(d.Pool), pub, log, func() time.Time { return now }), pub, logs
+	pool := workerpool.New(1, 1)
+	t.Cleanup(pool.Close)
+	return operations.NewTracker(operationsrepo.New(d.Pool), pub, pool, log, func() time.Time { return now }), pub, logs
 }
 
 func TestOperations(t *testing.T) {
@@ -202,4 +205,20 @@ func TestFailInterruptedAndList(t *testing.T) {
 	none, err := tracker.List(ctx, operations.ListFilter{Since: now.Add(time.Second), Limit: 10})
 	require.NoError(t, err)
 	require.Empty(t, none)
+}
+
+func TestRunOnClosedPoolFailsTheOperation(t *testing.T) {
+	d := dbtest.Migrated(t)
+	pool := workerpool.New(1, 1)
+	pool.Close()
+	tracker := operations.NewTracker(operationsrepo.New(d.Pool), &recorder{}, pool, dbtest.Logger(t), time.Now)
+
+	id, err := tracker.Run(t.Context(), operations.KindRetention, logging.ComponentRetention,
+		func(context.Context) (string, error) { return "never", nil })
+	require.NoError(t, err)
+
+	op, err := tracker.Get(t.Context(), id)
+	require.NoError(t, err)
+	require.Equal(t, operations.StatusFailed, op.Status, "the row never stays running")
+	require.Contains(t, *op.ErrorMessage, workerpool.ErrClosed.Error())
 }

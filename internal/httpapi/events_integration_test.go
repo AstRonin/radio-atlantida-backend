@@ -21,6 +21,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -30,7 +31,9 @@ func TestOperationEventOverWebSocketAndREST(t *testing.T) {
 	d := dbtest.Migrated(t)
 	log := dbtest.Logger(t)
 	hub := ws.NewHub(log)
-	tracker := operations.NewTracker(operationsrepo.New(d.Pool), hub, log, time.Now)
+	pool := workerpool.New(1, 1)
+	t.Cleanup(pool.Close)
+	tracker := operations.NewTracker(operationsrepo.New(d.Pool), hub, pool, log, time.Now)
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Log: log, DB: d.Pool, Events: hub, Operations: tracker, Logs: logging.NewFileReader(t.TempDir()),
 	}))

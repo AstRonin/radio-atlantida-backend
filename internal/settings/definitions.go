@@ -283,7 +283,7 @@ func (r *Registry) insert(d *Definition) {
 func intDef(k Key[int], desc, unit string, def, minimum, maximum int) *Definition {
 	return &Definition{
 		Key: k.name, Description: desc, Type: TypeInteger, Unit: unit, Default: def,
-		Minimum: ptr(float64(minimum)), Maximum: ptr(float64(maximum)),
+		Minimum: new(float64(minimum)), Maximum: new(float64(maximum)),
 		parse: func(raw json.RawMessage) (any, error) {
 			n, err := decodeInt(k.name, raw)
 			if err != nil {
@@ -320,7 +320,7 @@ func enumIntDef(k Key[int], desc, unit string, def int, values ...int) *Definiti
 func numberDef(k Key[float64], desc, unit string, def, minimum, maximum float64) *Definition {
 	return &Definition{
 		Key: k.name, Description: desc, Type: TypeNumber, Unit: unit, Default: def,
-		Minimum: ptr(minimum), Maximum: ptr(maximum),
+		Minimum: new(minimum), Maximum: new(maximum),
 		parse: func(raw json.RawMessage) (any, error) {
 			num, err := decodeNumber(k.name, raw)
 			if err != nil {
@@ -343,7 +343,7 @@ func numberDef(k Key[float64], desc, unit string, def, minimum, maximum float64)
 func stringDef(k Key[string], desc, def string, minLen, maxLen int, check func(string) error) *Definition {
 	return &Definition{
 		Key: k.name, Description: desc, Type: TypeString, Default: def,
-		Minimum: ptr(float64(minLen)), Maximum: ptr(float64(maxLen)),
+		Minimum: new(float64(minLen)), Maximum: new(float64(maxLen)),
 		parse: func(raw json.RawMessage) (any, error) {
 			var s string
 			if err := decodeStrict(raw, &s); err != nil || isNull(raw) {
@@ -402,7 +402,7 @@ func boolDef(k Key[bool], desc string, def bool) *Definition {
 func optionalIDDef(k Key[*int64], desc string) *Definition {
 	return &Definition{
 		Key: k.name, Description: desc, Type: TypeInteger, Default: (*int64)(nil), Nullable: true,
-		Minimum: ptr(1.0),
+		Minimum: new(1.0),
 		parse: func(raw json.RawMessage) (any, error) {
 			if isNull(raw) {
 				return (*int64)(nil), nil
@@ -522,8 +522,6 @@ func unknownField(err error) (string, bool) {
 func invalid(key string, rule Rule, msg string) *InvalidValueError {
 	return &InvalidValueError{Key: key, Rule: rule, Message: msg}
 }
-
-func ptr[T any](v T) *T { return &v }
 
 // Format checks.
 
