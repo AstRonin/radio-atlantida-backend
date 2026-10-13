@@ -1,0 +1,134 @@
+# Development and test stack. NOT for production: the production compose file
+# lives in radio-atlantida-deploy (§1.1 of docs/tech-design.md).
+#
+#   make stack-up                      db, icecast, liquidsoap (backend runs on the host: make run)
+#   docker compose -f docker-compose.dev.yml --profile app up --build
+#                                      the same plus the backend container
+#
+# Startup configuration of every service is set here through `environment:`
+# (values from .env). The connection values the backend uses to reach Icecast
+# and Liquidsoap (host names, ports, mount, stream format) are admin settings
+# whose code defaults must match this file: NewRegistry in internal/settings,
+# checked by TestDefaultsMatchDevStack. Change both together.
+#
+# All published ports are bound to 127.0.0.1 only.
+
+name: radio-atlantida-dev
+
+services:
+  db:
+    image: postgres:17.11
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  icecast:
+    image: libretime/icecast:2.4.4-alpine
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set in .env}
+      ICECAST_ADMIN_USERNAME: ${ICECAST_ADMIN_USERNAME:-admin}
+      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:?set in .env}
+      ICECAST_RELAY_PASSWORD: ${ICECAST_RELAY_PASSWORD:?set in .env}
+      ICECAST_HOSTNAME: localhost
+      ICECAST_MAX_CLIENTS: "20"
+      ICECAST_MAX_SOURCES: "4"
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/status-json.xsl"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  liquidsoap:
+    image: savonet/liquidsoap:v2.4.6
+    command: ["/etc/liquidsoap/radio.liq"]
+    environment:
+      TZ: UTC
+      ICECAST_HOST: icecast
+      ICECAST_PORT: "8000"
+      ICECAST_MOUNT: /radio
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set in .env}
+      LIQUIDSOAP_CONTROL_USER: ${LIQUIDSOAP_CONTROL_USER:-source}
+      LIQUIDSOAP_CONTROL_PASSWORD: ${LIQUIDSOAP_CONTROL_PASSWORD:?set in .env}
+      TELNET_PORT: "1234"
+      HARBOR_PORT: "8005"
+      JOURNAL_DIR: /journal
+      BACKEND_CALLBACK_URL: ${BACKEND_CALLBACK_URL:-http://host.docker.internal:8080/api/playout/callback}
+    # Published only so a backend running on the host can reach them in
+    # development. In production they stay on the internal network (§8.9).
+    ports:
+      - "127.0.0.1:1234:1234"
+      - "127.0.0.1:8005:8005"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${MEDIA_ROOT:?set in .env}:/media:ro
+      - ./.dev/journal:/journal
+      - ./dev/liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+    depends_on:
+      icecast:
+        condition: service_healthy
+    healthcheck:
+      # The telnet control port answers: send `quit`, expect `Bye!`.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/1234 && echo quit >&3 && timeout 2 grep -q Bye <&3"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # Applies the migrations once and exits; backend starts only after it
+  # succeeds (§9.2). Same image as backend.
+  migrate:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: radio-atlantida-backend:dev
+    command: ["migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+    # The image health check probes the HTTP server, which migrate does not run.
+    healthcheck:
+      disable: true
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend:
+    profiles: ["app"]
+    image: radio-atlantida-backend:dev
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      MEDIA_ROOT: /media
+      LOG_ROOT: /logs
+      HTTP_ADDR: 0.0.0.0:8080
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set in .env}
+      LIQUIDSOAP_CONTROL_USER: ${LIQUIDSOAP_CONTROL_USER:-source}
+      LIQUIDSOAP_CONTROL_PASSWORD: ${LIQUIDSOAP_CONTROL_PASSWORD:?set in .env}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ${MEDIA_ROOT:?set in .env}:/media:ro
+      - ${LOG_ROOT:?set in .env}:/logs
+      # Playout journal, read for reconciliation (§7.1; path setting added later).
+      - ./.dev/journal:/journal:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

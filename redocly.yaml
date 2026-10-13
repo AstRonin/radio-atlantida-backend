@@ -1,0 +1,10 @@
+# OpenAPI lint config for `make openapi-lint` and CI (Redocly CLI).
+extends:
+  - recommended
+rules:
+  # The API has no authentication by design (design §6, §10).
+  security-defined: off
+  # Private project; no license is published.
+  info-license: off
+  # The panel sets the base URL of the generated client.
+  no-empty-servers: off

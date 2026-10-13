@@ -1,0 +1,66 @@
+package jobs
+
+import (
+	"context"
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+)
+
+// fakeLocker grants the lock unless held is set.
+type fakeLocker struct {
+	held bool
+	keys []int64
+}
+
+func (f *fakeLocker) WithLock(_ context.Context, key int64, fn func() error) error {
+	f.keys = append(f.keys, key)
+	if f.held {
+		return ErrLocked
+	}
+	return fn()
+}
+
+type countingOps struct{ runs int }
+
+func (c *countingOps) Do(context.Context, operations.Kind, logging.Component, operations.Func) (int64, error) {
+	c.runs++
+	return 1, nil
+}
+
+func TestRunOnceTakesTheJobLock(t *testing.T) {
+	t.Parallel()
+	job := Job{Kind: operations.KindRetention, Component: logging.ComponentRetention, Timeout: time.Second}
+	tests := []struct {
+		name     string
+		held     bool
+		wantRuns int
+	}{
+		{"lock free: the job runs", false, 1},
+		{"lock held: the run is skipped", true, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			locks, ops := &fakeLocker{held: tt.held}, &countingOps{}
+
+			NewScheduler(locks, ops, slog.New(slog.DiscardHandler), job).runOnce(t.Context(), job)
+
+			require.Equal(t, tt.wantRuns, ops.runs)
+			require.Equal(t, []int64{lockKey(job.Kind)}, locks.keys)
+		})
+	}
+}
+
+func TestLockKeyIsStable(t *testing.T) {
+	t.Parallel()
+	// The key is shared by every process of every release that may run at
+	// once during an update: it must never change for a kind.
+	require.Equal(t, int64(-8726217943897523684), lockKey(operations.KindRetention))
+	require.NotEqual(t, lockKey(operations.KindRetention), lockKey("other"))
+}
