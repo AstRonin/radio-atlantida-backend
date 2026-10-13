@@ -1,6 +1,6 @@
 # Minimal development playout script for Liquidsoap 2.4.x.
 #
-# Uses the same mechanisms as production (§8 of docs/tech-design-7-8.md):
+# Uses the same mechanisms as production (§8 of docs/tech-design.md):
 #   - a request queue fed by the backend over telnet (`request.push <uri>`);
 #   - a safety source behind `fallback`, so the stream never stops;
 #   - a harbor input for live voice and an interactive `music_gain` variable;

@@ -2,7 +2,7 @@
 
 Go backend of the Radio Atlantida automation system: REST API, WebSocket hub, rotation engine, Liquidsoap control, outage handling.
 
-Design documents are in [`docs/`](docs/): requirements (`base-v2-3.md`), technical design (`tech-design-7-8.md`, the authority), and the initialization plan (`backend-init-plan.md`).
+Design documents are in [`docs/`](docs/): requirements (`base.md`), technical design (`tech-design.md`, the authority), and the initialization plan (`backend-init-plan.md`).
 
 ## Requirements
 

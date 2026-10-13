@@ -16,13 +16,11 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 ## Required reading at the start of every session
 
-1. `docs/base-v2-3.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
-2. `docs/tech-design-7-8.md` — the technical design. **It is the authority** on how things are built.
+1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
+2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
 3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–5.
 
 **If the code, the design, and the requirements disagree, stop and ask.**
-
-(`docs/base.md` and `docs/tech-design.md` are copies of the versioned files above.)
 
 ## Commands
 

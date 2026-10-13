@@ -1,17 +1,17 @@
 # Backend Initialization Plan (radio-atlantida-backend)
 
 Status: Draft for Claude Code
-Based on: `base-v2-3.md` (requirements), `tech-design-7-8.md` (technical design)
+Based on: `base.md` (requirements), `tech-design.md` (technical design)
 Last updated: 2026-10-13
 
 ## 0. How to use this plan
 
 - **Context documents.** Before any work, Claude Code reads three files, which are copied into the repository under `docs/`:
-  - `docs/base-v2-3.md` — the product requirements. It explains what the station needs and why. Use it to understand the goal of every feature, even when the current phase does not implement it, so that early code (schema, packages, interfaces) does not block later features.
-  - `docs/tech-design-7-8.md` — the technical design. It is the authority on how things are built.
+  - `docs/base.md` — the product requirements. It explains what the station needs and why. Use it to understand the goal of every feature, even when the current phase does not implement it, so that early code (schema, packages, interfaces) does not block later features.
+  - `docs/tech-design.md` — the technical design. It is the authority on how things are built.
   - `docs/backend-init-plan.md` — this plan. It says what to build now.
 - This plan is the task list for Claude Code. Work one phase at a time. Each phase ends with a green build, passing tests, and a commit (one PR per phase).
-- The technical design (`tech-design-7-8.md`) is the authority. If this plan and the design disagree, stop and ask.
+- The technical design (`tech-design.md`) is the authority. If this plan and the design disagree, stop and ask.
 - Section 9 lists decisions and open points. Items marked **ASK** must be confirmed by the developers before the phase that needs them. Items marked **DEFAULT** are applied unless the developers say otherwise.
 - Scope of initialization: Phases 1 to 5. They produce a running service with the full schema, the API contract pipeline, settings, and the library CRUD. The rotation engine, Liquidsoap, outages, and live voice are later phases (Section 8), planned in their own documents.
 
@@ -144,8 +144,8 @@ radio-atlantida-backend/
     liquidsoap/radio.liq         # minimal dev playout script (startup values come from compose env)
     scripts/gen-media.sh         # generates test audio files with ffmpeg
   docs/
-    base-v2-3.md                 # requirements (context for the AI)
-    tech-design-7-8.md           # technical design (authority)
+    base.md                      # requirements (context for the AI)
+    tech-design.md               # technical design (authority)
     backend-init-plan.md         # this plan
   .dev/                          # generated media, playout journal, logs (git-ignored)
   .env.example
@@ -209,8 +209,8 @@ Tasks:
    - Integration tests of repositories still use testcontainers-go (isolated database per test package). The compose stack is for manual testing and for the end-to-end tests of later phases (Liquidsoap, outages).
 10. `.golangci.yml` with a sensible default set (errcheck, govet, staticcheck, gosec, revive, gofumpt).
 11. `CLAUDE.md`, so every later session works with the same context and conventions:
-    - **Project context**: a short summary (10 to 15 lines) of `docs/base-v2-3.md`: what the system is (radio automation: library, playlists, 60-minute clocks, grid, rotation with separation and play rules, filler, Liquidsoap playout to Icecast, live voice, outage detection and missed items), who uses it (one manager, no authentication), and where it runs (Docker Desktop on Windows, development on macOS).
-    - **Required reading** at the start of every session: `docs/base-v2-3.md` (goal), `docs/tech-design-7-8.md` (authority), the current phase plan.
+    - **Project context**: a short summary (10 to 15 lines) of `docs/base.md`: what the system is (radio automation: library, playlists, 60-minute clocks, grid, rotation with separation and play rules, filler, Liquidsoap playout to Icecast, live voice, outage detection and missed items), who uses it (one manager, no authentication), and where it runs (Docker Desktop on Windows, development on macOS).
+    - **Required reading** at the start of every session: `docs/base.md` (goal), `docs/tech-design.md` (authority), the current phase plan.
     - The ground rules of Section 1, including 1.1 (Go) and 1.2 (PostgreSQL and SQL).
     - The layout of Section 2 and the commands from the Makefile.
     - "If the code, the design, and the requirements disagree, stop and ask."
@@ -352,14 +352,14 @@ The v7-7 and v7-8 migration notes in §9.2 of the design (copying from `categori
 
 ## 10. Prompt for the first Claude Code session
 
-Before the session, copy `base-v2-3.md`, `tech-design-7-8.md`, and `backend-init-plan.md` into `docs/` of the empty repository.
+Before the session, copy `base.md`, `tech-design.md`, and `backend-init-plan.md` into `docs/` of the empty repository.
 
 > You are starting the backend of a radio automation system.
 >
-> 1. Read `docs/base-v2-3.md` first. It describes what the station needs: the overall goal of the product. Keep it in mind for every decision, so that what you build now does not block later features.
-> 2. Read `docs/tech-design-7-8.md`. It is the authority on how the system is built.
+> 1. Read `docs/base.md` first. It describes what the station needs: the overall goal of the product. Keep it in mind for every decision, so that what you build now does not block later features.
+> 2. Read `docs/tech-design.md`. It is the authority on how the system is built.
 > 3. Read `docs/backend-init-plan.md`. It is the task list.
 >
-> Implement Phase 1 of `docs/backend-init-plan.md`. Follow Section 1 (ground rules, including 1.1 Go and 1.2 PostgreSQL/SQL best practices) and Section 2 (layout). Build the full dev stack of task 9 (`db`, `icecast`, `liquidsoap`, `backend` profile) with pinned image versions, and the test media script. Write `CLAUDE.md` as described in task 11, including the project context summary of `docs/base-v2-3.md`.
+> Implement Phase 1 of `docs/backend-init-plan.md`. Follow Section 1 (ground rules, including 1.1 Go and 1.2 PostgreSQL/SQL best practices) and Section 2 (layout). Build the full dev stack of task 9 (`db`, `icecast`, `liquidsoap`, `backend` profile) with pinned image versions, and the test media script. Write `CLAUDE.md` as described in task 11, including the project context summary of `docs/base.md`.
 >
 > Apply the DEFAULT and DECIDED items of Section 9. For ASK items, use the proposals unless told otherwise, and list in your final message which ones you applied and which image tags you pinned. If the requirements, the design, and the plan disagree, stop and ask. Do not start Phase 2. Finish with `make stack-up` healthy, `make lint test` passing, and a short summary of what was created.
