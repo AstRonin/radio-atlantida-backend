@@ -104,7 +104,7 @@ docs/                 requirements, design, phase plans
 - Keyset pagination for long lists (play history, logs); `OFFSET` only for short lists.
 - `EXPLAIN ANALYZE` every hot-path query; keep the result in a test or comment.
 - The database enforces invariants: `NOT NULL` by default, FKs, `UNIQUE`, `CHECK`.
-- Constraint/index names: `pk_<table>`, `fk_<table>_<column>`, `uq_<table>_<columns>`, `ck_<table>_<rule>`, `ix_<table>_<columns>`. Map violations to domain errors by SQLSTATE (`23505`, `23503`, `23514`) and constraint name.
+- Constraint/index names: `pk_<table>`, `fk_<table>_<column>`, `uq_<table>_<columns>`, `ck_<table>_<rule>`, `ix_<table>_<columns>`, `ex_<table>_<columns>` (exclusion). Map violations to domain errors by SQLSTATE (`23505`, `23503`, `23514`, `23P01` exclusion) and constraint name.
 - `snake_case`, plural tables. `bigint GENERATED ALWAYS AS IDENTITY` keys, `timestamptz`, `text` (not `varchar(n)` unless a real rule), `jsonb` only for optional settings, `boolean NOT NULL DEFAULT ...`. Enum-like columns are `text` + `CHECK`, not PG enums.
 - Index every FK column used in joins or in-use checks. No speculative indexes.
 - Short transactions; no network calls inside. `READ COMMITTED`; `SELECT ... FOR UPDATE` for read-then-change; `FOR UPDATE SKIP LOCKED` for job claims. Singleton jobs take an advisory lock. Large deletes in batches. Every query has a context deadline (connections also set `statement_timeout`, `idle_in_transaction_session_timeout`).
