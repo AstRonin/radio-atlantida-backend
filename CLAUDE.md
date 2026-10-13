@@ -65,9 +65,15 @@ internal/
   jobs/               scheduler (advisory-locked singleton runs, each an operation) and job schedules; no business rules
   retention/          retention rules (play log, operations); jobs schedules it
   workerpool/         bounded worker pool (Pool: fixed workers + bounded queue) and ForEach for batches
+  validation/         validation.Error: per-field refusals of domain services (rule → field code in problemFor)
+  library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete
+  playrules/          play rules (window, weekdays, min interval, max per hour) and their track/playlist targets
+  separation/         separation rules (edit only; capped at the play log retention)
+  media/              MEDIA_ROOT: path rules, os.OpenInRoot (no escape, symlinks included), ffprobe, content types
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
     operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
-  library/ playrules/ separation/ media/             (Phase 6)
+    library/ separation/                           (GORM; library: one store per aggregate)
+    playrules/                                     (pgx: time and smallint[] columns, array-parameter link sets)
   clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
@@ -123,7 +129,7 @@ docs/                 requirements, design, phase plans
 - One file per aggregate (`playlists.go`, `tracks.go`). It holds the SQL, the row structs for scanning, and the mapping to domain types. No business rules, DTOs, network calls, or transaction boundaries.
 - The domain declares the small interface it uses (`operations.Store`, `retention.Store`, `jobs.Locker`); the repository implements it and returns domain types and sentinels. No generic or base repository.
 - Handlers (`internal/httpapi`) and jobs (`internal/jobs`) call domain services, never repositories, not even for a plain read: they import no `internal/repository/...` package. Only `cmd` wires repositories into services; tests are exempt. `internal/architecture` enforces it.
-- Constructor `New(q db.Querier)` (or `New(d *db.DB)` for GORM), and `WithTx(tx db.Tx)` returning a bound copy. The domain service opens the transaction with `d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {...})` and passes `tx` to every repository it touches; a repository never begins or commits.
+- Constructor `New(q db.Querier)` (or `New(d *db.DB)` for GORM), and `WithTx(tx db.Tx)` returning a bound copy. When the domain interface includes `WithTx`, the repository returns the domain interface type (Go has no covariant returns), e.g. `func (s *Tracks) WithTx(tx db.Tx) library.TrackStore`. The domain service opens the transaction with `d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {...})` and passes `tx` to every repository it touches; a repository never begins or commits.
 - Errors: `pgx.ErrNoRows` → the domain's `ErrNotFound`; `db.AsConstraintError(err)` gives kind (`23505`/`23503`/`23514`/`23P01`) and constraint name → the domain's sentinel. Anything else is wrapped with context. A domain never sees `pgconn.PgError` or a GORM error.
 - SQL keywords are upper case (`SELECT`, `INSERT INTO`, …): the architecture test matches them that way, so English messages are not mistaken for SQL.
 - Tests: integration tests per repository (testcontainers via `internal/dbtest`); SQL is fine in tests for fixtures and assertions. Domain services get unit tests with fake stores.

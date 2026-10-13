@@ -26,9 +26,11 @@ const (
 
 var installErrorHook sync.Once
 
-// newAPI creates the huma API on r. Every operation is generated from Go
-// types, so the OpenAPI document always matches the code (§6.4).
-func newAPI(r chi.Router, version string) huma.API {
+// newAPI creates the huma API. Operations are registered on timed, except
+// streaming ones (handlers.IsStreaming), which go on untimed. Every
+// operation is generated from Go types, so the OpenAPI document always
+// matches the code (§6.4).
+func newAPI(timed, untimed chi.Router, version string) huma.API {
 	// huma builds its own errors (decoding, validation) through this
 	// package-level hook. It is set once, before the first API exists, and
 	// never changed; every API of the process uses the same problem format.
@@ -48,10 +50,29 @@ func newAPI(r chi.Router, version string) huma.API {
 	cfg.SchemasPath = ""
 	cfg.CreateHooks = nil
 
-	api := humachi.New(r, cfg)
+	api := huma.NewAPI(cfg, routeAdapter{
+		Adapter: humachi.NewAdapter(timed),
+		untimed: humachi.NewAdapter(untimed),
+	})
 	registerEventSchemas(api.OpenAPI().Components.Schemas)
 	documentWebSocket(api.OpenAPI())
 	return api
+}
+
+// routeAdapter registers streaming operations without the request timeout:
+// the timeout would answer 504 in the middle of a long response. Both
+// routers share one tree, so ServeHTTP of either serves every route.
+type routeAdapter struct {
+	huma.Adapter
+	untimed huma.Adapter
+}
+
+func (a routeAdapter) Handle(op *huma.Operation, handler func(huma.Context)) {
+	if handlers.IsStreaming(op) {
+		a.untimed.Handle(op, handler)
+		return
+	}
+	a.Adapter.Handle(op, handler)
 }
 
 // documentWebSocket lists GET /api/ws in the document. The route itself is a
@@ -129,7 +150,7 @@ func toAny(ss []string) []any {
 // database or other service.
 func OpenAPI(version string) ([]byte, error) {
 	r := chi.NewRouter()
-	api := newAPI(r, version)
+	api := newAPI(r, r, version)
 	handlers.Register(api, handlers.Deps{Log: discardLogger()})
 	doc, err := json.MarshalIndent(api.OpenAPI(), "", "  ")
 	if err != nil {

@@ -14,11 +14,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/handlers"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
@@ -282,7 +287,16 @@ func TestOpenAPIDocument(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &doc))
 	require.Equal(t, "3.1.0", doc.OpenAPI)
 	require.Equal(t, "1.2.3", doc.Info.Version)
-	for _, p := range []string{"/api/operations", "/api/operations/{id}", "/api/logs/files", "/api/logs/files/{name}", "/api/status/live", "/api/ws", "/api/settings", "/api/settings/{key}", "/api/settings/secrets"} {
+	for _, p := range []string{
+		"/api/operations", "/api/operations/{id}", "/api/logs/files", "/api/logs/files/{name}", "/api/status/live", "/api/ws",
+		"/api/settings", "/api/settings/{key}", "/api/settings/secrets",
+		"/api/playlist-types", "/api/playlist-types/{id}",
+		"/api/playlists", "/api/playlists/{id}", "/api/playlists/{id}/tracks", "/api/playlists/{id}/play-rules",
+		"/api/artists", "/api/artists/{id}",
+		"/api/tracks", "/api/tracks/{id}", "/api/tracks/{id}/play-rules", "/api/tracks/{id}/audio",
+		"/api/play-rules", "/api/play-rules/{id}", "/api/play-rules/{id}/targets",
+		"/api/separation-rules", "/api/separation-rules/{id}",
+	} {
 		require.Contains(t, doc.Paths, p)
 	}
 
@@ -327,4 +341,50 @@ func stringsOf[T ~string](vs []T) []string {
 		out[i] = string(v)
 	}
 	return slices.Clip(out)
+}
+
+// Streaming operations (track preview) run without the request timeout;
+// every other operation keeps it.
+func TestStreamingOperationsHaveNoRequestTimeout(t *testing.T) {
+	t.Parallel()
+	r := chi.NewRouter()
+	timed := r.With(middleware.Timeout(time.Minute))
+	api := newAPI(timed, r, "dev")
+	deadlines := map[string]bool{}
+	for _, name := range []string{"normal", "stream"} {
+		op := huma.Operation{OperationID: name, Method: http.MethodGet, Path: "/" + name}
+		if name == "stream" {
+			op.Metadata = map[string]any{handlers.Streaming: true}
+		}
+		huma.Register(api, op, func(ctx context.Context, _ *struct{}) (*struct{}, error) {
+			_, deadlines[name] = ctx.Deadline()
+			return nil, nil
+		})
+	}
+
+	for _, name := range []string{"normal", "stream"} {
+		rec := do(t, r, http.MethodGet, "/"+name)
+		require.Equal(t, http.StatusNoContent, rec.Code, name)
+	}
+	require.Equal(t, map[string]bool{"normal": true, "stream": false}, deadlines)
+}
+
+// The format enum of the track DTOs lists exactly the stored formats.
+func TestTrackFormatEnumMatchesMedia(t *testing.T) {
+	t.Parallel()
+	raw, err := OpenAPI("dev")
+	require.NoError(t, err)
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					Enum []string `json:"enum"`
+				} `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	for _, s := range []string{"Track", "TrackBody"} {
+		require.Equal(t, media.Formats(), doc.Components.Schemas[s].Properties["format"].Enum, s)
+	}
 }

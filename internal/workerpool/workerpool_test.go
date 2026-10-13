@@ -116,7 +116,7 @@ func TestForEach(t *testing.T) {
 			if tt.wantErr == nil {
 				require.EqualValues(t, len(tt.items), done.Load())
 			}
-			require.LessOrEqual(t, peak.Load(), int32(max(tt.workers, 1)))
+			require.LessOrEqual(t, int(peak.Load()), max(tt.workers, 1))
 		})
 	}
 }

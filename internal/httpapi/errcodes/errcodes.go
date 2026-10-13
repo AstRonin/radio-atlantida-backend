@@ -44,6 +44,43 @@ const (
 	// SettingNotEditable: the key is a secret; it is set in the environment
 	// and changed by restarting the service, never through the API.
 	SettingNotEditable Problem = "setting_not_editable"
+
+	// PlaylistTypeNotFound: no playlist type has the requested ID.
+	PlaylistTypeNotFound Problem = "playlist_type_not_found"
+	// SystemTypeNotDeletable: music, jingle, news, and segment can be
+	// renamed but never deleted.
+	SystemTypeNotDeletable Problem = "system_type_not_deletable"
+	// PlaylistTypeInUse: playlists or tracks have the type; see used_by.
+	PlaylistTypeInUse Problem = "playlist_type_in_use"
+	// PlaylistNotFound: no playlist has the requested ID.
+	PlaylistNotFound Problem = "playlist_not_found"
+	// PlaylistInUse: clocks use the playlist in an element or as filler;
+	// see used_by.
+	PlaylistInUse Problem = "playlist_in_use"
+	// ArtistNotFound: no artist has the requested ID.
+	ArtistNotFound Problem = "artist_not_found"
+	// ArtistInUse: tracks or clocks (as filler) refer to the artist; see
+	// used_by.
+	ArtistInUse Problem = "artist_in_use"
+	// ArtistHasHistory: the play log refers to the artist, so it is kept.
+	ArtistHasHistory Problem = "artist_has_history"
+	// TrackNotFound: no track has the requested ID.
+	TrackNotFound Problem = "track_not_found"
+	// TrackInUse: clock filler pools hold the track; see used_by.
+	TrackInUse Problem = "track_in_use"
+	// TrackHasHistory: the play log or the track plan refers to the track,
+	// so it is kept.
+	TrackHasHistory Problem = "track_has_history"
+	// TrackFileNotFound: the track exists, but its file is missing under
+	// the media root.
+	TrackFileNotFound Problem = "track_file_not_found"
+	// PlayRuleNotFound: no play rule has the requested ID.
+	PlayRuleNotFound Problem = "play_rule_not_found"
+	// PlayRuleInUse: the rule is applied to tracks or playlists; see
+	// used_by.
+	PlayRuleInUse Problem = "play_rule_in_use"
+	// SeparationRuleNotFound: no separation rule has the requested ID.
+	SeparationRuleNotFound Problem = "separation_rule_not_found"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -53,6 +90,12 @@ func Problems() []Problem {
 		UnsupportedMediaType, NotAcceptable, InternalError,
 		OperationNotFound, LogFileNotFound,
 		SettingNotFound, SettingNotEditable,
+		PlaylistTypeNotFound, SystemTypeNotDeletable, PlaylistTypeInUse,
+		PlaylistNotFound, PlaylistInUse,
+		ArtistNotFound, ArtistInUse, ArtistHasHistory,
+		TrackNotFound, TrackInUse, TrackHasHistory, TrackFileNotFound,
+		PlayRuleNotFound, PlayRuleInUse,
+		SeparationRuleNotFound,
 	}
 }
 
@@ -81,11 +124,15 @@ const (
 	Unique Field = "unique"
 	// Invalid: any other problem with the value.
 	Invalid Field = "invalid"
+	// Taken: another entity already uses the value (a name, a file path).
+	Taken Field = "taken"
+	// UnknownID: the field refers to an entity that does not exist.
+	UnknownID Field = "unknown_id"
 )
 
 // Fields lists every field error code, in declaration order.
 func Fields() []Field {
-	return []Field{Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid}
+	return []Field{Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID}
 }
 
 const schemaPrefix = "#/components/schemas/"
