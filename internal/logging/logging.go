@@ -40,6 +40,8 @@ const (
 
 const (
 	bufferEntries = 4096
+	// retentionDays applies until the admin setting retention.log_days is
+	// read at startup (SetRetentionDays); it equals that setting's default.
 	retentionDays = 10
 )
 
@@ -96,6 +98,12 @@ func (l *Logging) Alerts() <-chan Alert { return l.alerts }
 // AlertsDropped returns how many alerts were dropped because the queue was
 // full.
 func (l *Logging) AlertsDropped() uint64 { return l.alertsDropped.Load() }
+
+// SetRetentionDays changes how many days of log files are kept (admin
+// setting retention.log_days, §6.3).
+func (l *Logging) SetRetentionDays(days int) error {
+	return l.rotator.SetRetentionDays(days)
+}
 
 // Close flushes buffered entries and closes the current log file.
 func (l *Logging) Close() error {

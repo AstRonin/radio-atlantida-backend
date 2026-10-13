@@ -44,7 +44,7 @@ Migrations live in `internal/migrations` as `NNNN_name.up.sql`, are embedded in 
 
 ### Host names for `make run`
 
-From Phase 5 the backend reaches Icecast and Liquidsoap through admin settings whose defaults are the compose service names (`icecast`, `liquidsoap`). For a backend started on the host, add this line to `/etc/hosts` (the ports are published on `127.0.0.1`):
+The backend reaches Icecast and Liquidsoap through admin settings whose defaults are the compose service names (`icecast`, `liquidsoap`). For a backend started on the host, add this line to `/etc/hosts` (the ports are published on `127.0.0.1`):
 
 ```
 127.0.0.1 icecast liquidsoap
@@ -58,9 +58,21 @@ Only these come from the environment (or `.env`, which never overrides variables
 |----------|----------|---------|
 | `DATABASE_URL` | yes | PostgreSQL connection string |
 | `MEDIA_ROOT` | yes | Directory with the audio files |
-| `LOG_ROOT` | yes | Directory for daily logs `app-YYYY-MM-DD.log` (UTC, kept 10 days) |
+| `LOG_ROOT` | yes | Directory for daily logs `app-YYYY-MM-DD.log` (UTC; kept for the `retention.log_days` setting, default 10) |
 | `HTTP_ADDR` | no | Listen address, default `127.0.0.1:8080` |
-| `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD` | later phases | Secrets; never logged or returned by the API |
+| `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD` | later phases | Secrets; never logged or returned by the API (`GET /api/settings/secrets` reports only whether each is set) |
+
+### Admin settings
+
+Every other setting (station timezone, stream output, Liquidsoap, rotation, filler, outage detection, retention, emergency playlist) is defined in code in `internal/settings` with a typed default, limits, and an apply mode (`immediate` or `reconnect`). Only values the manager saves are stored (table `settings`); an unsaved key reads as its default.
+
+```sh
+curl localhost:8080/api/settings                       # every key: value, default, is_default, limits, apply
+curl -X PUT localhost:8080/api/settings/liquidsoap.fade_out_ms \
+     -H 'Content-Type: application/json' -d '{"value": 2700}'
+```
+
+A refused value returns `422` with a field error on `value`. Every saved change is logged at INFO with its UTC time.
 
 ## Make targets
 

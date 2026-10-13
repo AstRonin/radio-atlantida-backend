@@ -15,6 +15,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 )
 
 // problemFor maps an error returned by a domain service to the problem
@@ -22,7 +23,10 @@ import (
 // Unexpected errors are logged here, once, at ERROR, and their text is not
 // sent to the client.
 func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
-	var p *dto.Problem
+	var (
+		p              *dto.Problem
+		invalidSetting *settings.InvalidValueError
+	)
 	switch {
 	case errors.As(err, &p):
 		// Already a problem (built by a handler).
@@ -30,6 +34,14 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 		p = dto.NewProblem(http.StatusNotFound, errcodes.OperationNotFound, "operation not found")
 	case errors.Is(err, logging.ErrFileNotFound):
 		p = dto.NewProblem(http.StatusNotFound, errcodes.LogFileNotFound, "log file not found")
+	case errors.Is(err, settings.ErrNotFound):
+		p = dto.NewProblem(http.StatusNotFound, errcodes.SettingNotFound, "setting not found")
+	case errors.Is(err, settings.ErrNotEditable):
+		p = dto.NewProblem(http.StatusConflict, errcodes.SettingNotEditable,
+			"the setting is a secret: set it in the environment and restart the service")
+	case errors.As(err, &invalidSetting):
+		p = dto.NewProblem(http.StatusUnprocessableEntity, errcodes.ValidationFailed, "")
+		p.Errors = []dto.FieldError{{Field: "value", Code: settingRuleCodes[invalidSetting.Rule], Message: invalidSetting.Message}}
 	case errors.Is(err, context.Canceled) && ctx.Err() != nil:
 		// The client went away or the server is shutting down; nobody reads
 		// the response, and it is not an error of the service.
@@ -45,6 +57,18 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 		p.RequestID = middleware.GetReqID(ctx)
 	}
 	return p
+}
+
+// settingRuleCodes maps the rules of a refused setting value to field codes.
+var settingRuleCodes = map[settings.Rule]errcodes.Field{
+	settings.RuleType:         errcodes.Type,
+	settings.RuleRange:        errcodes.Range,
+	settings.RuleLength:       errcodes.Length,
+	settings.RuleEnum:         errcodes.Enum,
+	settings.RuleFormat:       errcodes.Format,
+	settings.RuleRequired:     errcodes.Required,
+	settings.RuleUnknownField: errcodes.UnknownField,
+	settings.RuleInvalid:      errcodes.Invalid,
 }
 
 // NewHumaError builds the problem for errors raised by huma itself: request

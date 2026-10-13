@@ -282,7 +282,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &doc))
 	require.Equal(t, "3.1.0", doc.OpenAPI)
 	require.Equal(t, "1.2.3", doc.Info.Version)
-	for _, p := range []string{"/api/operations", "/api/operations/{id}", "/api/logs/files", "/api/logs/files/{name}", "/api/status/live", "/api/ws"} {
+	for _, p := range []string{"/api/operations", "/api/operations/{id}", "/api/logs/files", "/api/logs/files/{name}", "/api/status/live", "/api/ws", "/api/settings", "/api/settings/{key}", "/api/settings/secrets"} {
 		require.Contains(t, doc.Paths, p)
 	}
 

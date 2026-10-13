@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -18,7 +19,9 @@ import (
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
 	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
+	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
+	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -52,6 +55,11 @@ func serve(ctx context.Context) error {
 	}
 	defer database.Close()
 
+	settingsSvc, err := settings.NewService(settings.NewRegistry(), settingsrepo.New(database), cfg.Secrets.IsSet(), log, time.Now)
+	if err != nil {
+		return err
+	}
+
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	if err := database.Pool.Ping(pingCtx); err != nil {
 		// Not fatal: /readyz reports the state, and the pool reconnects.
@@ -70,7 +78,9 @@ func serve(ctx context.Context) error {
 		dbLog.Warn("operations interrupted by the previous shutdown marked failed", "count", n)
 	}
 	cancel()
-	cleanup := retention.New(retentionrepo.New(database.Pool), time.Now)
+
+	applyLogRetention(ctx, settingsSvc, logs, apiLog)
+	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
 	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log, jobs.Retention(cleanup.Run))
 
 	// Request contexts are not cancelled by the shutdown signal itself:
@@ -85,6 +95,7 @@ func serve(ctx context.Context) error {
 		Events:     hub,
 		Operations: tracker,
 		Logs:       logging.NewFileReader(cfg.LogRoot),
+		Settings:   settingsSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -130,6 +141,45 @@ func serve(ctx context.Context) error {
 	}
 	apiLog.Info("stopped")
 	return nil
+}
+
+// applyLogRetention keeps the log files for retention.log_days: the saved
+// value now, and every value saved later. If the database is unreachable at
+// startup, the rotator keeps its default (equal to the setting's default)
+// until the next change.
+func applyLogRetention(ctx context.Context, svc *settings.Service, logs *logging.Logging, log *slog.Logger) {
+	set := func(days int) {
+		if err := logs.SetRetentionDays(days); err != nil {
+			log.Warn("apply log retention failed", "days", days, logging.KeyError, err)
+		}
+	}
+	settings.OnChange(svc, settings.RetentionLogDays, set)
+
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	days, err := settings.Value(rctx, svc, settings.RetentionLogDays)
+	if err != nil {
+		log.Warn("read log retention failed, keeping the default", logging.KeyError, err)
+		return
+	}
+	set(days)
+}
+
+// retentionPeriods reads the retention periods from the settings before
+// each pass. Operations are kept as long as the logs (§6.5).
+func retentionPeriods(svc *settings.Service) retention.PeriodsFunc {
+	return func(ctx context.Context) (retention.Periods, error) {
+		playLog, err := settings.Value(ctx, svc, settings.RetentionPlayLogDays)
+		if err != nil {
+			return retention.Periods{}, err
+		}
+		logDays, err := settings.Value(ctx, svc, settings.RetentionLogDays)
+		if err != nil {
+			return retention.Periods{}, err
+		}
+		day := 24 * time.Hour
+		return retention.Periods{PlayLog: time.Duration(playLog) * day, Operations: time.Duration(logDays) * day}, nil
+	}
 }
 
 // forwardAlerts pushes ERROR log entries to the panels as error.alert events

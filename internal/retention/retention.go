@@ -9,12 +9,17 @@ import (
 	"time"
 )
 
-// Retention periods. They become admin settings in Phase 5 (§6.3); the play
-// log period also bounds separation checks (§4.1).
-const (
-	PlayLogPeriod    = 10 * 24 * time.Hour
-	OperationsPeriod = 10 * 24 * time.Hour
-)
+// Periods are the retention periods, read before every pass from the admin
+// settings retention.play_log_days and retention.log_days (§6.3). The play
+// log period also bounds separation checks (§4.1); operations follow the
+// log period (§6.5).
+type Periods struct {
+	PlayLog    time.Duration
+	Operations time.Duration
+}
+
+// PeriodsFunc returns the current periods.
+type PeriodsFunc func(ctx context.Context) (Periods, error)
 
 // Store deletes expired rows (internal/repository/retention). Each method
 // deletes in short batches, so a large backlog never holds long locks.
@@ -30,24 +35,29 @@ type Store interface {
 
 // Service applies the retention rules.
 type Service struct {
-	store Store
-	now   func() time.Time
+	store   Store
+	periods PeriodsFunc
+	now     func() time.Time
 }
 
 // New returns the service. now is the clock.
-func New(store Store, now func() time.Time) *Service {
-	return &Service{store: store, now: now}
+func New(store Store, periods PeriodsFunc, now func() time.Time) *Service {
+	return &Service{store: store, periods: periods, now: now}
 }
 
 // Run performs one retention pass and returns a summary. Log files are
 // cleaned by the log rotator, not here.
 func (s *Service) Run(ctx context.Context) (string, error) {
+	p, err := s.periods(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read retention periods: %w", err)
+	}
 	now := s.now().UTC()
-	plays, err := s.store.DeletePlayLog(ctx, now.Add(-PlayLogPeriod))
+	plays, err := s.store.DeletePlayLog(ctx, now.Add(-p.PlayLog))
 	if err != nil {
 		return "", fmt.Errorf("play log retention: %w", err)
 	}
-	ops, err := s.store.DeleteOperations(ctx, now.Add(-OperationsPeriod))
+	ops, err := s.store.DeleteOperations(ctx, now.Add(-p.Operations))
 	if err != nil {
 		return "", fmt.Errorf("operations retention: %w", err)
 	}

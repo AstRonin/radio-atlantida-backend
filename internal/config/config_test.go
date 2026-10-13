@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -105,4 +107,20 @@ func TestSecretsAreNotPrinted(t *testing.T) {
 	for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
 		require.NotContains(t, fmt.Sprintf(format, Config{Secrets: s}), "s3cret", format)
 	}
+}
+
+// IsSet names every secret by its environment variable.
+func TestSecretsIsSetCoversEveryField(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[Secrets]()
+	want := map[string]bool{}
+	for i := range typ.NumField() {
+		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("env"), ",")
+		want[name] = false
+	}
+	require.Equal(t, want, Secrets{}.IsSet())
+
+	set := Secrets{LiquidsoapControlUser: "source"}.IsSet()
+	require.True(t, set["LIQUIDSOAP_CONTROL_USER"])
+	require.False(t, set["ICECAST_SOURCE_PASSWORD"])
 }

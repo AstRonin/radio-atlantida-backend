@@ -49,6 +49,16 @@ func (Secrets) String() string { return "{***}" }
 // GoString hides secret values from %#v.
 func (s Secrets) GoString() string { return s.String() }
 
+// IsSet reports, by environment variable name, which secrets have a value.
+// The settings API shows only this, never the values (§6.3).
+func (s Secrets) IsSet() map[string]bool {
+	return map[string]bool{
+		"ICECAST_SOURCE_PASSWORD":     s.IcecastSourcePassword != "",
+		"LIQUIDSOAP_CONTROL_USER":     s.LiquidsoapControlUser != "",
+		"LIQUIDSOAP_CONTROL_PASSWORD": s.LiquidsoapControlPassword != "",
+	}
+}
+
 // Migrate is the configuration of `backend migrate up`. It needs only the
 // database, so the migrate container of the deploy stack needs no host paths.
 type Migrate struct {

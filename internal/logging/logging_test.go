@@ -196,6 +196,27 @@ func TestDailyRotatorDeletesFilesOlderThanRetention(t *testing.T) {
 	}, names)
 }
 
+func TestDailyRotatorSetRetentionDaysCleansAtOnce(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"app-2026-10-10.log", "app-2026-10-12.log"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o600))
+	}
+	clock := &fakeClock{t: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)}
+	r, err := NewDailyRotator(dir, 10, clock.Now)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, r.Close()) })
+
+	require.NoError(t, r.SetRetentionDays(3), "before the first write: nothing to clean yet")
+	_, err = r.Write([]byte("x\n"))
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(dir, "app-2026-10-10.log"), "4 days old, cleaned on the first switch")
+
+	require.NoError(t, r.SetRetentionDays(1))
+	require.NoFileExists(t, filepath.Join(dir, "app-2026-10-12.log"), "2 days old, cleaned without waiting for midnight")
+	require.FileExists(t, filepath.Join(dir, "app-2026-10-14.log"))
+}
+
 func requireFile(t *testing.T, path, want string) {
 	t.Helper()
 	got, err := os.ReadFile(path) //nolint:gosec // test file in a temp dir

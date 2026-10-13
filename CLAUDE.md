@@ -50,6 +50,7 @@ Binary: `backend serve` | `backend migrate up` (no `down`, ever) | `backend open
 cmd/backend/          subcommand dispatch (main.go) and serve wiring
 internal/
   config/             env config (caarlos0/env + godotenv); the only place that reads env
+  settings/           admin settings: typed registry (defaults, limits, apply mode, secrets), Service, Value/OnChange
   logging/            slog JSON, components, secret masking, async writer, daily UTC rotator
   db/                 pgx pool (UTC session, timeouts), GORM on the same pool, DB.WithTx (one Tx for pgx and GORM), ConstraintError
   dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)
@@ -64,8 +65,8 @@ internal/
   jobs/               scheduler (advisory-locked singleton runs, each an operation) and job schedules; no business rules
   retention/          retention rules (play log, operations); jobs schedules it
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
-    operations/ retention/ jobs/                   (jobs: the advisory locks)
-  settings/ library/ playrules/ separation/ media/   (Phases 5–6)
+    operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
+  library/ playrules/ separation/ media/             (Phase 6)
   clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
@@ -140,4 +141,4 @@ docs/                 requirements, design, phase plans
 - Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
 - All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`request.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
 - Liquidsoap writes the journal to `.dev/journal/journal-YYYY-MM-DD.jsonl` (one JSON line per track `start`/`end`, UTC) and POSTs the same line to `BACKEND_CALLBACK_URL` (endpoint arrives in the Liquidsoap phase; 404 until then, harmless).
-- Connection settings (Icecast/Liquidsoap hosts and ports) become admin settings in Phase 5 with code defaults equal to the compose service names and ports. For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.
+- Connection settings (Icecast/Liquidsoap hosts and ports, stream format) are admin settings (`internal/settings`) with code defaults equal to the compose service names and ports (`TestDefaultsMatchDevStack`). For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.

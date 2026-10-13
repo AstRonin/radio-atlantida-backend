@@ -20,13 +20,13 @@ const dateLayout = "2006-01-02"
 // the date is the UTC date of the write. It switches files at UTC midnight
 // and, on every switch, deletes log files older than the retention period.
 type DailyRotator struct {
-	dir           string
-	retentionDays int
-	now           func() time.Time
+	dir string
+	now func() time.Time
 
-	mu   sync.Mutex // guards file and date
-	file *os.File
-	date string
+	mu            sync.Mutex // guards file, date, and retentionDays
+	file          *os.File
+	date          string
+	retentionDays int
 }
 
 // NewDailyRotator creates dir if needed. now is the clock (time.Now in
@@ -54,6 +54,20 @@ func (r *DailyRotator) Write(p []byte) (int, error) {
 		return n, fmt.Errorf("write log file: %w", err)
 	}
 	return n, nil
+}
+
+// SetRetentionDays changes the retention period (admin setting
+// retention.log_days) and deletes the files it expires at once, instead of
+// at the next switch.
+func (r *DailyRotator) SetRetentionDays(days int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retentionDays = days
+	if r.date == "" {
+		// Nothing written yet: the first switch cleans up.
+		return nil
+	}
+	return r.cleanup(r.date)
 }
 
 // Close closes the current file.

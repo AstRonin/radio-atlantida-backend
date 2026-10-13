@@ -34,6 +34,7 @@ type Deps struct {
 	Log        *slog.Logger
 	Operations OperationStore
 	Logs       LogFiles
+	Settings   Settings
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -44,6 +45,7 @@ func Register(api huma.API, d Deps) {
 	registerOperations(api, log, d.Operations)
 	registerLogs(api, log, d.Logs)
 	registerStatus(api, log, d.Now)
+	registerSettings(api, log, d.Settings)
 }
 
 // register adds one operation. Errors returned by fn go through problemFor.

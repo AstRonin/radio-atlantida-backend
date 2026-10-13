@@ -26,6 +26,10 @@ func (f *fakeStore) DeleteOperations(_ context.Context, cutoff time.Time) (int64
 	return 1, nil
 }
 
+func tenDays(context.Context) (retention.Periods, error) {
+	return retention.Periods{PlayLog: 10 * 24 * time.Hour, Operations: 10 * 24 * time.Hour}, nil
+}
+
 func TestRun(t *testing.T) {
 	t.Parallel()
 	// A non-UTC clock: cutoffs are still UTC instants.
@@ -33,7 +37,7 @@ func TestRun(t *testing.T) {
 	now := time.Date(2026, 10, 13, 7, 0, 0, 0, yerevan)
 	store := &fakeStore{}
 
-	summary, err := retention.New(store, func() time.Time { return now }).Run(t.Context())
+	summary, err := retention.New(store, tenDays, func() time.Time { return now }).Run(t.Context())
 
 	require.NoError(t, err)
 	require.Equal(t, "deleted 4 play log rows and 1 operations", summary)
@@ -48,8 +52,37 @@ func TestRunStopsOnError(t *testing.T) {
 	boom := errors.New("boom")
 	store := &fakeStore{playLogErr: boom}
 
-	_, err := retention.New(store, time.Now).Run(t.Context())
+	_, err := retention.New(store, tenDays, time.Now).Run(t.Context())
 
 	require.ErrorIs(t, err, boom)
 	require.True(t, store.opsCutoff.IsZero(), "operations are not touched after a failure")
+}
+
+func TestRunUsesCurrentPeriods(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 13, 7, 0, 0, 0, time.UTC)
+	store := &fakeStore{}
+	periods := func(context.Context) (retention.Periods, error) {
+		return retention.Periods{PlayLog: 3 * 24 * time.Hour, Operations: 24 * time.Hour}, nil
+	}
+
+	_, err := retention.New(store, periods, func() time.Time { return now }).Run(t.Context())
+
+	require.NoError(t, err)
+	require.Equal(t, now.AddDate(0, 0, -3), store.playLogCutoff)
+	require.Equal(t, now.AddDate(0, 0, -1), store.opsCutoff)
+}
+
+func TestRunWithoutPeriodsDeletesNothing(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("settings unavailable")
+	store := &fakeStore{}
+
+	_, err := retention.New(store, func(context.Context) (retention.Periods, error) {
+		return retention.Periods{}, boom
+	}, time.Now).Run(t.Context())
+
+	require.ErrorIs(t, err, boom)
+	require.True(t, store.playLogCutoff.IsZero())
+	require.True(t, store.opsCutoff.IsZero())
 }

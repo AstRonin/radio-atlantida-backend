@@ -39,6 +39,11 @@ const (
 	OperationNotFound Problem = "operation_not_found"
 	// LogFileNotFound: no log file has the requested name.
 	LogFileNotFound Problem = "log_file_not_found"
+	// SettingNotFound: no setting has the requested key.
+	SettingNotFound Problem = "setting_not_found"
+	// SettingNotEditable: the key is a secret; it is set in the environment
+	// and changed by restarting the service, never through the API.
+	SettingNotEditable Problem = "setting_not_editable"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -47,6 +52,7 @@ func Problems() []Problem {
 		BadRequest, ValidationFailed, NotFound, MethodNotAllowed, BodyTooLarge,
 		UnsupportedMediaType, NotAcceptable, InternalError,
 		OperationNotFound, LogFileNotFound,
+		SettingNotFound, SettingNotEditable,
 	}
 }
 
