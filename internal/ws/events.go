@@ -238,3 +238,21 @@ type OutageEndedData struct {
 	// missed_items operation events report the result.
 	MissedCount *int `json:"missed_count,omitempty" doc:"Items marked missed; absent when the marking failed (it is retried)."`
 }
+
+// EventLiveState is the type of [LiveStateEvent].
+const EventLiveState = "live.state"
+
+// LiveStateEvent reports a change of the live voice input (§8.4).
+type LiveStateEvent struct {
+	Type string        `json:"type" doc:"Always live.state."`
+	Time time.Time     `json:"time"`
+	Data LiveStateData `json:"data"`
+}
+
+// LiveStateData is the payload of [LiveStateEvent].
+type LiveStateData struct {
+	State      string     `json:"state" enum:"off,connecting,on_air,reconnecting" doc:"connecting: waiting for audio; on_air: audio reaches Liquidsoap; reconnecting: audio arrives but Liquidsoap's live input is not reachable."`
+	SessionID  *uint64    `json:"session_id,omitempty" doc:"Absent when off."`
+	OnAirSince *time.Time `json:"on_air_since,omitempty" doc:"When audio first reached Liquidsoap in this session."`
+	Reason     *string    `json:"reason,omitempty" enum:"stopped,replaced,no_audio,dropout,shutdown" doc:"Why the session ended; only with state off."`
+}

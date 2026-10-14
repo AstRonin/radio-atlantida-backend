@@ -108,8 +108,8 @@ func TestGetOperation(t *testing.T) {
 		"result_summary":"deleted 3 play log rows and 1 operations"}`, rec.Body.String())
 }
 
-// Until playout and outage detection exist, everything but the time is
-// unknown, and unknown is an explicit null (the update script treats it as on air).
+// Without its sources, everything but the time is unknown, and unknown is
+// an explicit null (the update script treats it as on air).
 func TestLiveStatusUnknown(t *testing.T) {
 	t.Parallel()
 	h, _ := newAPIRouter(t, &fakeOperations{}, t.TempDir())
@@ -301,6 +301,7 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/music-gain",
 		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
 		"/api/outages",
+		"/api/live/session", "/api/live/status",
 	} {
 		require.Contains(t, doc.Paths, p)
 	}
@@ -308,7 +309,8 @@ func TestOpenAPIDocument(t *testing.T) {
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 11)
+	require.Len(t, schemas["Event"].OneOf, 12)
+	require.Equal(t, []string{ws.EventLiveState}, schemas["LiveStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackPlanWarning}, schemas["TrackPlanWarningEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventFillerRequestCreated}, schemas["FillerRequestCreatedEvent"].Properties["type"].Enum)

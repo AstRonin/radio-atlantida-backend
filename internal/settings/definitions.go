@@ -116,6 +116,7 @@ var (
 	StreamHLSEnabled   = Key[bool]{"stream.hls_enabled"}
 
 	LiquidsoapMusicGain   = Key[float64]{"liquidsoap.music_gain"}
+	LiquidsoapDuckGain    = Key[float64]{"liquidsoap.duck_gain"}
 	LiquidsoapFadeOutMS   = Key[int]{"liquidsoap.fade_out_ms"}
 	LiquidsoapHarborPort  = Key[int]{"liquidsoap.harbor_port"}
 	LiquidsoapControlHost = Key[string]{"liquidsoap.control_host"}
@@ -222,6 +223,8 @@ func NewRegistry() *Registry {
 
 	// Liquidsoap (§8).
 	r.add(numberDef(LiquidsoapMusicGain, "Default music gain: 1 normal, 0.2 under voice, 0 off.", "", 1, 0, 1), ApplyImmediate, true)
+	r.add(numberDef(LiquidsoapDuckGain, "Music level under live voice: while the microphone is live, the music fades to this part of its level (§8.5).",
+		"", 0.2, 0, 1), ApplyImmediate, true)
 	r.add(intDef(LiquidsoapFadeOutMS, "Fade-out of a truncated track, ending at the segment end.", "ms", 2500, 2000, 3000), ApplyImmediate, true)
 	r.add(intDef(LiquidsoapHarborPort, "Harbor input port for live voice.", "", 8005, 1, 65535), ApplyReconnect, true)
 	r.add(stringDef(LiquidsoapControlHost, "Liquidsoap control host name or IP address.", "liquidsoap", 1, 253, validHost), ApplyReconnect, true)

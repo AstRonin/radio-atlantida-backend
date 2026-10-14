@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding).
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -30,6 +30,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | `make stack-down` / `make stack-logs` | Stop / follow the dev stack |
 | `make media` | Generate ~10 test MP3s into `.dev/media` (ffmpeg in a container) |
 | `make inbox` | Generate inbox files with known quality issues into `.dev/media/incoming` (ffmpeg in a container) |
+| `make live-check` | Go live through a running backend with a test tone over WebRTC, no browser (`dev/livecheck`) |
 | `make run` | Run the backend on the host against the dev stack |
 | `make build` | Build `bin/backend` |
 | `make test` | Unit tests with `-race` |
@@ -87,13 +88,15 @@ internal/
     playout/                                       (pgx: items to push, queued marks, move to play_log, ends, emergency tracks)
     outage/                                        (pgx: outages, heartbeat, mark missed, drop stale, play history keyset, dismiss)
     ingest/                                        (pgx: imported tracks, analysis columns, artist find-or-create, busy check)
-  live/                                           (later phase)
+  live/               live voice bridge: WebRTC (pion) on one UDP port, one session at a time (takeover), Opus relayed unchanged as Ogg/Opus to the Liquidsoap harbor (Icecast SOURCE); states and live.state events; no SQL
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
 docker-compose.dev.yml  dev/test stack only (production compose is in radio-atlantida-deploy)
 dev/liquidsoap/radio.liq  minimal dev playout script (keep in step with deploy's production script)
 dev/scripts/gen-media.sh  test audio generator
 dev/scripts/gen-inbox.sh  inbox files with known quality issues (make inbox)
+dev/scripts/gen-live.sh   Ogg/Opus test tone for make live-check
+dev/livecheck/        dev tool: a WebRTC client that goes live through the backend (make live-check)
 .dev/                 generated media, playout journal, logs (git-ignored)
 docs/                 requirements, design, phase plans
 ```
@@ -168,6 +171,7 @@ docs/                 requirements, design, phase plans
 - All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`hour_0.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
 - Liquidsoap has two hour queues, `hour_0` and `hour_1` (`hour_<p>.push <uri>`, `hour_<p>.queue`); a time switch plays the queue of the current station hour, using `hour_shift` set by the backend. Behind it, `request.dynamic` asks `BACKEND_EMERGENCY_URL` for emergency tracks, then a safety tone.
 - Liquidsoap writes the journal to `$PLAYOUT_JOURNAL_ROOT/journal-YYYY-MM-DD.jsonl` (`.dev/journal` in dev; one JSON line per track `start`/`end` and per Icecast `output` change, UTC; files older than 10 days deleted by the script) and POSTs the same line to `BACKEND_CALLBACK_URL` (`/api/playout/callback`). It also POSTs a `heartbeat` every 5 s (not journaled); without it the outage detector opens a `liquidsoap_callback` outage.
+- Live voice: the browser's WebRTC reaches the backend on one UDP port, `LIVE_UDP_ADDR` (default `127.0.0.1:8189`; the backend container listens on `0.0.0.0:8189`, published on `127.0.0.1:8189/udp`), and the answer offers `LIVE_PUBLIC_IPS` (the container sets `127.0.0.1`). The bridge sends to the harbor at `liquidsoap.control_host:liquidsoap.harbor_port`, mount `live`. The script ducks automation to `duck_gain` (setting `liquidsoap.duck_gain`) while the harbor has a source; its buffer is 0.3 s. Browsers allow the microphone only on `localhost` or HTTPS.
 - `PLAYOUT_JOURNAL_ROOT` is a required env var (host path, read-only for the backend), like `MEDIA_ROOT` and `LOG_ROOT`.
 - The backend mounts `MEDIA_ROOT` read-write (import moves files, transcodes write them); Liquidsoap read-only. Import, analysis, and transcoding need ffmpeg: the backend image has it; on a host without it (`make run` on macOS) they are refused with `media_tools_unavailable`, so use `docker compose -f docker-compose.dev.yml --profile app up --build` to try them. ffmpeg integration tests skip without it (CI installs it).
 - Connection settings (Icecast/Liquidsoap hosts and ports, stream format) are admin settings (`internal/settings`) with code defaults equal to the compose service names and ports (`TestDefaultsMatchDevStack`). For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.

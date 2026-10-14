@@ -36,6 +36,7 @@ const (
 
 	varHourShift = "hour_shift"
 	varMusicGain = "music_gain"
+	varDuckGain  = "duck_gain"
 )
 
 // pusherState belongs to the Run goroutine.
@@ -44,6 +45,8 @@ type pusherState struct {
 	gen uint64
 	// shift is the hour shift last set in Liquidsoap; -1: not set.
 	shift int
+	// duck is the duck gain last set in Liquidsoap; -1: not set.
+	duck float64
 	// lastWarn is when a failed pass was last logged.
 	lastWarn time.Time
 }
@@ -51,7 +54,7 @@ type pusherState struct {
 // Run is the pusher: a pass every passInterval and whenever Wake is called,
 // until ctx ends. A failed pass is logged and retried at the next one.
 func (s *Service) Run(ctx context.Context) error {
-	s.push.shift = -1
+	s.push.shift, s.push.duck = -1, -1
 	t := time.NewTicker(passInterval)
 	defer t.Stop()
 	for {
@@ -116,6 +119,9 @@ func (s *Service) pass(ctx context.Context) error {
 	if err := s.applyGain(ctx); err != nil {
 		return err
 	}
+	if err := s.applyDuck(ctx, set); err != nil {
+		return err
+	}
 	for _, h := range hours {
 		if err := s.fill(ctx, h, now, set); err != nil {
 			return err
@@ -131,7 +137,7 @@ func (s *Service) pass(ctx context.Context) error {
 // flight at that moment, that item may play twice; a connection is new only
 // after a failure, so this is rare.)
 func (s *Service) resync(ctx context.Context, hours []time.Time, set Settings) error {
-	s.push.shift = -1
+	s.push.shift, s.push.duck = -1, -1
 	s.mu.Lock()
 	if s.gain == nil {
 		s.gain = new(set.MusicGain)
@@ -174,6 +180,20 @@ func (s *Service) applyShift(ctx context.Context, now time.Time, set Settings) e
 		return fmt.Errorf("set hour shift: %w", err)
 	}
 	s.push.shift = shift
+	return nil
+}
+
+// applyDuck sets the music level under live voice (setting
+// liquidsoap.duck_gain) after a reconnect or a settings change; the script
+// fades the music to it while the harbor has a source (§8.5).
+func (s *Service) applyDuck(ctx context.Context, set Settings) error {
+	if set.DuckGain == s.push.duck {
+		return nil
+	}
+	if err := s.ctl.SetVar(ctx, varDuckGain, liquidsoap.FormatFloat(set.DuckGain)); err != nil {
+		return fmt.Errorf("set duck gain: %w", err)
+	}
+	s.push.duck = set.DuckGain
 	return nil
 }
 

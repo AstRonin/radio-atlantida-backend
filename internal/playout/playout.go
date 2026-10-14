@@ -172,7 +172,10 @@ type Settings struct {
 	// MediaRoot is the media directory as Liquidsoap sees it.
 	MediaRoot string
 	// MusicGain is the default music gain, set on the first connect.
-	MusicGain           float64
+	MusicGain float64
+	// DuckGain is the music level under live voice, set on every connect
+	// and when it changes.
+	DuckGain            float64
 	EmergencyPlaylistID *uint64
 }
 

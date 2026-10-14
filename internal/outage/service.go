@@ -86,6 +86,17 @@ func (s *Service) Dismiss(ctx context.Context, id uint64) (Entry, error) {
 	return e, nil
 }
 
+// OpenOutage returns the open outage; false if there is none.
+func (s *Service) OpenOutage(ctx context.Context) (Outage, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	o, ok, err := s.store.OpenOutage(ctx)
+	if err != nil {
+		return Outage{}, false, fmt.Errorf("read open outage: %w", err)
+	}
+	return o, ok, nil
+}
+
 // Outages returns the outages that overlap [from, to), newest first.
 func (s *Service) Outages(ctx context.Context, from, to time.Time) ([]Outage, error) {
 	if err := checkRange(from, to, MaxOutageDays); err != nil {

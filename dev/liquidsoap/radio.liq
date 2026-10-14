@@ -8,7 +8,9 @@
 #   - the queue an hour leaves is flushed, so its leftovers never play later;
 #   - an emergency source (request.dynamic, asking the backend) and a safety
 #     source behind `fallback`, so the stream never stops;
-#   - a harbor input for live voice and an interactive `music_gain` variable;
+#   - a harbor input for live voice, fed by the backend's WebRTC bridge and
+#     mixed over the music, which ducks to `duck_gain` while it is live; an
+#     interactive `music_gain` variable;
 #   - output to Icecast, with its connection state reported to the backend;
 #   - a UTC playout journal and an HTTP callback on every track start and end;
 #   - a heartbeat callback every 5 seconds, for the outage detector.
@@ -257,17 +259,26 @@ music =
 safety = amplify(0.1, sine(id="safety", 440.))
 automation = fallback(id="automation", track_sensitive=false, [music, safety])
 
-# Live voice from the backend WebRTC bridge, mixed over automation (§8.4).
+# Live voice from the backend WebRTC bridge (§8.4): an Ogg/Opus stream sent
+# with the Icecast source protocol to the mount `live` (fixed: the backend
+# uses the same name). The buffer is short, so voice reaches air within the
+# 1 s target; the default (12 s) is meant for crossfades of a remote DJ.
 live =
   input.harbor(
     id="live",
     port=harbor_port,
     user=harbor_user,
     password=harbor_password,
+    buffer=0.3,
+    max=2.,
     "live"
   )
 
-radio = add(id="mix", normalize=false, [live, automation])
+# Ducking (§8.5): while the live input has a source, automation fades to
+# duck_gain of its level, and back when it ends. The backend sets the value
+# from the setting liquidsoap.duck_gain: `var.set duck_gain = 0.2`.
+duck_gain = interactive.float("duck_gain", min=0., max=1., 0.2)
+radio = smooth_add(duration=0.5, p=duck_gain, normal=automation, special=live)
 
 out =
   output.icecast(

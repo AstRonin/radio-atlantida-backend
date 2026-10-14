@@ -116,11 +116,17 @@ services:
       LOG_ROOT: /logs
       PLAYOUT_JOURNAL_ROOT: /journal
       HTTP_ADDR: 0.0.0.0:8080
+      # Live voice (WebRTC): one UDP port for every session. The browser
+      # cannot reach the container's own address, so the bridge offers the
+      # published one (docs/phase-12-plan.md §2, decision 4).
+      LIVE_UDP_ADDR: 0.0.0.0:8189
+      LIVE_PUBLIC_IPS: 127.0.0.1
       ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set in .env}
       LIQUIDSOAP_CONTROL_USER: ${LIQUIDSOAP_CONTROL_USER:-source}
       LIQUIDSOAP_CONTROL_PASSWORD: ${LIQUIDSOAP_CONTROL_PASSWORD:?set in .env}
     ports:
       - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8189:8189/udp"
     volumes:
       # Read-write: an import moves files from the inbox into the library
       # folder, and a transcode writes fixed files (docs/phase-11-plan.md).

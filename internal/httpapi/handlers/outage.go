@@ -21,6 +21,7 @@ type Outages interface {
 	Missed(ctx context.Context, r outage.Resolution) ([]outage.Entry, error)
 	Dismiss(ctx context.Context, id uint64) (outage.Entry, error)
 	Outages(ctx context.Context, from, to time.Time) ([]outage.Outage, error)
+	OpenOutage(ctx context.Context) (outage.Outage, bool, error)
 }
 
 // Rescheduler places a missed item into a later hour (*rotation.Service).

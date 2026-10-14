@@ -22,6 +22,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
+	"github.com/AstRonin/radio-atlantida-backend/internal/live"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
@@ -141,6 +142,9 @@ func serve(ctx context.Context) error {
 		outage.NewIcecastChecker(&http.Client{}), outage.NewJournal(cfg.PlayoutJournalRoot, playoutSvc, log),
 		tracker, hub, outageSettings(settingsSvc), log, time.Now)
 
+	bridge := live.NewBridge(live.Config{UDPAddr: cfg.LiveUDPAddr, PublicIPs: cfg.LivePublicIPs}, live.DefaultTimeouts,
+		harborTarget(settingsSvc, cfg.Secrets), hub, log, time.Now)
+
 	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
 	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log,
@@ -168,6 +172,7 @@ func serve(ctx context.Context) error {
 		Playout:    playoutSvc,
 		Outages:    outageSvc,
 		Ingest:     ingestSvc,
+		Live:       bridge,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -190,6 +195,9 @@ func serve(ctx context.Context) error {
 	// The media worker runs imports, analyses, and transcodes one at a
 	// time.
 	g.Go(func() error { return ingestSvc.Run(gctx) })
+	// The live voice bridge relays the manager's microphone to the harbor
+	// (§8.4); on shutdown it ends the session.
+	g.Go(func() error { return bridge.Run(gctx) })
 	g.Go(func() error {
 		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -247,7 +255,29 @@ func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, log *slog.L
 	rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)) //nolint:gosec // G404: not for security; G115: positive
 	p := playout.NewService(database, playoutrepo.New(database.Pool), ctl, playoutSettings(svc), hub, log, time.Now, rnd)
 	settings.OnChange(svc, settings.LiquidsoapMusicGain, p.MusicGainSettingChanged)
+	// The pass reads the duck gain from the settings; wake it to apply a
+	// change at once.
+	settings.OnChange(svc, settings.LiquidsoapDuckGain, func(float64) { p.Wake() })
 	return p
+}
+
+// harborTarget reads where Liquidsoap's live input listens: the control
+// host (the same Liquidsoap) and the harbor port. The script takes the
+// control credentials as the harbor's source credentials.
+func harborTarget(svc *settings.Service, secrets config.Secrets) live.HarborFunc {
+	return func(ctx context.Context) (live.HarborTarget, error) {
+		host, err := settings.Value(ctx, svc, settings.LiquidsoapControlHost)
+		if err != nil {
+			return live.HarborTarget{}, err
+		}
+		port, err := settings.Value(ctx, svc, settings.LiquidsoapHarborPort)
+		if err != nil {
+			return live.HarborTarget{}, err
+		}
+		return live.HarborTarget{
+			Host: host, Port: port, User: secrets.LiquidsoapControlUser, Password: secrets.LiquidsoapControlPassword,
+		}, nil
+	}
 }
 
 // controlAddr reads the Liquidsoap control address from the settings.
@@ -297,13 +327,17 @@ func playoutSettings(svc *settings.Service) playout.SettingsFunc {
 		if err != nil {
 			return playout.Settings{}, err
 		}
+		duck, err := settings.Value(ctx, svc, settings.LiquidsoapDuckGain)
+		if err != nil {
+			return playout.Settings{}, err
+		}
 		emergency, err := settings.Value(ctx, svc, settings.PlayoutEmergencyPlaylistID)
 		if err != nil {
 			return playout.Settings{}, err
 		}
 		return playout.Settings{
 			Location: loc, Lookahead: lookahead, Prepush: time.Duration(prepush) * time.Minute, FadeOutMS: fade,
-			MediaRoot: root, MusicGain: gain, EmergencyPlaylistID: emergency,
+			MediaRoot: root, MusicGain: gain, DuckGain: duck, EmergencyPlaylistID: emergency,
 		}, nil
 	}
 }

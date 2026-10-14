@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-14)
+Status: Draft (v7-15)
 Last updated: 2026-10-14
 
 ## 1. Overview
@@ -115,7 +115,7 @@ Responsibilities:
 
 **Configuration split**
 
-- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`), and the host paths `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. The host paths are set once in the Compose `.env` file and never change. `PLAYOUT_JOURNAL_ROOT` is the host directory to which Liquidsoap writes its playout journal (§7.1); the backend mounts it read-only. All other backend settings are managed in the admin panel (see §6.3).
+- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`), and the host paths `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. The host paths are set once in the Compose `.env` file and never change. Like the API listen address (`HTTP_ADDR`), the UDP address of the live voice bridge (`LIVE_UDP_ADDR`) and the addresses on which the browser reaches it (`LIVE_PUBLIC_IPS`) are environment variables, because they belong to the compose port mapping (v7-15, `docs/phase-12-plan.md` §2). `PLAYOUT_JOURNAL_ROOT` is the host directory to which Liquidsoap writes its playout journal (§7.1); the backend mounts it read-only. All other backend settings are managed in the admin panel (see §6.3).
 - **Admin settings (PostgreSQL)**: the Icecast output profile, station timezone, fade length, outage detection thresholds, and other backend settings are edited in the Angular admin panel and stored in the database (see §6.3).
 
 **Precedence (highest first)**
@@ -316,7 +316,7 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Station**: timezone (default `Asia/Yerevan`), station name.
 - **Playlist types**: the list of types (system and custom). The manager can add a type, rename it, and delete a custom type that is not in use. System types can be renamed but not deleted (§4).
 - **Stream output (Icecast)**: host, port, mount point, codec, bitrate, sample rate, channels, loudness target, stream metadata, HLS on or off.
-- **Liquidsoap**: default music gain, fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
+- **Liquidsoap**: default music gain, the music level under live voice (`liquidsoap.duck_gain`, default 0.2; v7-15), fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
 - **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and its reminders cannot be answered.
 - **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults, the shortest gap that gets filler (`rotation.min_filler_gap_ms`, default 10 s), and the limit of the emergency tolerance relaxation (`rotation.max_relaxed_tolerance_ms`, default 120 s). The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
 - **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
@@ -410,6 +410,16 @@ Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead o
 
 Track responses carry the analysis columns, `quality_issues`, and `fixes` (the transcodes that remove at least one issue); `GET /api/tracks` takes `quality` (`ok`, `issues`, `unanalysed`). Import, analysis, and transcode run one at a time: a second request is refused with 409 `media_operation_running`; without ffmpeg they are refused with 503 `media_tools_unavailable`.
 
+**Endpoints added in v7-15 (live voice, `docs/phase-12-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /api/live/session` | Body: `offer` (the browser's WebRTC SDP, candidates gathered), `takeover`. Returns the answer SDP and the session ID. One session at a time: 409 `live_session_active` unless `takeover`; 422 `live_offer_invalid`; 503 `live_unavailable` |
+| `DELETE /api/live/session` | Ends the live session. Synchronous |
+| `GET /api/live/status` | State of the live input (`off`, `connecting`, `on_air`, `reconnecting`), session, harbor connection, packets |
+
+`GET /api/status/live` now answers `on_air` (a live session sends audio), `open_outage_id`, and `current_clock` (the clock the grid assigns to the current hour). The live state is sent as the `live.state` event.
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -440,6 +450,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - `broadcast_outage.started`: outage opened, with `started_at`, `component`, and `reason`.
 - `broadcast_outage.ended`: outage closed, with `started_at`, `ended_at`, and the number of items marked missed.
 - `icecast.state`: connection state of the Icecast output (connected, disconnected, reconnecting).
+- `live.state`: state of the live voice input (`off`, `connecting`, `on_air`, `reconnecting`), with the reason when a session ends (v7-15).
 
 **Operation tracking**
 
@@ -671,10 +682,12 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 - **Latency target:** at most 1 second end to end, from microphone to air. The system runs on a single local machine with local Docker, so the network path adds negligible delay.
 - Live voice is not an automation item. Live time is not marked as missed and does not appear as a missed item. If the live session drops during an outage, the automation items for that time are handled by §7.1.
 
+**Implementation (v7-15, `docs/phase-12-plan.md` §2).** The bridge does not decode: the browser's Opus packets are written unchanged as an Ogg/Opus stream (channel count taken from the packets) and sent with the Icecast source protocol to the harbor mount `live`, with the Liquidsoap control credentials. Signalling is one HTTP exchange without trickle ICE; every session uses one UDP port (`LIVE_UDP_ADDR`), and the host candidates carry `LIVE_PUBLIC_IPS`, so the bridge works behind the Docker port mapping. No STUN or TURN (§10). One session at a time; a new offer can take over. A session ends when it is stopped, replaced, gets no audio for 10 s after the answer, has a 5 s dropout, or the backend shuts down. The harbor buffer is 0.3 s. Nothing is written to `play_log`; the log records each session.
+
 ### 8.5 Mixing, ducking, and fades
 
 - Music gain is a variable inside Liquidsoap (for example `music_gain`), changed at runtime by Go through the control interface. Typical values: 1.0 (normal), 0.2 (background under voice), 0.0 (music off).
-- Automatic ducking (lowering music when voice is present) is implemented inside Liquidsoap, so control-path latency does not affect it.
+- Automatic ducking (lowering music when voice is present) is implemented inside Liquidsoap, so control-path latency does not affect it. The script mixes with `smooth_add`: while the live input has a source, automation fades over 0.5 s to `duck_gain` (setting `liquidsoap.duck_gain`, set by the backend on connect) and back afterwards (v7-15).
 - Go sends explicit commands only for scenarios such as "music off for interview" or "music back on".
 - Fades are defined in Liquidsoap to avoid clicks. The end-of-clock fade-out uses `fade_out_ms` (default 2500 ms) and finishes at the hour boundary.
 
@@ -932,6 +945,7 @@ The open questions from the previous version are closed. The decisions are recor
 
 26. **Repository layer.** All SQL lives in `internal/repository/<domain>`, one package per domain, named as the domain package. Domain code depends on interfaces it declares itself, and the repositories implement them. Reason: business rules stay free of SQL and driver errors, and a domain rename changes the domain and its repository in the same change (§5.1).
 27. **Import and transcoding.** New files arrive through an inbox folder under the media root and are moved into the library folder on import; there is no upload through the panel. Analysis flags problems against the broadcast standard set in the admin settings, and nothing changes audio without the manager: the panel offers "Fix loudness" and "Optimize track", and the manager chooses whether the fixed file replaces the original or is kept as an optimal copy next to it (§8.7, decided 2026-10-14).
+28. **Live voice without transcoding.** The bridge relays the browser's Opus packets to the harbor as Ogg/Opus, without decoding, using `pion/webrtc` (pure Go, no cgo). Its UDP port and public addresses are environment variables like `HTTP_ADDR`, because they belong to the compose port mapping (§8.4, decided 2026-10-14).
 
 ## 12. Non-functional Requirements
 

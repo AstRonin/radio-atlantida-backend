@@ -118,6 +118,13 @@ const (
 	// MediaToolsUnavailable: ffmpeg or ffprobe is not installed where the
 	// backend runs.
 	MediaToolsUnavailable Problem = "media_tools_unavailable"
+	// LiveSessionActive: a live session is running; send takeover to end
+	// it and start a new one.
+	LiveSessionActive Problem = "live_session_active"
+	// LiveOfferInvalid: the WebRTC offer is not an SDP or has no Opus audio.
+	LiveOfferInvalid Problem = "live_offer_invalid"
+	// LiveUnavailable: the live voice bridge could not open its UDP port.
+	LiveUnavailable Problem = "live_unavailable"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -139,6 +146,7 @@ func Problems() []Problem {
 		LiquidsoapUnavailable,
 		MissedItemNotFound, MissedItemResolved,
 		MediaOperationRunning, MediaToolsUnavailable,
+		LiveSessionActive, LiveOfferInvalid, LiveUnavailable,
 	}
 }
 
