@@ -24,10 +24,10 @@ func NewPlaylists(d *db.DB) *Playlists { return &Playlists{g: d.Gorm} }
 func (s *Playlists) WithTx(tx db.Tx) library.PlaylistStore { return &Playlists{g: tx.Gorm()} }
 
 type playlistRow struct {
-	ID         int64
+	ID         uint64
 	Name       string
 	CreatedAt  time.Time
-	TypeID     int64
+	TypeID     uint64
 	TypeCode   string
 	TypeName   string
 	TrackCount int
@@ -41,7 +41,7 @@ FROM playlists p
 JOIN playlist_types t ON t.id = p.type_id`
 
 // List returns the playlists in name order, of one type when typeID is not 0.
-func (s *Playlists) List(ctx context.Context, typeID int64) ([]library.Playlist, error) {
+func (s *Playlists) List(ctx context.Context, typeID uint64) ([]library.Playlist, error) {
 	var rows []playlistRow
 	q := s.g.WithContext(ctx)
 	var err error
@@ -57,7 +57,7 @@ func (s *Playlists) List(ctx context.Context, typeID int64) ([]library.Playlist,
 }
 
 // Get returns one playlist, or library.ErrPlaylistNotFound.
-func (s *Playlists) Get(ctx context.Context, id int64) (library.Playlist, error) {
+func (s *Playlists) Get(ctx context.Context, id uint64) (library.Playlist, error) {
 	var rows []playlistRow
 	if err := s.g.WithContext(ctx).Raw(selectPlaylists+` WHERE p.id = ?`, id).Scan(&rows).Error; err != nil {
 		return library.Playlist{}, fmt.Errorf("select playlist %d: %w", id, err)
@@ -77,7 +77,7 @@ func (s *Playlists) withRules(ctx context.Context, rows []playlistRow) ([]librar
 	if len(rows) == 0 {
 		return []library.Playlist{}, nil
 	}
-	ids := make([]int64, len(rows))
+	ids := make([]uint64, len(rows))
 	for i, r := range rows {
 		ids[i] = r.ID
 	}
@@ -105,15 +105,15 @@ WHERE playlist_id IN ? ORDER BY rule_id`, ids).Scan(&links).Error
 }
 
 type playlistWrite struct {
-	ID     int64 `gorm:"primaryKey"`
+	ID     uint64 `gorm:"primaryKey"`
 	Name   string
-	TypeID int64
+	TypeID uint64
 }
 
 func (playlistWrite) TableName() string { return "playlists" }
 
 // Create adds a playlist.
-func (s *Playlists) Create(ctx context.Context, in library.PlaylistInput) (int64, error) {
+func (s *Playlists) Create(ctx context.Context, in library.PlaylistInput) (uint64, error) {
 	r := playlistWrite{Name: in.Name, TypeID: in.TypeID}
 	if err := s.g.WithContext(ctx).Create(&r).Error; err != nil {
 		return 0, writeError("insert playlist", err)
@@ -122,7 +122,7 @@ func (s *Playlists) Create(ctx context.Context, in library.PlaylistInput) (int64
 }
 
 // Update changes the name and the type of a playlist.
-func (s *Playlists) Update(ctx context.Context, id int64, in library.PlaylistInput) error {
+func (s *Playlists) Update(ctx context.Context, id uint64, in library.PlaylistInput) error {
 	res := s.g.WithContext(ctx).Table("playlists").Where("id = ?", id).
 		Updates(map[string]any{"name": in.Name, "type_id": in.TypeID})
 	if res.Error != nil {
@@ -137,7 +137,7 @@ func (s *Playlists) Update(ctx context.Context, id int64, in library.PlaylistInp
 // Delete removes a playlist; its memberships and play rule links go with it
 // (CASCADE). Clock elements and clock filler sources refuse the delete
 // (RESTRICT).
-func (s *Playlists) Delete(ctx context.Context, id int64) error {
+func (s *Playlists) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM playlists WHERE id = ?`, id)
 	if res.Error != nil {
 		return deleteError(fmt.Sprintf("delete playlist %d", id), res.Error)
@@ -152,7 +152,7 @@ func (s *Playlists) Delete(ctx context.Context, id int64) error {
 // filler of an element, or as the clock's default filler. clocks holds a
 // few dozen rows; the element lookups use the primary keys and
 // uq_clock_elements_clock_id_position.
-func (s *Playlists) Users(ctx context.Context, id int64, limit int) ([]library.Ref, error) {
+func (s *Playlists) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
 	var rows []refRow
 	err := s.g.WithContext(ctx).Raw(`
 SELECT 'clock' AS kind, c.id, c.name
@@ -173,8 +173,8 @@ LIMIT ?`, id, id, id, limit).Scan(&rows).Error
 
 // Lock takes a key share lock on the playlist, so it cannot be deleted
 // before the transaction ends.
-func (s *Playlists) Lock(ctx context.Context, id int64) error {
-	var ids []int64
+func (s *Playlists) Lock(ctx context.Context, id uint64) error {
+	var ids []uint64
 	if err := s.g.WithContext(ctx).Raw(`SELECT id FROM playlists WHERE id = ? FOR KEY SHARE`, id).Scan(&ids).Error; err != nil {
 		return fmt.Errorf("lock playlist %d: %w", id, err)
 	}
@@ -185,8 +185,8 @@ func (s *Playlists) Lock(ctx context.Context, id int64) error {
 }
 
 type trackPlaylistRow struct {
-	TrackID    int64
-	PlaylistID int64
+	TrackID    uint64
+	PlaylistID uint64
 }
 
 func (trackPlaylistRow) TableName() string { return "track_playlists" }
@@ -197,7 +197,7 @@ const linkBatch = 1000
 
 // SetTracks makes trackIDs the members of the playlist: removes the others,
 // adds the missing ones. Run it in a transaction.
-func (s *Playlists) SetTracks(ctx context.Context, id int64, trackIDs []int64) error {
+func (s *Playlists) SetTracks(ctx context.Context, id uint64, trackIDs []uint64) error {
 	g := s.g.WithContext(ctx)
 	del := g.Where("playlist_id = ?", id)
 	if len(trackIDs) > 0 {

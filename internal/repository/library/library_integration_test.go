@@ -23,7 +23,7 @@ type fixture struct {
 	playlists *libraryrepo.Playlists
 	artists   *libraryrepo.Artists
 	tracks    *libraryrepo.Tracks
-	music     int64
+	music     uint64
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -38,21 +38,21 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-func (f *fixture) id(sql string, args ...any) int64 {
+func (f *fixture) id(sql string, args ...any) uint64 {
 	f.t.Helper()
-	var id int64
+	var id uint64
 	require.NoError(f.t, f.d.Pool.QueryRow(f.t.Context(), sql, args...).Scan(&id))
 	return id
 }
 
-func (f *fixture) playlist(name string) int64 {
+func (f *fixture) playlist(name string) uint64 {
 	f.t.Helper()
 	id, err := f.playlists.Create(f.t.Context(), library.PlaylistInput{Name: name, TypeID: f.music})
 	require.NoError(f.t, err)
 	return id
 }
 
-func (f *fixture) track(title string, artistID *int64) int64 {
+func (f *fixture) track(title string, artistID *uint64) uint64 {
 	f.t.Helper()
 	id, err := f.tracks.Create(f.t.Context(), library.TrackInput{
 		Title: title, ArtistID: artistID, FilePath: "music/" + title + ".mp3", TypeID: f.music, DurationMS: new(200000),
@@ -136,7 +136,7 @@ func TestPlaylistTracksAndLock(t *testing.T) {
 	pop := f.playlist("Pop")
 	a, b, c := f.track("a", nil), f.track("b", nil), f.track("c", nil)
 
-	set := func(ids ...int64) []int64 {
+	set := func(ids ...uint64) []uint64 {
 		t.Helper()
 		require.NoError(t, f.d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			ps := f.playlists.WithTx(tx)
@@ -147,15 +147,15 @@ func TestPlaylistTracksAndLock(t *testing.T) {
 		}))
 		page, err := f.tracks.List(ctx, library.TrackFilter{PlaylistID: pop, Limit: 10})
 		require.NoError(t, err)
-		out := []int64{}
+		out := []uint64{}
 		for _, tr := range page {
 			out = append(out, tr.ID)
 		}
 		return out
 	}
-	require.Equal(t, []int64{a, b}, set(a, b))
-	require.Equal(t, []int64{b, c}, set(b, c), "a removed, b kept, c added")
-	require.Equal(t, []int64{}, set())
+	require.Equal(t, []uint64{a, b}, set(a, b))
+	require.Equal(t, []uint64{b, c}, set(b, c), "a removed, b kept, c added")
+	require.Equal(t, []uint64{}, set())
 
 	err := f.d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		return f.playlists.WithTx(tx).Lock(ctx, 9999)
@@ -163,7 +163,7 @@ func TestPlaylistTracksAndLock(t *testing.T) {
 	require.ErrorIs(t, err, library.ErrPlaylistNotFound)
 
 	err = f.d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		return f.playlists.WithTx(tx).SetTracks(ctx, pop, []int64{a, 9999})
+		return f.playlists.WithTx(tx).SetTracks(ctx, pop, []uint64{a, 9999})
 	})
 	require.ErrorIs(t, err, library.ErrUnknownTrack)
 }
@@ -187,7 +187,7 @@ func TestTrackHistoryAndRollback(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return ts.SetPlaylists(ctx, id, []int64{9999})
+		return ts.SetPlaylists(ctx, id, []uint64{9999})
 	})
 	require.ErrorIs(t, err, library.ErrUnknownPlaylist)
 	page, err := f.tracks.List(ctx, library.TrackFilter{Query: "new", Limit: 10})

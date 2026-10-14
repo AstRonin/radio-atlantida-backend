@@ -7,14 +7,14 @@ import (
 
 // Artist is used for artist separation (§4, §7).
 type Artist struct {
-	ID         int64
+	ID         uint64
 	Name       string
 	TrackCount int
 }
 
 // ArtistRef is the artist of a track.
 type ArtistRef struct {
-	ID   int64
+	ID   uint64
 	Name string
 }
 
@@ -24,17 +24,17 @@ type ArtistStore interface {
 	// every artist when query is empty), in name order.
 	List(ctx context.Context, query string) ([]Artist, error)
 	// Get returns one artist, or ErrArtistNotFound.
-	Get(ctx context.Context, id int64) (Artist, error)
+	Get(ctx context.Context, id uint64) (Artist, error)
 	// Create adds an artist. ErrArtistNameTaken.
-	Create(ctx context.Context, name string) (int64, error)
+	Create(ctx context.Context, name string) (uint64, error)
 	// Rename changes the name. ErrArtistNotFound, ErrArtistNameTaken.
-	Rename(ctx context.Context, id int64, name string) error
+	Rename(ctx context.Context, id uint64, name string) error
 	// Delete removes an artist. ErrArtistNotFound; ErrArtistHasHistory when
 	// the play log refers to it; ErrInUse when a track or a clock does.
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id uint64) error
 	// Users returns the tracks of the artist and the clocks that use it as
 	// filler, at most limit of each kind.
-	Users(ctx context.Context, id int64, limit int) ([]Ref, error)
+	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
 }
 
 // ListArtists returns the artists whose name contains query.
@@ -49,7 +49,7 @@ func (s *Service) ListArtists(ctx context.Context, query string) ([]Artist, erro
 }
 
 // GetArtist returns one artist.
-func (s *Service) GetArtist(ctx context.Context, id int64) (Artist, error) {
+func (s *Service) GetArtist(ctx context.Context, id uint64) (Artist, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	return s.artists.Get(ctx, id)
@@ -71,7 +71,7 @@ func (s *Service) CreateArtist(ctx context.Context, artistName string) (Artist, 
 }
 
 // RenameArtist changes the name of an artist.
-func (s *Service) RenameArtist(ctx context.Context, id int64, artistName string) (Artist, error) {
+func (s *Service) RenameArtist(ctx context.Context, id uint64, artistName string) (Artist, error) {
 	n, err := name("name", artistName)
 	if err != nil {
 		return Artist{}, err
@@ -86,7 +86,7 @@ func (s *Service) RenameArtist(ctx context.Context, id int64, artistName string)
 
 // DeleteArtist deletes an artist without tracks, clock references, or play
 // history.
-func (s *Service) DeleteArtist(ctx context.Context, id int64) error {
+func (s *Service) DeleteArtist(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.artists.Delete(ctx, id)

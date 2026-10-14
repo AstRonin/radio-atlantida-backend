@@ -11,30 +11,30 @@ import (
 // (*library.Service).
 type Library interface {
 	ListTypes(ctx context.Context) ([]library.PlaylistType, error)
-	GetType(ctx context.Context, id int64) (library.PlaylistType, error)
+	GetType(ctx context.Context, id uint64) (library.PlaylistType, error)
 	CreateType(ctx context.Context, code, name string) (library.PlaylistType, error)
-	RenameType(ctx context.Context, id int64, name string) (library.PlaylistType, error)
-	DeleteType(ctx context.Context, id int64) error
+	RenameType(ctx context.Context, id uint64, name string) (library.PlaylistType, error)
+	DeleteType(ctx context.Context, id uint64) error
 
-	ListPlaylists(ctx context.Context, typeID int64) ([]library.Playlist, error)
-	GetPlaylist(ctx context.Context, id int64) (library.Playlist, error)
+	ListPlaylists(ctx context.Context, typeID uint64) ([]library.Playlist, error)
+	GetPlaylist(ctx context.Context, id uint64) (library.Playlist, error)
 	CreatePlaylist(ctx context.Context, in library.PlaylistInput) (library.Playlist, error)
-	UpdatePlaylist(ctx context.Context, id int64, in library.PlaylistInput) (library.Playlist, error)
-	DeletePlaylist(ctx context.Context, id int64) error
-	SetPlaylistTracks(ctx context.Context, id int64, trackIDs []int64) (library.Playlist, error)
+	UpdatePlaylist(ctx context.Context, id uint64, in library.PlaylistInput) (library.Playlist, error)
+	DeletePlaylist(ctx context.Context, id uint64) error
+	SetPlaylistTracks(ctx context.Context, id uint64, trackIDs []uint64) (library.Playlist, error)
 
 	ListArtists(ctx context.Context, query string) ([]library.Artist, error)
-	GetArtist(ctx context.Context, id int64) (library.Artist, error)
+	GetArtist(ctx context.Context, id uint64) (library.Artist, error)
 	CreateArtist(ctx context.Context, name string) (library.Artist, error)
-	RenameArtist(ctx context.Context, id int64, name string) (library.Artist, error)
-	DeleteArtist(ctx context.Context, id int64) error
+	RenameArtist(ctx context.Context, id uint64, name string) (library.Artist, error)
+	DeleteArtist(ctx context.Context, id uint64) error
 
 	ListTracks(ctx context.Context, f library.TrackFilter) (library.TrackPage, error)
-	GetTrack(ctx context.Context, id int64) (library.Track, error)
+	GetTrack(ctx context.Context, id uint64) (library.Track, error)
 	CreateTrack(ctx context.Context, in library.TrackInput) (library.Track, error)
-	UpdateTrack(ctx context.Context, id int64, in library.TrackInput) (library.Track, error)
-	DeleteTrack(ctx context.Context, id int64) error
-	TrackAudio(ctx context.Context, id int64) (library.Audio, error)
+	UpdateTrack(ctx context.Context, id uint64, in library.TrackInput) (library.Track, error)
+	DeleteTrack(ctx context.Context, id uint64) error
+	TrackAudio(ctx context.Context, id uint64) (library.Audio, error)
 }
 
 func typeRefDTO(t library.TypeRef) dto.TypeRef {

@@ -14,14 +14,14 @@ import (
 // Clocks manages clock templates (*clocks.Service).
 type Clocks interface {
 	List(ctx context.Context) ([]clocks.Summary, error)
-	Get(ctx context.Context, id int64) (clocks.View, error)
+	Get(ctx context.Context, id uint64) (clocks.View, error)
 	Create(ctx context.Context, in clocks.Input) (clocks.Result, error)
-	Update(ctx context.Context, id int64, in clocks.Input) (clocks.Result, error)
-	SaveWithFiller(ctx context.Context, id int64, choice clocks.FillerChoice) (clocks.Result, error)
-	SaveIncomplete(ctx context.Context, id int64) (clocks.Result, error)
-	Delete(ctx context.Context, id int64) error
-	Pool(ctx context.Context, id int64) ([]clocks.PoolEntry, error)
-	SetPool(ctx context.Context, id int64, trackIDs []int64) ([]clocks.PoolEntry, error)
+	Update(ctx context.Context, id uint64, in clocks.Input) (clocks.Result, error)
+	SaveWithFiller(ctx context.Context, id uint64, choice clocks.FillerChoice) (clocks.Result, error)
+	SaveIncomplete(ctx context.Context, id uint64) (clocks.Result, error)
+	Delete(ctx context.Context, id uint64) error
+	Pool(ctx context.Context, id uint64) ([]clocks.PoolEntry, error)
+	SetPool(ctx context.Context, id uint64, trackIDs []uint64) ([]clocks.PoolEntry, error)
 }
 
 type clockListOutput struct {
@@ -41,12 +41,12 @@ type createClockInput struct {
 }
 
 type updateClockInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.ClockBody
 }
 
 type saveWithFillerInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.SaveWithFillerBody
 }
 
@@ -55,7 +55,7 @@ type fillerPoolOutput struct {
 }
 
 type setFillerPoolInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.SetFillerPool
 }
 

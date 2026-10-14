@@ -29,12 +29,12 @@ import (
 )
 
 type fakeOperations struct {
-	ops    map[int64]operations.Operation
+	ops    map[uint64]operations.Operation
 	err    error
 	filter operations.ListFilter
 }
 
-func (f *fakeOperations) Get(_ context.Context, id int64) (operations.Operation, error) {
+func (f *fakeOperations) Get(_ context.Context, id uint64) (operations.Operation, error) {
 	if f.err != nil {
 		return operations.Operation{}, f.err
 	}
@@ -93,7 +93,7 @@ func TestGetOperation(t *testing.T) {
 	started := time.Date(2026, 10, 13, 6, 44, 0, 0, time.UTC)
 	finished := started.Add(time.Minute)
 	summary := "deleted 3 play log rows and 1 operations"
-	ops := &fakeOperations{ops: map[int64]operations.Operation{
+	ops := &fakeOperations{ops: map[uint64]operations.Operation{
 		12: {ID: 12, Kind: "retention", Status: operations.StatusCompleted, StartedAt: started, FinishedAt: &finished, ResultSummary: &summary},
 	}}
 	h, _ := newAPIRouter(t, ops, t.TempDir())

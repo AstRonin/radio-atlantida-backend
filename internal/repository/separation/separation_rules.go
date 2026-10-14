@@ -23,7 +23,7 @@ type Store struct {
 func New(d *db.DB) *Store { return &Store{g: d.Gorm} }
 
 type row struct {
-	ID               int64
+	ID               uint64
 	Scope            string
 	MinIntervalHours int
 	Notes            string
@@ -51,7 +51,7 @@ func (s *Store) List(ctx context.Context) ([]separation.Rule, error) {
 }
 
 // Get returns one rule, or separation.ErrNotFound.
-func (s *Store) Get(ctx context.Context, id int64) (separation.Rule, error) {
+func (s *Store) Get(ctx context.Context, id uint64) (separation.Rule, error) {
 	var r row
 	err := s.g.WithContext(ctx).Select(columns).Where("id = ?", id).Take(&r).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -64,7 +64,7 @@ func (s *Store) Get(ctx context.Context, id int64) (separation.Rule, error) {
 }
 
 // Update changes the interval and the notes of a rule.
-func (s *Store) Update(ctx context.Context, id int64, minIntervalHours int, notes string) error {
+func (s *Store) Update(ctx context.Context, id uint64, minIntervalHours int, notes string) error {
 	res := s.g.WithContext(ctx).Model(&row{}).Where("id = ?", id).
 		Updates(map[string]any{"min_interval_hours": minIntervalHours, "notes": notes})
 	if res.Error != nil {

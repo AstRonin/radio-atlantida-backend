@@ -10,20 +10,20 @@ import (
 
 // Playlist is a pool of tracks (§4). The order of its tracks is not stored.
 type Playlist struct {
-	ID         int64
+	ID         uint64
 	Name       string
 	Type       TypeRef
 	TrackCount int
 	// PlayRuleIDs are the play rules applied to every track of the
 	// playlist (§7.3), in ID order.
-	PlayRuleIDs []int64
+	PlayRuleIDs []uint64
 	CreatedAt   time.Time
 }
 
 // PlaylistInput is the editable part of a playlist.
 type PlaylistInput struct {
 	Name   string
-	TypeID int64
+	TypeID uint64
 }
 
 // PlaylistStore persists playlists (internal/repository/library).
@@ -31,30 +31,30 @@ type PlaylistStore interface {
 	// WithTx returns the store bound to tx.
 	WithTx(tx db.Tx) PlaylistStore
 	// List returns the playlists, of one type when typeID is not 0.
-	List(ctx context.Context, typeID int64) ([]Playlist, error)
+	List(ctx context.Context, typeID uint64) ([]Playlist, error)
 	// Get returns one playlist, or ErrPlaylistNotFound.
-	Get(ctx context.Context, id int64) (Playlist, error)
+	Get(ctx context.Context, id uint64) (Playlist, error)
 	// Create adds a playlist. ErrPlaylistNameTaken, ErrUnknownType.
-	Create(ctx context.Context, in PlaylistInput) (int64, error)
+	Create(ctx context.Context, in PlaylistInput) (uint64, error)
 	// Update changes a playlist. ErrPlaylistNotFound, ErrPlaylistNameTaken,
 	// ErrUnknownType.
-	Update(ctx context.Context, id int64, in PlaylistInput) error
+	Update(ctx context.Context, id uint64, in PlaylistInput) error
 	// Delete removes a playlist and its memberships. ErrPlaylistNotFound;
 	// ErrInUse when a clock uses it.
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id uint64) error
 	// Users returns the clocks that use the playlist in an element or as
 	// filler, at most limit.
-	Users(ctx context.Context, id int64, limit int) ([]Ref, error)
+	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
 	// Lock keeps the playlist from being deleted until the transaction
 	// ends. ErrPlaylistNotFound.
-	Lock(ctx context.Context, id int64) error
+	Lock(ctx context.Context, id uint64) error
 	// SetTracks makes trackIDs the tracks of the playlist. ErrUnknownTrack.
-	SetTracks(ctx context.Context, id int64, trackIDs []int64) error
+	SetTracks(ctx context.Context, id uint64, trackIDs []uint64) error
 }
 
 // ListPlaylists returns the playlists with their type and track count, of
 // one type when typeID is not 0.
-func (s *Service) ListPlaylists(ctx context.Context, typeID int64) ([]Playlist, error) {
+func (s *Service) ListPlaylists(ctx context.Context, typeID uint64) ([]Playlist, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	ps, err := s.playlists.List(ctx, typeID)
@@ -65,7 +65,7 @@ func (s *Service) ListPlaylists(ctx context.Context, typeID int64) ([]Playlist, 
 }
 
 // GetPlaylist returns one playlist.
-func (s *Service) GetPlaylist(ctx context.Context, id int64) (Playlist, error) {
+func (s *Service) GetPlaylist(ctx context.Context, id uint64) (Playlist, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	return s.playlists.Get(ctx, id)
@@ -88,7 +88,7 @@ func (s *Service) CreatePlaylist(ctx context.Context, in PlaylistInput) (Playlis
 }
 
 // UpdatePlaylist renames a playlist or changes its type.
-func (s *Service) UpdatePlaylist(ctx context.Context, id int64, in PlaylistInput) (Playlist, error) {
+func (s *Service) UpdatePlaylist(ctx context.Context, id uint64, in PlaylistInput) (Playlist, error) {
 	n, err := name("name", in.Name)
 	if err != nil {
 		return Playlist{}, err
@@ -104,7 +104,7 @@ func (s *Service) UpdatePlaylist(ctx context.Context, id int64, in PlaylistInput
 
 // DeletePlaylist deletes a playlist that no clock uses. Its tracks stay in
 // the library. An *InUseError names the clocks that use it.
-func (s *Service) DeletePlaylist(ctx context.Context, id int64) error {
+func (s *Service) DeletePlaylist(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.playlists.Delete(ctx, id)
@@ -115,7 +115,7 @@ func (s *Service) DeletePlaylist(ctx context.Context, id int64) error {
 
 // SetPlaylistTracks makes trackIDs the tracks of the playlist, in one
 // transaction. The order of trackIDs is not stored.
-func (s *Service) SetPlaylistTracks(ctx context.Context, id int64, trackIDs []int64) (Playlist, error) {
+func (s *Service) SetPlaylistTracks(ctx context.Context, id uint64, trackIDs []uint64) (Playlist, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {

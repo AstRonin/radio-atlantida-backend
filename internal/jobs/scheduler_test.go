@@ -28,7 +28,7 @@ func (f *fakeLocker) WithLock(_ context.Context, key int64, fn func() error) err
 
 type countingOps struct{ runs int }
 
-func (c *countingOps) Do(context.Context, operations.Kind, logging.Component, operations.Func) (int64, error) {
+func (c *countingOps) Do(context.Context, operations.Kind, logging.Component, operations.Func) (uint64, error) {
 	c.runs++
 	return 1, nil
 }

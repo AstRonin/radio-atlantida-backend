@@ -27,7 +27,7 @@ const (
 
 // Rule is one separation rule.
 type Rule struct {
-	ID               int64
+	ID               uint64
 	Scope            string
 	MinIntervalHours int
 	Notes            string
@@ -38,9 +38,9 @@ type Store interface {
 	// List returns every rule in ID order.
 	List(ctx context.Context) ([]Rule, error)
 	// Get returns one rule, or ErrNotFound.
-	Get(ctx context.Context, id int64) (Rule, error)
+	Get(ctx context.Context, id uint64) (Rule, error)
 	// Update changes the interval and the notes. ErrNotFound.
-	Update(ctx context.Context, id int64, minIntervalHours int, notes string) error
+	Update(ctx context.Context, id uint64, minIntervalHours int, notes string) error
 }
 
 // MaxHoursFunc returns the longest interval separation may use: the play
@@ -74,7 +74,7 @@ func (s *Service) List(ctx context.Context) ([]Rule, error) {
 }
 
 // Update changes the interval and the notes of a rule.
-func (s *Service) Update(ctx context.Context, id int64, minIntervalHours int, notes string) (Rule, error) {
+func (s *Service) Update(ctx context.Context, id uint64, minIntervalHours int, notes string) (Rule, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	limit, err := s.maxHours(ctx)

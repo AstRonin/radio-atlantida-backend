@@ -46,12 +46,12 @@ func writeError(op string, err error) error {
 }
 
 type slotRow struct {
-	ID          int64
+	ID          uint64
 	Weekday     int
 	Hour        int
 	ValidFrom   time.Time
 	ValidTo     *time.Time
-	ClockID     int64
+	ClockID     uint64
 	ClockName   string
 	ClockStatus string
 }
@@ -117,7 +117,7 @@ func (s *Slots) List(ctx context.Context, f grid.Filter) ([]grid.Slot, error) {
 }
 
 // Get returns one slot, or grid.ErrNotFound.
-func (s *Slots) Get(ctx context.Context, id int64) (grid.Slot, error) {
+func (s *Slots) Get(ctx context.Context, id uint64) (grid.Slot, error) {
 	slots, err := scan(s.g.WithContext(ctx), fmt.Sprintf("select grid slot %d", id), selectSlots+" WHERE s.id = ?", id)
 	if err != nil {
 		return grid.Slot{}, err
@@ -140,8 +140,8 @@ FOR UPDATE OF s`, weekday, hour, from, to)
 }
 
 // Insert adds a slot.
-func (s *Slots) Insert(ctx context.Context, n grid.NewSlot) (int64, error) {
-	var id int64
+func (s *Slots) Insert(ctx context.Context, n grid.NewSlot) (uint64, error) {
+	var id uint64
 	err := s.g.WithContext(ctx).Raw(`
 INSERT INTO grid_slots (weekday, hour, clock_id, valid_from, valid_to)
 VALUES (?, ?, ?, CAST(? AS date), CAST(? AS date))
@@ -153,7 +153,7 @@ RETURNING id`, n.Weekday, n.Hour, n.ClockID, n.ValidFrom, n.ValidTo).Scan(&id).E
 }
 
 // SetRange changes the dates of a slot.
-func (s *Slots) SetRange(ctx context.Context, id int64, from time.Time, to *time.Time) error {
+func (s *Slots) SetRange(ctx context.Context, id uint64, from time.Time, to *time.Time) error {
 	res := s.g.WithContext(ctx).Exec(
 		`UPDATE grid_slots SET valid_from = CAST(? AS date), valid_to = CAST(? AS date) WHERE id = ?`, from, to, id)
 	if res.Error != nil {
@@ -167,7 +167,7 @@ func (s *Slots) SetRange(ctx context.Context, id int64, from time.Time, to *time
 
 // Delete removes a slot. The play log and the track plan keep their rows
 // and lose only grid_slot_id (ON DELETE SET NULL).
-func (s *Slots) Delete(ctx context.Context, id int64) error {
+func (s *Slots) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM grid_slots WHERE id = ?`, id)
 	if res.Error != nil {
 		return fmt.Errorf("delete grid slot %d: %w", id, res.Error)

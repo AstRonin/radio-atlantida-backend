@@ -26,9 +26,9 @@ type trackPageOutput struct {
 }
 
 type listTracksInput struct {
-	TypeID     int64  `query:"type_id" minimum:"0" doc:"Only tracks of this type."`
-	ArtistID   int64  `query:"artist_id" minimum:"0" doc:"Only tracks of this artist."`
-	PlaylistID int64  `query:"playlist_id" minimum:"0" doc:"Only tracks in this playlist."`
+	TypeID     uint64 `query:"type_id" minimum:"0" doc:"Only tracks of this type."`
+	ArtistID   uint64 `query:"artist_id" minimum:"0" doc:"Only tracks of this artist."`
+	PlaylistID uint64 `query:"playlist_id" minimum:"0" doc:"Only tracks in this playlist."`
 	Query      string `query:"q" maxLength:"200" doc:"Only tracks whose title or artist name contains this text (case-insensitive)."`
 	Cursor     string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page."`
 	Limit      int    `query:"limit" minimum:"1" maximum:"500" default:"100"`
@@ -39,7 +39,7 @@ type createTrackInput struct {
 }
 
 type updateTrackInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.TrackBody
 }
 
@@ -202,7 +202,7 @@ var errBadCursor = errors.New("cursor has no track ID")
 // trackCursor is the JSON inside an opaque cursor.
 type trackCursor struct {
 	Title string `json:"t"`
-	ID    int64  `json:"i"`
+	ID    uint64 `json:"i"`
 }
 
 func encodeCursor(c library.TrackCursor) string {

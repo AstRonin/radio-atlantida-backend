@@ -44,7 +44,7 @@ func NewErrorAlert(a logging.Alert) ErrorAlertEvent {
 type OperationCompletedEvent struct {
 	Type        string                 `json:"type" doc:"<kind>.completed"`
 	Time        time.Time              `json:"time" doc:"UTC time the operation finished."`
-	OperationID int64                  `json:"operation_id"`
+	OperationID uint64                 `json:"operation_id"`
 	Data        OperationCompletedData `json:"data"`
 }
 
@@ -59,7 +59,7 @@ type OperationCompletedData struct {
 type OperationFailedEvent struct {
 	Type        string              `json:"type" doc:"<kind>.failed"`
 	Time        time.Time           `json:"time" doc:"UTC time the operation failed."`
-	OperationID int64               `json:"operation_id"`
+	OperationID uint64              `json:"operation_id"`
 	Data        OperationFailedData `json:"data"`
 }
 
@@ -75,7 +75,7 @@ type OperationFailedData struct {
 type OperationProgressEvent struct {
 	Type        string                `json:"type" doc:"<kind>.progress"`
 	Time        time.Time             `json:"time"`
-	OperationID int64                 `json:"operation_id"`
+	OperationID uint64                `json:"operation_id"`
 	Data        OperationProgressData `json:"data"`
 }
 

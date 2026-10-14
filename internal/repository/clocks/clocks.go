@@ -59,7 +59,7 @@ func writeError(op string, err error) error {
 }
 
 type summaryRow struct {
-	ID           int64
+	ID           uint64
 	Name         string
 	Status       string
 	ElementCount int
@@ -89,17 +89,17 @@ ORDER BY c.name, c.id`).Scan(&rows).Error
 }
 
 type clockRow struct {
-	ID                      int64
+	ID                      uint64
 	Name                    string
 	Status                  string
 	DefaultFillerMode       *string
-	DefaultFillerPlaylistID *int64
-	DefaultFillerArtistID   *int64
+	DefaultFillerPlaylistID *uint64
+	DefaultFillerArtistID   *uint64
 	UpdatedAt               time.Time
 }
 
 type elementRow struct {
-	ID                  int64
+	ID                  uint64
 	Position            int
 	Placement           string
 	FixedMinute         *int
@@ -107,17 +107,17 @@ type elementRow struct {
 	NominalDurationMS   int `gorm:"column:nominal_duration_ms"`
 	DurationToleranceMS int `gorm:"column:duration_tolerance_ms"`
 	FillerMode          string
-	FillerPlaylistID    *int64
-	FillerArtistID      *int64
+	FillerPlaylistID    *uint64
+	FillerArtistID      *uint64
 }
 
 type linkRow struct {
-	OwnerID int64
-	OtherID int64
+	OwnerID uint64
+	OtherID uint64
 }
 
 // source returns the typed filler column that matches the mode.
-func source(mode string, playlistID, artistID *int64) *int64 {
+func source(mode string, playlistID, artistID *uint64) *uint64 {
 	switch clocks.FillerMode(mode) {
 	case clocks.FillerPlaylist:
 		return playlistID
@@ -128,7 +128,7 @@ func source(mode string, playlistID, artistID *int64) *int64 {
 }
 
 // columns splits a filler source into the typed columns.
-func columns(f clocks.Filler) (playlistID, artistID *int64) {
+func columns(f clocks.Filler) (playlistID, artistID *uint64) {
 	switch f.Mode {
 	case clocks.FillerPlaylist:
 		return f.SourceID, nil
@@ -140,7 +140,7 @@ func columns(f clocks.Filler) (playlistID, artistID *int64) {
 
 // Get returns a clock with its elements in position order, or
 // clocks.ErrNotFound.
-func (s *Store) Get(ctx context.Context, id int64) (clocks.Clock, error) {
+func (s *Store) Get(ctx context.Context, id uint64) (clocks.Clock, error) {
 	g := s.g.WithContext(ctx)
 	var cs []clockRow
 	err := g.Raw(`
@@ -172,7 +172,7 @@ ORDER BY ep.playlist_id`, id).Scan(&links).Error
 	if err != nil {
 		return clocks.Clock{}, fmt.Errorf("select element playlists of clock %d: %w", id, err)
 	}
-	playlists := map[int64][]int64{}
+	playlists := map[uint64][]uint64{}
 	for _, l := range links {
 		playlists[l.OwnerID] = append(playlists[l.OwnerID], l.OtherID)
 	}
@@ -204,8 +204,8 @@ ORDER BY ep.playlist_id`, id).Scan(&links).Error
 
 // Lock locks the clock row, so concurrent saves of one clock run one after
 // the other.
-func (s *Store) Lock(ctx context.Context, id int64) error {
-	var ids []int64
+func (s *Store) Lock(ctx context.Context, id uint64) error {
+	var ids []uint64
 	if err := s.g.WithContext(ctx).Raw(`SELECT id FROM clocks WHERE id = ? FOR UPDATE`, id).Scan(&ids).Error; err != nil {
 		return fmt.Errorf("lock clock %d: %w", id, err)
 	}
@@ -216,19 +216,19 @@ func (s *Store) Lock(ctx context.Context, id int64) error {
 }
 
 type clockWrite struct {
-	ID                      int64 `gorm:"primaryKey"`
+	ID                      uint64 `gorm:"primaryKey"`
 	Name                    string
 	Status                  string
 	DefaultFillerMode       *string
-	DefaultFillerPlaylistID *int64
-	DefaultFillerArtistID   *int64
+	DefaultFillerPlaylistID *uint64
+	DefaultFillerArtistID   *uint64
 }
 
 func (clockWrite) TableName() string { return "clocks" }
 
 type elementWrite struct {
-	ID                  int64 `gorm:"primaryKey"`
-	ClockID             int64
+	ID                  uint64 `gorm:"primaryKey"`
+	ClockID             uint64
 	Position            int
 	Placement           string
 	FixedMinute         *int
@@ -236,15 +236,15 @@ type elementWrite struct {
 	NominalDurationMS   int `gorm:"column:nominal_duration_ms"`
 	DurationToleranceMS int `gorm:"column:duration_tolerance_ms"`
 	FillerMode          string
-	FillerPlaylistID    *int64
-	FillerArtistID      *int64
+	FillerPlaylistID    *uint64
+	FillerArtistID      *uint64
 }
 
 func (elementWrite) TableName() string { return "clock_elements" }
 
 type elementPlaylistWrite struct {
-	ClockElementID int64
-	PlaylistID     int64
+	ClockElementID uint64
+	PlaylistID     uint64
 }
 
 func (elementPlaylistWrite) TableName() string { return "clock_element_playlists" }
@@ -258,7 +258,7 @@ func clockFields(c clocks.Clock) clockWrite {
 	return w
 }
 
-func elementFields(clockID int64, position int, e clocks.Element) elementWrite {
+func elementFields(clockID uint64, position int, e clocks.Element) elementWrite {
 	w := elementWrite{
 		ID: e.ID, ClockID: clockID, Position: position, Placement: string(e.Placement),
 		FixedMinute: e.FixedMinute, FixedToleranceMS: e.FixedToleranceMS,
@@ -271,7 +271,7 @@ func elementFields(clockID int64, position int, e clocks.Element) elementWrite {
 
 // Create adds a clock with its elements and their playlists. It runs
 // several statements: call it in a transaction.
-func (s *Store) Create(ctx context.Context, c clocks.Clock) (int64, error) {
+func (s *Store) Create(ctx context.Context, c clocks.Clock) (uint64, error) {
 	g := s.g.WithContext(ctx)
 	w := clockFields(c)
 	if err := g.Create(&w).Error; err != nil {
@@ -298,7 +298,7 @@ func (s *Store) Update(ctx context.Context, c clocks.Clock) error {
 	if res.RowsAffected == 0 {
 		return clocks.ErrNotFound
 	}
-	keep := []int64{0}
+	keep := []uint64{0}
 	for _, e := range c.Elements {
 		if e.ID != 0 {
 			keep = append(keep, e.ID)
@@ -321,8 +321,8 @@ const positionShift = 1_000_000
 
 // writeElements inserts new elements, updates kept ones, and replaces the
 // playlists of all of them.
-func writeElements(g *gorm.DB, clockID int64, elements []clocks.Element) error {
-	ids := make([]int64, len(elements))
+func writeElements(g *gorm.DB, clockID uint64, elements []clocks.Element) error {
+	ids := make([]uint64, len(elements))
 	for i, e := range elements {
 		w := elementFields(clockID, i, e)
 		if e.ID == 0 {
@@ -365,7 +365,7 @@ func writeElements(g *gorm.DB, clockID int64, elements []clocks.Element) error {
 // Delete removes a clock; its elements and pool go with it (CASCADE). Grid
 // slots refuse it (clocks.ErrInUse), the play log and the track plan for
 // good (clocks.ErrHasHistory).
-func (s *Store) Delete(ctx context.Context, id int64) error {
+func (s *Store) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM clocks WHERE id = ?`, id)
 	if res.Error != nil {
 		if ce, ok := db.AsConstraintError(res.Error); ok && ce.Kind == db.ForeignKey {
@@ -382,7 +382,7 @@ func (s *Store) Delete(ctx context.Context, id int64) error {
 }
 
 type slotRow struct {
-	ID        int64
+	ID        uint64
 	Weekday   int
 	Hour      int
 	ValidFrom time.Time
@@ -390,7 +390,7 @@ type slotRow struct {
 }
 
 // Users returns the grid slots of the clock (ix_grid_slots_clock_id).
-func (s *Store) Users(ctx context.Context, id int64, limit int) ([]clocks.SlotRef, error) {
+func (s *Store) Users(ctx context.Context, id uint64, limit int) ([]clocks.SlotRef, error) {
 	var rows []slotRow
 	err := s.g.WithContext(ctx).Raw(`
 SELECT id, weekday, hour, valid_from, valid_to FROM grid_slots
@@ -408,24 +408,24 @@ LIMIT ?`, id, limit).Scan(&rows).Error
 }
 
 // MissingPlaylists returns the IDs that are not playlists.
-func (s *Store) MissingPlaylists(ctx context.Context, ids []int64) ([]int64, error) {
+func (s *Store) MissingPlaylists(ctx context.Context, ids []uint64) ([]uint64, error) {
 	return s.missing(ctx, `SELECT id FROM playlists WHERE id IN ?`, ids)
 }
 
 // MissingArtists returns the IDs that are not artists.
-func (s *Store) MissingArtists(ctx context.Context, ids []int64) ([]int64, error) {
+func (s *Store) MissingArtists(ctx context.Context, ids []uint64) ([]uint64, error) {
 	return s.missing(ctx, `SELECT id FROM artists WHERE id IN ?`, ids)
 }
 
-func (s *Store) missing(ctx context.Context, sql string, ids []int64) ([]int64, error) {
+func (s *Store) missing(ctx context.Context, sql string, ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	var found []int64
+	var found []uint64
 	if err := s.g.WithContext(ctx).Raw(sql, ids).Scan(&found).Error; err != nil {
 		return nil, fmt.Errorf("check ids: %w", err)
 	}
-	var out []int64
+	var out []uint64
 	for _, id := range ids {
 		if !slices.Contains(found, id) {
 			out = append(out, id)
@@ -435,7 +435,7 @@ func (s *Store) missing(ctx context.Context, sql string, ids []int64) ([]int64, 
 }
 
 type poolRow struct {
-	TrackID  int64
+	TrackID  uint64
 	Title    string
 	Position int
 	UsedAt   *time.Time
@@ -443,7 +443,7 @@ type poolRow struct {
 
 // Pool returns the filler pool in position order
 // (uq_clock_filler_pool_clock_id_position).
-func (s *Store) Pool(ctx context.Context, clockID int64) ([]clocks.PoolEntry, error) {
+func (s *Store) Pool(ctx context.Context, clockID uint64) ([]clocks.PoolEntry, error) {
 	var rows []poolRow
 	err := s.g.WithContext(ctx).Raw(`
 SELECT p.track_id, t.title, p.position, p.used_at
@@ -465,8 +465,8 @@ ORDER BY p.position`, clockID).Scan(&rows).Error
 }
 
 type poolWrite struct {
-	ClockID  int64
-	TrackID  int64
+	ClockID  uint64
+	TrackID  uint64
 	Position int
 }
 
@@ -474,7 +474,7 @@ func (poolWrite) TableName() string { return "clock_filler_pool" }
 
 // SetPool deletes the unused pool rows and appends trackIDs after the used
 // ones. Run it in a transaction.
-func (s *Store) SetPool(ctx context.Context, clockID int64, trackIDs []int64) error {
+func (s *Store) SetPool(ctx context.Context, clockID uint64, trackIDs []uint64) error {
 	g := s.g.WithContext(ctx)
 	if err := g.Exec(`DELETE FROM clock_filler_pool WHERE clock_id = ? AND used_at IS NULL`, clockID).Error; err != nil {
 		return fmt.Errorf("delete unused pool of clock %d: %w", clockID, err)

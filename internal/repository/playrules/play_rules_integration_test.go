@@ -28,8 +28,8 @@ func TestStore(t *testing.T) {
 	store := playrulesrepo.New(d.Pool)
 	ctx := t.Context()
 
-	id := func(sql string) int64 {
-		var v int64
+	id := func(sql string) uint64 {
+		var v uint64
 		require.NoError(t, d.Pool.QueryRow(ctx, sql).Scan(&v))
 		return v
 	}
@@ -72,22 +72,22 @@ func TestStore(t *testing.T) {
 		inTx := func(fn func(st playrules.Store) error) error {
 			return d.WithTx(ctx, func(_ context.Context, tx db.Tx) error { return fn(store.WithTx(tx)) })
 		}
-		require.NoError(t, inTx(func(st playrules.Store) error { return st.SetTrackRules(ctx, jingle, []int64{rid, other}) }))
-		require.NoError(t, inTx(func(st playrules.Store) error { return st.SetTrackRules(ctx, jingle, []int64{other}) }))
+		require.NoError(t, inTx(func(st playrules.Store) error { return st.SetTrackRules(ctx, jingle, []uint64{rid, other}) }))
+		require.NoError(t, inTx(func(st playrules.Store) error { return st.SetTrackRules(ctx, jingle, []uint64{other}) }))
 		ids, err := store.TrackRules(ctx, jingle)
 		require.NoError(t, err)
-		require.Equal(t, []int64{other}, ids, "rid removed, other kept")
+		require.Equal(t, []uint64{other}, ids, "rid removed, other kept")
 
 		require.NoError(t, inTx(func(st playrules.Store) error {
-			return st.SetTargets(ctx, rid, []int64{jingle}, []int64{jingles})
+			return st.SetTargets(ctx, rid, []uint64{jingle}, []uint64{jingles})
 		}))
 		got, err := store.Get(ctx, rid)
 		require.NoError(t, err)
-		require.Equal(t, []int64{jingle}, got.TrackIDs)
-		require.Equal(t, []int64{jingles}, got.PlaylistIDs)
+		require.Equal(t, []uint64{jingle}, got.TrackIDs)
+		require.Equal(t, []uint64{jingles}, got.PlaylistIDs)
 		ids, err = store.PlaylistRules(ctx, jingles)
 		require.NoError(t, err)
-		require.Equal(t, []int64{rid}, ids)
+		require.Equal(t, []uint64{rid}, ids)
 
 		require.ErrorIs(t, store.Delete(ctx, rid), playrules.ErrInUse)
 		users, err := store.Users(ctx, rid, playrules.MaxUsers)
@@ -97,9 +97,9 @@ func TestStore(t *testing.T) {
 			{Kind: playrules.KindPlaylist, ID: jingles, Name: "Jingles"},
 		}, users)
 
-		err = inTx(func(st playrules.Store) error { return st.SetPlaylistRules(ctx, jingles, []int64{9999}) })
+		err = inTx(func(st playrules.Store) error { return st.SetPlaylistRules(ctx, jingles, []uint64{9999}) })
 		require.ErrorIs(t, err, playrules.ErrUnknownRule)
-		err = inTx(func(st playrules.Store) error { return st.SetTargets(ctx, rid, nil, []int64{9999}) })
+		err = inTx(func(st playrules.Store) error { return st.SetTargets(ctx, rid, nil, []uint64{9999}) })
 		require.ErrorIs(t, err, playrules.ErrUnknownPlaylist)
 		err = inTx(func(st playrules.Store) error { return st.LockTrack(ctx, 9999) })
 		require.ErrorIs(t, err, playrules.ErrTrackNotFound)

@@ -35,7 +35,7 @@ type FieldError struct {
 // EntityRef names an entity in a refusal.
 type EntityRef struct {
 	Kind string `json:"kind" doc:"Entity kind, for example playlist, track, clock."`
-	ID   int64  `json:"id"`
+	ID   uint64 `json:"id"`
 	Name string `json:"name"`
 }
 

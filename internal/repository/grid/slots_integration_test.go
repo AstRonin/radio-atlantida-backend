@@ -27,7 +27,7 @@ func TestSlots(t *testing.T) {
 	d := dbtest.Migrated(t)
 	ctx := t.Context()
 	store := gridrepo.New(d)
-	var clockID int64
+	var clockID uint64
 	require.NoError(t, d.Pool.QueryRow(ctx, `INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`).Scan(&clockID))
 
 	id, err := store.Insert(ctx, grid.NewSlot{Weekday: 1, Hour: 8, ClockID: clockID, ValidFrom: day("2026-10-01"), ValidTo: new(day("2026-10-31"))})

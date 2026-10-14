@@ -21,10 +21,10 @@ type CheckStore struct {
 func NewCheck(q db.Querier) *CheckStore { return &CheckStore{q: q} }
 
 type candidateRow struct {
-	TrackID     int64   `db:"track_id"`
-	DurationMS  *int32  `db:"duration_ms"`
-	PlaylistIDs []int64 `db:"playlist_ids"`
-	RuleIDs     []int64 `db:"rule_ids"`
+	TrackID     uint64   `db:"track_id"`
+	DurationMS  *int32   `db:"duration_ms"`
+	PlaylistIDs []uint64 `db:"playlist_ids"`
+	RuleIDs     []uint64 `db:"rule_ids"`
 }
 
 func (r candidateRow) domain() clocks.Candidate {
@@ -40,8 +40,8 @@ func (r candidateRow) domain() clocks.Candidate {
 // playlist it is in (§7.3). Membership uses ix_track_playlists_playlist_id;
 // the rule lookups use ix_track_play_rules_track_id,
 // ix_track_playlists_track_id, and ix_playlist_play_rules_playlist_id.
-func (s *CheckStore) Candidates(ctx context.Context, playlistIDs []int64) (clocks.Candidates, error) {
-	out := clocks.Candidates{Rules: map[int64]playrules.RuleInput{}}
+func (s *CheckStore) Candidates(ctx context.Context, playlistIDs []uint64) (clocks.Candidates, error) {
+	out := clocks.Candidates{Rules: map[uint64]playrules.RuleInput{}}
 	if len(playlistIDs) == 0 {
 		return out, nil
 	}
@@ -66,8 +66,8 @@ ORDER BY t.id`, playlistIDs)
 		return clocks.Candidates{}, fmt.Errorf("scan candidates: %w", err)
 	}
 
-	var ruleIDs []int64
-	seen := map[int64]bool{}
+	var ruleIDs []uint64
+	seen := map[uint64]bool{}
 	for _, t := range out.Tracks {
 		for _, id := range t.RuleIDs {
 			if !seen[id] {
@@ -97,7 +97,7 @@ SELECT id, window_from, window_to, weekdays FROM play_rules WHERE id = ANY($1)`,
 // ruleRow holds the time limits of a play rule; the interval and per-hour
 // limits depend on the plan and are not part of the dry check.
 type ruleRow struct {
-	ID         int64       `db:"id"`
+	ID         uint64      `db:"id"`
 	WindowFrom pgtype.Time `db:"window_from"`
 	WindowTo   pgtype.Time `db:"window_to"`
 	Weekdays   []int16     `db:"weekdays"`

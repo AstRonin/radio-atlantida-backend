@@ -15,9 +15,9 @@ type fakeStore struct {
 
 func (f *fakeStore) List(context.Context) ([]Rule, error) { return []Rule{f.rule}, nil }
 
-func (f *fakeStore) Get(context.Context, int64) (Rule, error) { return f.rule, nil }
+func (f *fakeStore) Get(context.Context, uint64) (Rule, error) { return f.rule, nil }
 
-func (f *fakeStore) Update(_ context.Context, _ int64, hours int, notes string) error {
+func (f *fakeStore) Update(_ context.Context, _ uint64, hours int, notes string) error {
 	f.rule.MinIntervalHours, f.rule.Notes = hours, notes
 	return nil
 }

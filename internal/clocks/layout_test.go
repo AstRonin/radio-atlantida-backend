@@ -14,7 +14,7 @@ const minute = minuteMS
 func flow(minutes int) Element {
 	return Element{
 		Placement: PlacementFlow, NominalDurationMS: minutes * minute, DurationToleranceMS: 30000,
-		Filler: Filler{Mode: FillerNone}, PlaylistIDs: []int64{1},
+		Filler: Filler{Mode: FillerNone}, PlaylistIDs: []uint64{1},
 	}
 }
 
@@ -32,7 +32,7 @@ func fixed(at, minutes int) Element {
 	return e
 }
 
-func withID(e Element, id int64) Element {
+func withID(e Element, id uint64) Element {
 	e.ID = id
 	return e
 }
@@ -156,7 +156,7 @@ func TestArrangeRefusals(t *testing.T) {
 	tests := []struct {
 		name     string
 		elements []Element
-		existing map[int64]bool
+		existing map[uint64]bool
 		field    string
 		rule     validation.Rule
 	}{
@@ -166,12 +166,12 @@ func TestArrangeRefusals(t *testing.T) {
 		{"filler playlist without source", []Element{playlistNoSource}, nil, "elements[0].filler_source_id", validation.Required},
 		{"fixed window before the hour", []Element{fixed(0, 5)}, nil, "elements[0].fixed_minute", validation.DoesNotFit},
 		{"fixed element past the hour", []Element{fixed(58, 4)}, nil, "elements[0].nominal_duration_ms", validation.DoesNotFit},
-		{"unknown element ID", []Element{withID(flow(10), 9)}, map[int64]bool{1: true}, "elements[0].id", validation.UnknownID},
+		{"unknown element ID", []Element{withID(flow(10), 9)}, map[uint64]bool{1: true}, "elements[0].id", validation.UnknownID},
 		{"material before a fixed element does not fit", []Element{flow(20), flow(12), fixed(30, 5)}, nil, "elements[2].fixed_minute", validation.DoesNotFit},
 		{"start elements do not fit before a fixed element", []Element{flow(1), placed(PlacementStart, 7), fixed(5, 5)}, nil, "elements[1].nominal_duration_ms", validation.DoesNotFit},
 		{"end elements do not fit the hour", []Element{fixed(30, 5), placed(PlacementEnd, 20), placed(PlacementEnd, 7)}, nil, "elements[2].nominal_duration_ms", validation.DoesNotFit},
 		{"two new fixed windows overlap", []Element{fixed(30, 2), fixed(31, 2)}, nil, "elements[1].fixed_minute", validation.Overlap},
-		{"two existing fixed windows overlap", []Element{withID(fixed(30, 2), 1), withID(fixed(31, 2), 2)}, map[int64]bool{1: true, 2: true}, "elements[1].fixed_minute", validation.Overlap},
+		{"two existing fixed windows overlap", []Element{withID(fixed(30, 2), 1), withID(fixed(31, 2), 2)}, map[uint64]bool{1: true, 2: true}, "elements[1].fixed_minute", validation.Overlap},
 		{"fixed elements out of minute order", []Element{fixed(40, 2), fixed(20, 2)}, nil, "elements[1].fixed_minute", validation.Order},
 		{"fixed element runs into the next one", []Element{fixed(10, 25), fixed(30, 5)}, nil, "elements[1].fixed_minute", validation.DoesNotFit},
 	}
@@ -200,7 +200,7 @@ func fieldMessage(err *validation.Error, field string) string {
 func TestArrangeReplacesFixed(t *testing.T) {
 	t.Parallel()
 	existing := withID(fixed(30, 2), 7)
-	arr, err := Arrange([]Element{withID(flow(28), 3), existing, fixed(31, 2), flow(26)}, map[int64]bool{3: true, 7: true})
+	arr, err := Arrange([]Element{withID(flow(28), 3), existing, fixed(31, 2), flow(26)}, map[uint64]bool{3: true, 7: true})
 	require.NoError(t, err)
 	require.Equal(t, []Element{existing}, arr.Replaced)
 	require.Len(t, arr.Elements, 3)

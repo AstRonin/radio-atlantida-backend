@@ -39,7 +39,7 @@ var ErrUnknownClock = errors.New("unknown clock")
 
 // ClockRef is the clock of a slot.
 type ClockRef struct {
-	ID     int64
+	ID     uint64
 	Name   string
 	Status clocks.Status
 }
@@ -47,7 +47,7 @@ type ClockRef struct {
 // Slot assigns a clock to a weekday and hour for a range of dates. Dates
 // are station local calendar dates, held as midnight UTC.
 type Slot struct {
-	ID int64
+	ID uint64
 	// Weekday is ISO (1 = Monday ... 7 = Sunday); Weekday and Hour are
 	// station local.
 	Weekday   int
@@ -67,14 +67,14 @@ func (s Slot) covers(date time.Time) bool {
 type NewSlot struct {
 	Weekday   int
 	Hour      int
-	ClockID   int64
+	ClockID   uint64
 	ValidFrom time.Time
 	ValidTo   *time.Time
 }
 
 // Filter selects slots. Zero fields do not filter.
 type Filter struct {
-	ClockID int64
+	ClockID uint64
 	// From and To select slots valid on some date between them.
 	From *time.Time
 	To   *time.Time
@@ -83,7 +83,7 @@ type Filter struct {
 // AssignInput assigns a clock to every combination of weekdays and hours
 // for a range of dates. ClockID is 0 to clear the hours.
 type AssignInput struct {
-	ClockID   int64
+	ClockID   uint64
 	Weekdays  []int
 	Hours     []int
 	ValidFrom time.Time
@@ -126,7 +126,7 @@ type ScheduledHour struct {
 	Weekday  int
 	Hour     int
 	StartUTC time.Time
-	SlotID   int64
+	SlotID   uint64
 	Clock    ClockRef
 }
 
@@ -137,18 +137,18 @@ type Store interface {
 	// List returns slots in weekday, hour, valid_from order.
 	List(ctx context.Context, f Filter) ([]Slot, error)
 	// Get returns one slot, or ErrNotFound.
-	Get(ctx context.Context, id int64) (Slot, error)
+	Get(ctx context.Context, id uint64) (Slot, error)
 	// LockOverlapping returns, locked until the transaction ends, the
 	// slots of weekday and hour valid on some date from from to to (nil:
 	// open end).
 	LockOverlapping(ctx context.Context, weekday, hour int, from time.Time, to *time.Time) ([]Slot, error)
 	// Insert adds a slot. ErrUnknownClock, ErrConflict.
-	Insert(ctx context.Context, s NewSlot) (int64, error)
+	Insert(ctx context.Context, s NewSlot) (uint64, error)
 	// SetRange changes the dates of a slot. ErrNotFound, ErrConflict.
-	SetRange(ctx context.Context, id int64, from time.Time, to *time.Time) error
+	SetRange(ctx context.Context, id uint64, from time.Time, to *time.Time) error
 	// Delete removes a slot; history keeps its clock and loses only the
 	// slot (ON DELETE SET NULL). ErrNotFound.
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id uint64) error
 }
 
 // Settings are the settings the service reads.
@@ -208,7 +208,7 @@ func (s *Service) ListSlots(ctx context.Context, f Filter) ([]Slot, error) {
 }
 
 // DeleteSlot deletes one slot.
-func (s *Service) DeleteSlot(ctx context.Context, id int64) error {
+func (s *Service) DeleteSlot(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	// Phase 8: recalculate the planned items of the slot's hours (§7).
@@ -417,7 +417,7 @@ func (s *Service) Schedule(ctx context.Context, from, to time.Time) ([]Scheduled
 
 // ClockHours returns the hours the grid assigns to a clock that start in
 // [from, to). It implements clocks.GridHours for the dry check.
-func (s *Service) ClockHours(ctx context.Context, clockID int64, from, to time.Time) ([]clocks.Hour, error) {
+func (s *Service) ClockHours(ctx context.Context, clockID uint64, from, to time.Time) ([]clocks.Hour, error) {
 	set, err := s.settings(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read grid settings: %w", err)

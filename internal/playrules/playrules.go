@@ -59,12 +59,12 @@ func (t TimeOfDay) String() string { return fmt.Sprintf("%02d:%02d", int(t)/60, 
 
 // Rule is a stored play rule with its targets.
 type Rule struct {
-	ID int64
+	ID uint64
 	RuleInput
 	CreatedAt time.Time
 	// TrackIDs and PlaylistIDs are the targets, in ID order.
-	TrackIDs    []int64
-	PlaylistIDs []int64
+	TrackIDs    []uint64
+	PlaylistIDs []uint64
 }
 
 // RuleInput is the editable part of a rule. Nil parts do not limit.
@@ -83,7 +83,7 @@ type RuleInput struct {
 // Ref names a target that blocks a delete.
 type Ref struct {
 	Kind string
-	ID   int64
+	ID   uint64
 	Name string
 }
 
@@ -113,34 +113,34 @@ type Store interface {
 	// List returns every rule with its targets, in name order.
 	List(ctx context.Context) ([]Rule, error)
 	// Get returns one rule, or ErrNotFound.
-	Get(ctx context.Context, id int64) (Rule, error)
+	Get(ctx context.Context, id uint64) (Rule, error)
 	// Create adds a rule. ErrNameTaken.
-	Create(ctx context.Context, in RuleInput) (int64, error)
+	Create(ctx context.Context, in RuleInput) (uint64, error)
 	// Update changes a rule. ErrNotFound, ErrNameTaken.
-	Update(ctx context.Context, id int64, in RuleInput) error
+	Update(ctx context.Context, id uint64, in RuleInput) error
 	// Delete removes a rule. ErrNotFound; ErrInUse while it has targets.
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id uint64) error
 	// Users returns the tracks and playlists the rule is applied to, at
 	// most limit of each kind.
-	Users(ctx context.Context, id int64, limit int) ([]Ref, error)
+	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
 	// LockRule, LockTrack, and LockPlaylist keep the row from being deleted
 	// until the transaction ends. ErrNotFound, ErrTrackNotFound,
 	// ErrPlaylistNotFound.
-	LockRule(ctx context.Context, id int64) error
-	LockTrack(ctx context.Context, id int64) error
-	LockPlaylist(ctx context.Context, id int64) error
+	LockRule(ctx context.Context, id uint64) error
+	LockTrack(ctx context.Context, id uint64) error
+	LockPlaylist(ctx context.Context, id uint64) error
 	// SetTargets makes trackIDs and playlistIDs the targets of the rule.
 	// ErrUnknownTrack, ErrUnknownPlaylist.
-	SetTargets(ctx context.Context, ruleID int64, trackIDs, playlistIDs []int64) error
+	SetTargets(ctx context.Context, ruleID uint64, trackIDs, playlistIDs []uint64) error
 	// SetTrackRules makes ruleIDs the rules of the track. ErrUnknownRule.
-	SetTrackRules(ctx context.Context, trackID int64, ruleIDs []int64) error
+	SetTrackRules(ctx context.Context, trackID uint64, ruleIDs []uint64) error
 	// SetPlaylistRules makes ruleIDs the rules of the playlist.
 	// ErrUnknownRule.
-	SetPlaylistRules(ctx context.Context, playlistID int64, ruleIDs []int64) error
+	SetPlaylistRules(ctx context.Context, playlistID uint64, ruleIDs []uint64) error
 	// TrackRules and PlaylistRules return the rule IDs of a track or a
 	// playlist, in ID order.
-	TrackRules(ctx context.Context, trackID int64) ([]int64, error)
-	PlaylistRules(ctx context.Context, playlistID int64) ([]int64, error)
+	TrackRules(ctx context.Context, trackID uint64) ([]uint64, error)
+	PlaylistRules(ctx context.Context, playlistID uint64) ([]uint64, error)
 }
 
 // TxRunner runs fn in one transaction (*db.DB).
@@ -174,7 +174,7 @@ func (s *Service) List(ctx context.Context) ([]Rule, error) {
 }
 
 // Get returns one rule.
-func (s *Service) Get(ctx context.Context, id int64) (Rule, error) {
+func (s *Service) Get(ctx context.Context, id uint64) (Rule, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	return s.store.Get(ctx, id)
@@ -196,7 +196,7 @@ func (s *Service) Create(ctx context.Context, in RuleInput) (Rule, error) {
 }
 
 // Update changes a rule; its targets stay.
-func (s *Service) Update(ctx context.Context, id int64, in RuleInput) (Rule, error) {
+func (s *Service) Update(ctx context.Context, id uint64, in RuleInput) (Rule, error) {
 	in, err := Validate(in)
 	if err != nil {
 		return Rule{}, err
@@ -211,7 +211,7 @@ func (s *Service) Update(ctx context.Context, id int64, in RuleInput) (Rule, err
 
 // Delete deletes a rule that is applied to no track or playlist. An
 // *InUseError names the targets.
-func (s *Service) Delete(ctx context.Context, id int64) error {
+func (s *Service) Delete(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.store.Delete(ctx, id)
@@ -227,7 +227,7 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 
 // SetTargets makes trackIDs and playlistIDs the targets of a rule, in one
 // transaction.
-func (s *Service) SetTargets(ctx context.Context, id int64, trackIDs, playlistIDs []int64) (Rule, error) {
+func (s *Service) SetTargets(ctx context.Context, id uint64, trackIDs, playlistIDs []uint64) (Rule, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
@@ -244,7 +244,7 @@ func (s *Service) SetTargets(ctx context.Context, id int64, trackIDs, playlistID
 }
 
 // SetTrackRules makes ruleIDs the rules of one track and returns them.
-func (s *Service) SetTrackRules(ctx context.Context, trackID int64, ruleIDs []int64) ([]int64, error) {
+func (s *Service) SetTrackRules(ctx context.Context, trackID uint64, ruleIDs []uint64) ([]uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
@@ -262,7 +262,7 @@ func (s *Service) SetTrackRules(ctx context.Context, trackID int64, ruleIDs []in
 
 // SetPlaylistRules makes ruleIDs the rules of one playlist and returns
 // them. They apply to every track of the playlist, each checked on its own.
-func (s *Service) SetPlaylistRules(ctx context.Context, playlistID int64, ruleIDs []int64) ([]int64, error) {
+func (s *Service) SetPlaylistRules(ctx context.Context, playlistID uint64, ruleIDs []uint64) ([]uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {

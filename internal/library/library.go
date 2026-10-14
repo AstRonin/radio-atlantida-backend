@@ -76,7 +76,7 @@ const (
 // Ref names an entity that blocks a delete.
 type Ref struct {
 	Kind string
-	ID   int64
+	ID   uint64
 	Name string
 }
 

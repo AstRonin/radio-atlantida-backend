@@ -21,9 +21,9 @@ type fixture struct {
 	d        *db.DB
 	store    *clocksrepo.Store
 	check    *clocksrepo.CheckStore
-	playlist int64
-	artist   int64
-	tracks   []int64
+	playlist uint64
+	artist   uint64
+	tracks   []uint64
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -42,9 +42,9 @@ SELECT $1, $2, id, $3 FROM playlist_types WHERE code = 'music' RETURNING id`,
 	return f
 }
 
-func (f *fixture) id(sql string, args ...any) int64 {
+func (f *fixture) id(sql string, args ...any) uint64 {
 	f.t.Helper()
-	var id int64
+	var id uint64
 	require.NoError(f.t, f.d.Pool.QueryRow(f.t.Context(), sql, args...).Scan(&id))
 	return id
 }
@@ -57,7 +57,7 @@ func (f *fixture) inTx(fn func(st clocks.Store) error) error {
 func (f *fixture) elem(minutes int) clocks.Element {
 	return clocks.Element{
 		Placement: clocks.PlacementFlow, NominalDurationMS: minutes * 60000, DurationToleranceMS: 30000,
-		FixedToleranceMS: 60000, Filler: clocks.Filler{Mode: clocks.FillerNone}, PlaylistIDs: []int64{f.playlist},
+		FixedToleranceMS: 60000, Filler: clocks.Filler{Mode: clocks.FillerNone}, PlaylistIDs: []uint64{f.playlist},
 	}
 }
 
@@ -72,7 +72,7 @@ func TestStoreCreateUpdateKeepsElementIDs(t *testing.T) {
 		DefaultFiller: &clocks.Filler{Mode: clocks.FillerArtist, SourceID: &f.artist},
 		Elements:      []clocks.Element{f.elem(20), fixedEl, f.elem(20)},
 	}
-	var id int64
+	var id uint64
 	require.NoError(t, f.inTx(func(st clocks.Store) (err error) {
 		id, err = st.Create(ctx, c)
 		return err
@@ -83,7 +83,7 @@ func TestStoreCreateUpdateKeepsElementIDs(t *testing.T) {
 	require.Equal(t, f.artist, *got.DefaultFiller.SourceID)
 	require.Len(t, got.Elements, 3)
 	require.Equal(t, 30, *got.Elements[1].FixedMinute)
-	require.Equal(t, []int64{f.playlist}, got.Elements[0].PlaylistIDs)
+	require.Equal(t, []uint64{f.playlist}, got.Elements[0].PlaylistIDs)
 
 	// Reorder, drop the fixed element, add one, set a filler: kept
 	// elements keep their IDs.
@@ -113,19 +113,19 @@ func TestStoreCreateUpdateKeepsElementIDs(t *testing.T) {
 	require.ErrorIs(t, err, clocks.ErrNameTaken)
 	c.Name = "Other"
 	c.Elements = []clocks.Element{f.elem(60)}
-	c.Elements[0].PlaylistIDs = []int64{9999}
+	c.Elements[0].PlaylistIDs = []uint64{9999}
 	err = f.inTx(func(st clocks.Store) (txErr error) { _, txErr = st.Create(ctx, c); return txErr })
 	require.ErrorIs(t, err, clocks.ErrUnknownPlaylist)
 
-	missing, err := f.store.MissingPlaylists(ctx, []int64{f.playlist, 9999})
+	missing, err := f.store.MissingPlaylists(ctx, []uint64{f.playlist, 9999})
 	require.NoError(t, err)
-	require.Equal(t, []int64{9999}, missing)
+	require.Equal(t, []uint64{9999}, missing)
 }
 
 func TestStoreDeleteAndPool(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
-	var id int64
+	var id uint64
 	require.NoError(t, f.inTx(func(st clocks.Store) (err error) {
 		id, err = st.Create(ctx, clocks.Clock{Name: "C", Status: clocks.StatusComplete, Elements: []clocks.Element{f.elem(60)}})
 		return err
@@ -135,14 +135,14 @@ func TestStoreDeleteAndPool(t *testing.T) {
 	require.NoError(t, f.inTx(func(st clocks.Store) error { return st.SetPool(ctx, id, f.tracks) }))
 	_, err := f.d.Pool.Exec(ctx, `UPDATE clock_filler_pool SET used_at = now() WHERE clock_id = $1 AND position = 0`, id)
 	require.NoError(t, err)
-	require.NoError(t, f.inTx(func(st clocks.Store) error { return st.SetPool(ctx, id, []int64{f.tracks[1]}) }))
+	require.NoError(t, f.inTx(func(st clocks.Store) error { return st.SetPool(ctx, id, []uint64{f.tracks[1]}) }))
 	pool, err := f.store.Pool(ctx, id)
 	require.NoError(t, err)
 	require.Len(t, pool, 2)
 	require.NotNil(t, pool[0].UsedAt)
 	require.Equal(t, f.tracks[1], pool[1].TrackID)
 	require.Equal(t, 1, pool[1].Position, "right after the used row")
-	err = f.inTx(func(st clocks.Store) error { return st.SetPool(ctx, id, []int64{9999}) })
+	err = f.inTx(func(st clocks.Store) error { return st.SetPool(ctx, id, []uint64{9999}) })
 	require.ErrorIs(t, err, clocks.ErrUnknownTrack)
 
 	slot := f.id(`INSERT INTO grid_slots (weekday, hour, clock_id, valid_from) VALUES (1, 8, $1, '2026-10-01') RETURNING id`, id)
@@ -173,13 +173,13 @@ func TestCheckStoreCandidates(t *testing.T) {
 
 	// The rules of every playlist of the track apply, not only the
 	// requested ones.
-	got, err := f.check.Candidates(ctx, []int64{f.playlist})
+	got, err := f.check.Candidates(ctx, []uint64{f.playlist})
 	require.NoError(t, err)
 	require.Len(t, got.Tracks, 2)
 	require.Equal(t, f.tracks[0], got.Tracks[0].TrackID)
 	require.Equal(t, 200000, *got.Tracks[0].DurationMS)
-	require.Equal(t, []int64{f.playlist}, got.Tracks[0].PlaylistIDs)
-	require.ElementsMatch(t, []int64{trackRule, listRule}, got.Tracks[0].RuleIDs)
+	require.Equal(t, []uint64{f.playlist}, got.Tracks[0].PlaylistIDs)
+	require.ElementsMatch(t, []uint64{trackRule, listRule}, got.Tracks[0].RuleIDs)
 	require.Nil(t, got.Tracks[1].DurationMS)
 	require.Empty(t, got.Tracks[1].RuleIDs)
 	a := got.Rules[trackRule]

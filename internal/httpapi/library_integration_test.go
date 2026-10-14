@@ -140,14 +140,14 @@ func (a *libraryAPI) fieldError(field string, code errcodes.Field, method, path 
 	require.Equal(a.t, code, p.Errors[0].Code, "%+v", p.Errors)
 }
 
-func (a *libraryAPI) exec(sql string, args ...any) int64 {
+func (a *libraryAPI) exec(sql string, args ...any) uint64 {
 	a.t.Helper()
-	var id int64
+	var id uint64
 	require.NoError(a.t, a.db.Pool.QueryRow(a.t.Context(), sql, args...).Scan(&id))
 	return id
 }
 
-func (a *libraryAPI) typeID(code string) int64 {
+func (a *libraryAPI) typeID(code string) uint64 {
 	a.t.Helper()
 	var list dto.PlaylistTypeList
 	a.ok(http.StatusOK, http.MethodGet, "/api/playlist-types", nil, &list)
@@ -201,7 +201,7 @@ func TestLibraryPlaylistTypes(t *testing.T) {
 	a.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": "Promos", "type_id": promo.ID}, &pl)
 	var tr dto.Track
 	a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
-		"title": "Spot", "file_path": "promo/spot.mp3", "type_id": promo.ID, "playlist_ids": []int64{},
+		"title": "Spot", "file_path": "promo/spot.mp3", "type_id": promo.ID, "playlist_ids": []uint64{},
 	}, &tr)
 	p := a.problem(http.StatusConflict, errcodes.PlaylistTypeInUse, http.MethodDelete, fmt.Sprintf("/api/playlist-types/%d", promo.ID), nil)
 	require.Equal(t, []string{fmt.Sprintf("playlist:%d:Promos", pl.ID), fmt.Sprintf("track:%d:Spot", tr.ID)}, refsOf(p))
@@ -225,7 +225,7 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 	a.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": "Pop", "type_id": music}, &pop)
 	a.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": "Rock", "type_id": music}, &rock)
 	require.Equal(t, "music", pop.Type.Code)
-	require.Equal(t, []int64{}, pop.PlayRuleIDs)
+	require.Equal(t, []uint64{}, pop.PlayRuleIDs)
 	a.fieldError("name", errcodes.Taken, http.MethodPost, "/api/playlists", map[string]any{"name": "Pop", "type_id": music})
 	a.fieldError("type_id", errcodes.UnknownID, http.MethodPost, "/api/playlists", map[string]any{"name": "X", "type_id": 9999})
 
@@ -237,25 +237,25 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 	var song dto.Track
 	a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
 		"title": "Song", "artist_id": abba.ID, "file_path": "music/song.mp3", "type_id": music,
-		"duration_ms": 180000, "format": "mp3", "playlist_ids": []int64{pop.ID, rock.ID},
+		"duration_ms": 180000, "format": "mp3", "playlist_ids": []uint64{pop.ID, rock.ID},
 	}, &song)
-	require.Equal(t, []int64{pop.ID, rock.ID}, song.PlaylistIDs)
+	require.Equal(t, []uint64{pop.ID, rock.ID}, song.PlaylistIDs)
 	require.Equal(t, "ABBA", song.Artist.Name)
 	require.Equal(t, 180000, *song.DurationMS)
 
 	for _, bad := range []string{"../song.mp3", "/abs/song.mp3", `music\song.mp3`, "C:/song.mp3", "music//song.mp3", "./song.mp3"} {
 		a.fieldError("file_path", errcodes.Format, http.MethodPost, "/api/tracks", map[string]any{
-			"title": "Bad", "file_path": bad, "type_id": music, "playlist_ids": []int64{},
+			"title": "Bad", "file_path": bad, "type_id": music, "playlist_ids": []uint64{},
 		})
 	}
 	a.fieldError("file_path", errcodes.Taken, http.MethodPost, "/api/tracks", map[string]any{
-		"title": "Copy", "file_path": "music/song.mp3", "type_id": music, "playlist_ids": []int64{},
+		"title": "Copy", "file_path": "music/song.mp3", "type_id": music, "playlist_ids": []uint64{},
 	})
 	a.fieldError("artist_id", errcodes.UnknownID, http.MethodPost, "/api/tracks", map[string]any{
-		"title": "X", "artist_id": 9999, "file_path": "x.mp3", "type_id": music, "playlist_ids": []int64{},
+		"title": "X", "artist_id": 9999, "file_path": "x.mp3", "type_id": music, "playlist_ids": []uint64{},
 	})
 	a.fieldError("playlist_ids", errcodes.UnknownID, http.MethodPost, "/api/tracks", map[string]any{
-		"title": "X", "file_path": "x.mp3", "type_id": music, "playlist_ids": []int64{9999},
+		"title": "X", "file_path": "x.mp3", "type_id": music, "playlist_ids": []uint64{9999},
 	})
 	var none dto.TrackPage
 	a.ok(http.StatusOK, http.MethodGet, "/api/tracks?q=X", nil, &none)
@@ -265,11 +265,11 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 	var updated dto.Track
 	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d", song.ID), map[string]any{
 		"title": "Song", "artist_id": nil, "file_path": "music/song.mp3", "type_id": music,
-		"duration_ms": 180000, "playlist_ids": []int64{rock.ID},
+		"duration_ms": 180000, "playlist_ids": []uint64{rock.ID},
 	}, &updated)
 	require.Nil(t, updated.Artist)
 	require.Nil(t, updated.Format, "cleared")
-	require.Equal(t, []int64{rock.ID}, updated.PlaylistIDs)
+	require.Equal(t, []uint64{rock.ID}, updated.PlaylistIDs)
 
 	// Listing: filters and pages in title order.
 	for _, title := range []string{"b-side", "A_ha 50%", "Jingle"} {
@@ -278,7 +278,7 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 			typeID = jingle
 		}
 		a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
-			"title": title, "file_path": "music/" + title + ".mp3", "type_id": typeID, "playlist_ids": []int64{pop.ID},
+			"title": title, "file_path": "music/" + title + ".mp3", "type_id": typeID, "playlist_ids": []uint64{pop.ID},
 		}, nil)
 	}
 	var page1, page2 dto.TrackPage
@@ -300,12 +300,12 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 
 	// Membership is set from the playlist side too.
 	var set dto.Playlist
-	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/tracks", pop.ID), map[string]any{"track_ids": []int64{song.ID}}, &set)
+	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/tracks", pop.ID), map[string]any{"track_ids": []uint64{song.ID}}, &set)
 	require.Equal(t, 1, set.TrackCount)
-	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/tracks", pop.ID), map[string]any{"track_ids": []int64{}}, &set)
+	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/tracks", pop.ID), map[string]any{"track_ids": []uint64{}}, &set)
 	require.Equal(t, 0, set.TrackCount)
-	a.problem(http.StatusNotFound, errcodes.PlaylistNotFound, http.MethodPut, "/api/playlists/9999/tracks", map[string]any{"track_ids": []int64{}})
-	a.fieldError("track_ids", errcodes.UnknownID, http.MethodPut, fmt.Sprintf("/api/playlists/%d/tracks", pop.ID), map[string]any{"track_ids": []int64{9999}})
+	a.problem(http.StatusNotFound, errcodes.PlaylistNotFound, http.MethodPut, "/api/playlists/9999/tracks", map[string]any{"track_ids": []uint64{}})
+	a.fieldError("track_ids", errcodes.UnknownID, http.MethodPut, fmt.Sprintf("/api/playlists/%d/tracks", pop.ID), map[string]any{"track_ids": []uint64{9999}})
 
 	var artists dto.ArtistList
 	a.ok(http.StatusOK, http.MethodGet, "/api/artists?q=ab", nil, &artists)
@@ -337,7 +337,7 @@ func TestLibraryDeleteRefusals(t *testing.T) {
 		var tr dto.Track
 		a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
 			"title": title, "artist_id": artistID, "file_path": "music/" + title + ".mp3", "type_id": music,
-			"duration_ms": 200000, "playlist_ids": []int64{pop.ID},
+			"duration_ms": 200000, "playlist_ids": []uint64{pop.ID},
 		}, &tr)
 		return tr
 	}
@@ -366,7 +366,7 @@ func TestLibraryDeleteRefusals(t *testing.T) {
 
 	// The artist's track moves to no artist; the play log still names it.
 	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d", aired.ID), map[string]any{
-		"title": "Aired", "file_path": "music/Aired.mp3", "type_id": music, "playlist_ids": []int64{},
+		"title": "Aired", "file_path": "music/Aired.mp3", "type_id": music, "playlist_ids": []uint64{},
 	}, nil)
 	a.problem(http.StatusConflict, errcodes.ArtistHasHistory, http.MethodDelete, fmt.Sprintf("/api/artists/%d", gone.ID), nil)
 
@@ -379,16 +379,16 @@ func TestLibraryDeleteRefusals(t *testing.T) {
 	var rule dto.PlayRule
 	a.ok(http.StatusCreated, http.MethodPost, "/api/play-rules", map[string]any{"name": "Once an hour", "max_per_hour": 1}, &rule)
 	var ids dto.PlayRuleIDs
-	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d/play-rules", plain.ID), map[string]any{"rule_ids": []int64{rule.ID}}, &ids)
-	require.Equal(t, []int64{rule.ID}, ids.RuleIDs)
-	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/play-rules", pop.ID), map[string]any{"rule_ids": []int64{rule.ID}}, &ids)
+	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d/play-rules", plain.ID), map[string]any{"rule_ids": []uint64{rule.ID}}, &ids)
+	require.Equal(t, []uint64{rule.ID}, ids.RuleIDs)
+	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/play-rules", pop.ID), map[string]any{"rule_ids": []uint64{rule.ID}}, &ids)
 	p = a.problem(http.StatusConflict, errcodes.PlayRuleInUse, http.MethodDelete, fmt.Sprintf("/api/play-rules/%d", rule.ID), nil)
 	require.Equal(t, []string{fmt.Sprintf("track:%d:Plain", plain.ID), fmt.Sprintf("playlist:%d:Pop", pop.ID)}, refsOf(p))
 
 	// Deleting the track removes its rule links, and the plain track goes.
 	a.ok(http.StatusNoContent, http.MethodDelete, fmt.Sprintf("/api/tracks/%d", plain.ID), nil, nil)
 	var targets dto.PlayRule
-	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/play-rules/%d/targets", rule.ID), map[string]any{"track_ids": []int64{}, "playlist_ids": []int64{}}, &targets)
+	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/play-rules/%d/targets", rule.ID), map[string]any{"track_ids": []uint64{}, "playlist_ids": []uint64{}}, &targets)
 	require.Zero(t, targets.TrackCount+targets.PlaylistCount)
 	a.ok(http.StatusNoContent, http.MethodDelete, fmt.Sprintf("/api/play-rules/%d", rule.ID), nil, nil)
 }
@@ -427,20 +427,20 @@ func TestLibraryPlayRules(t *testing.T) {
 	a.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": "Pop", "type_id": music}, &pop)
 	var targets dto.PlayRule
 	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/play-rules/%d/targets", night.ID), map[string]any{
-		"track_ids": []int64{}, "playlist_ids": []int64{pop.ID},
+		"track_ids": []uint64{}, "playlist_ids": []uint64{pop.ID},
 	}, &targets)
-	require.Equal(t, []int64{pop.ID}, targets.PlaylistIDs)
+	require.Equal(t, []uint64{pop.ID}, targets.PlaylistIDs)
 	var got dto.Playlist
 	a.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/playlists/%d", pop.ID), nil, &got)
-	require.Equal(t, []int64{night.ID}, got.PlayRuleIDs)
+	require.Equal(t, []uint64{night.ID}, got.PlayRuleIDs)
 
 	a.fieldError("track_ids", errcodes.UnknownID, http.MethodPut, fmt.Sprintf("/api/play-rules/%d/targets", night.ID),
-		map[string]any{"track_ids": []int64{9999}, "playlist_ids": []int64{}})
+		map[string]any{"track_ids": []uint64{9999}, "playlist_ids": []uint64{}})
 	a.fieldError("rule_ids", errcodes.UnknownID, http.MethodPut, fmt.Sprintf("/api/playlists/%d/play-rules", pop.ID),
-		map[string]any{"rule_ids": []int64{9999}})
-	a.problem(http.StatusNotFound, errcodes.TrackNotFound, http.MethodPut, "/api/tracks/9999/play-rules", map[string]any{"rule_ids": []int64{}})
+		map[string]any{"rule_ids": []uint64{9999}})
+	a.problem(http.StatusNotFound, errcodes.TrackNotFound, http.MethodPut, "/api/tracks/9999/play-rules", map[string]any{"rule_ids": []uint64{}})
 	a.problem(http.StatusNotFound, errcodes.PlayRuleNotFound, http.MethodPut, "/api/play-rules/9999/targets",
-		map[string]any{"track_ids": []int64{}, "playlist_ids": []int64{}})
+		map[string]any{"track_ids": []uint64{}, "playlist_ids": []uint64{}})
 
 	var list dto.PlayRuleList
 	a.ok(http.StatusOK, http.MethodGet, "/api/play-rules", nil, &list)
@@ -483,10 +483,10 @@ func TestLibraryTrackPreview(t *testing.T) {
 
 	var song, missing dto.Track
 	a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
-		"title": "Song", "file_path": "music/song.mp3", "type_id": music, "format": "mp3", "playlist_ids": []int64{},
+		"title": "Song", "file_path": "music/song.mp3", "type_id": music, "format": "mp3", "playlist_ids": []uint64{},
 	}, &song)
 	a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
-		"title": "Missing", "file_path": "music/missing.ogg", "type_id": music, "playlist_ids": []int64{},
+		"title": "Missing", "file_path": "music/missing.ogg", "type_id": music, "playlist_ids": []uint64{},
 	}, &missing)
 
 	res := a.call(http.MethodGet, fmt.Sprintf("/api/tracks/%d/audio", song.ID), nil, nil)
@@ -512,7 +512,7 @@ func TestLibraryTrackPreview(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, filepath.Join(a.mediaRoot, "music", "link.mp3")))
 	var link dto.Track
 	a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
-		"title": "Link", "file_path": "music/link.mp3", "type_id": music, "playlist_ids": []int64{},
+		"title": "Link", "file_path": "music/link.mp3", "type_id": music, "playlist_ids": []uint64{},
 	}, &link)
 	a.problem(http.StatusNotFound, errcodes.TrackFileNotFound, http.MethodGet, fmt.Sprintf("/api/tracks/%d/audio", link.ID), nil)
 }

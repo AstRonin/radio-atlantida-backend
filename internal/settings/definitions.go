@@ -134,7 +134,7 @@ var (
 	RetentionPlayLogDays = Key[int]{"retention.play_log_days"}
 	RetentionLogDays     = Key[int]{"retention.log_days"}
 
-	PlayoutEmergencyPlaylistID = Key[*int64]{"playout.emergency_playlist_id"}
+	PlayoutEmergencyPlaylistID = Key[*uint64]{"playout.emergency_playlist_id"}
 )
 
 // Secret keys. They have no typed Key: their values are never read here.
@@ -158,7 +158,7 @@ type FillerFallback struct {
 	// Mode is random, playlist, or artist.
 	Mode string `json:"mode"`
 	// SourceID is the playlist (mode playlist) or artist (mode artist).
-	SourceID *int64 `json:"source_id,omitempty"`
+	SourceID *uint64 `json:"source_id,omitempty"`
 }
 
 // Filler fallback modes.
@@ -399,13 +399,13 @@ func boolDef(k Key[bool], desc string, def bool) *Definition {
 }
 
 // optionalIDDef is a nullable reference to a row (an ID of 1 or more).
-func optionalIDDef(k Key[*int64], desc string) *Definition {
+func optionalIDDef(k Key[*uint64], desc string) *Definition {
 	return &Definition{
-		Key: k.name, Description: desc, Type: TypeInteger, Default: (*int64)(nil), Nullable: true,
+		Key: k.name, Description: desc, Type: TypeInteger, Default: (*uint64)(nil), Nullable: true,
 		Minimum: new(1.0),
 		parse: func(raw json.RawMessage) (any, error) {
 			if isNull(raw) {
-				return (*int64)(nil), nil
+				return (*uint64)(nil), nil
 			}
 			n, err := decodeInt(k.name, raw)
 			if err != nil {
@@ -414,7 +414,7 @@ func optionalIDDef(k Key[*int64], desc string) *Definition {
 			if n < 1 {
 				return nil, invalid(k.name, RuleRange, "must be 1 or more, or null")
 			}
-			return &n, nil
+			return new(uint64(n)), nil
 		},
 	}
 }
@@ -429,7 +429,7 @@ func fillerFallbackDef() *Definition {
 		parse: func(raw json.RawMessage) (any, error) {
 			var v struct {
 				Mode     *string `json:"mode"`
-				SourceID *int64  `json:"source_id"`
+				SourceID *uint64 `json:"source_id"`
 			}
 			if isNull(raw) || bytes.TrimSpace(raw)[0] != '{' {
 				return nil, invalid(k.name, RuleType, "must be an object")

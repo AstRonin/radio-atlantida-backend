@@ -25,9 +25,9 @@ func NewTracks(d *db.DB) *Tracks { return &Tracks{g: d.Gorm} }
 func (s *Tracks) WithTx(tx db.Tx) library.TrackStore { return &Tracks{g: tx.Gorm()} }
 
 type trackRow struct {
-	ID           int64
+	ID           uint64
 	Title        string
-	ArtistID     *int64
+	ArtistID     *uint64
 	ArtistName   *string
 	DurationMS   *int `gorm:"column:duration_ms"`
 	FilePath     string
@@ -36,7 +36,7 @@ type trackRow struct {
 	SampleRate   *int
 	QualityOK    *bool `gorm:"column:quality_ok"`
 	QualityNotes string
-	TypeID       int64
+	TypeID       uint64
 	TypeCode     string
 	TypeName     string
 	FileChecksum *string
@@ -102,7 +102,7 @@ func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Tra
 }
 
 // Get returns one track, or library.ErrTrackNotFound.
-func (s *Tracks) Get(ctx context.Context, id int64) (library.Track, error) {
+func (s *Tracks) Get(ctx context.Context, id uint64) (library.Track, error) {
 	var rows []trackRow
 	if err := s.g.WithContext(ctx).Raw(selectTracks+` WHERE tr.id = ?`, id).Scan(&rows).Error; err != nil {
 		return library.Track{}, fmt.Errorf("select track %d: %w", id, err)
@@ -123,7 +123,7 @@ func (s *Tracks) withLinks(ctx context.Context, rows []trackRow) ([]library.Trac
 	if len(rows) == 0 {
 		return []library.Track{}, nil
 	}
-	ids := make([]int64, len(rows))
+	ids := make([]uint64, len(rows))
 	for i, r := range rows {
 		ids[i] = r.ID
 	}
@@ -181,11 +181,11 @@ func trackColumns(in library.TrackInput) map[string]any {
 }
 
 type trackWrite struct {
-	ID           int64 `gorm:"primaryKey"`
+	ID           uint64 `gorm:"primaryKey"`
 	Title        string
-	ArtistID     *int64
+	ArtistID     *uint64
 	FilePath     string
-	TypeID       int64
+	TypeID       uint64
 	DurationMS   *int `gorm:"column:duration_ms"`
 	Format       *string
 	Bitrate      *int
@@ -197,7 +197,7 @@ type trackWrite struct {
 func (trackWrite) TableName() string { return "tracks" }
 
 // Create adds a track and returns its ID.
-func (s *Tracks) Create(ctx context.Context, in library.TrackInput) (int64, error) {
+func (s *Tracks) Create(ctx context.Context, in library.TrackInput) (uint64, error) {
 	r := trackWrite{
 		Title: in.Title, ArtistID: in.ArtistID, FilePath: in.FilePath, TypeID: in.TypeID,
 		DurationMS: in.DurationMS, Format: in.Format, Bitrate: in.Bitrate, SampleRate: in.SampleRate,
@@ -210,7 +210,7 @@ func (s *Tracks) Create(ctx context.Context, in library.TrackInput) (int64, erro
 }
 
 // Update changes the metadata of a track.
-func (s *Tracks) Update(ctx context.Context, id int64, in library.TrackInput) error {
+func (s *Tracks) Update(ctx context.Context, id uint64, in library.TrackInput) error {
 	res := s.g.WithContext(ctx).Table("tracks").Where("id = ?", id).Updates(trackColumns(in))
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("update track %d", id), res.Error)
@@ -223,7 +223,7 @@ func (s *Tracks) Update(ctx context.Context, id int64, in library.TrackInput) er
 
 // SetPlaylists makes playlistIDs the playlists of the track. Run it in a
 // transaction.
-func (s *Tracks) SetPlaylists(ctx context.Context, id int64, playlistIDs []int64) error {
+func (s *Tracks) SetPlaylists(ctx context.Context, id uint64, playlistIDs []uint64) error {
 	g := s.g.WithContext(ctx)
 	del := g.Where("track_id = ?", id)
 	if len(playlistIDs) > 0 {
@@ -249,7 +249,7 @@ func (s *Tracks) SetPlaylists(ctx context.Context, id int64, playlistIDs []int64
 // Delete removes a track; its memberships and play rule links go with it
 // (CASCADE). The play log, the track plan, and clock filler pools refuse it
 // (RESTRICT).
-func (s *Tracks) Delete(ctx context.Context, id int64) error {
+func (s *Tracks) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM tracks WHERE id = ?`, id)
 	if res.Error != nil {
 		return deleteError(fmt.Sprintf("delete track %d", id), res.Error)
@@ -262,7 +262,7 @@ func (s *Tracks) Delete(ctx context.Context, id int64) error {
 
 // Users returns the clocks whose filler pool holds the track (uses
 // ix_clock_filler_pool_track_id).
-func (s *Tracks) Users(ctx context.Context, id int64, limit int) ([]library.Ref, error) {
+func (s *Tracks) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
 	var rows []refRow
 	err := s.g.WithContext(ctx).Raw(`
 SELECT 'clock' AS kind, c.id, c.name

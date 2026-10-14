@@ -4,7 +4,7 @@ import "time"
 
 // Operation is the state of an asynchronous operation (§6.5).
 type Operation struct {
-	ID            int64      `json:"id"`
+	ID            uint64     `json:"id"`
 	Kind          string     `json:"kind" doc:"Operation kind; its events are <kind>.completed, <kind>.failed, <kind>.progress."`
 	Status        string     `json:"status" enum:"running,completed,failed"`
 	StartedAt     time.Time  `json:"started_at"`

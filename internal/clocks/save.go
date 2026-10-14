@@ -28,7 +28,7 @@ func (s *Service) Create(ctx context.Context, in Input) (Result, error) {
 
 	wctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	var id int64
+	var id uint64
 	err = s.tx.WithTx(wctx, func(ctx context.Context, tx db.Tx) (txErr error) {
 		id, txErr = s.store.WithTx(tx).Create(ctx, c)
 		return txErr
@@ -42,7 +42,7 @@ func (s *Service) Create(ctx context.Context, in Input) (Result, error) {
 // Update replaces a clock and returns it with the dry check. Elements are
 // matched by ID; a new fixed element that overlaps an existing one replaces
 // it (§7.2). A refused save changes nothing.
-func (s *Service) Update(ctx context.Context, id int64, in Input) (Result, error) {
+func (s *Service) Update(ctx context.Context, id uint64, in Input) (Result, error) {
 	c, err := s.prepare(ctx, in)
 	if err != nil {
 		return Result{}, err
@@ -72,7 +72,7 @@ func (s *Service) update(ctx context.Context, c Clock) ([]Element, error) {
 		if err != nil {
 			return err
 		}
-		existing := map[int64]bool{}
+		existing := map[uint64]bool{}
 		for _, e := range stored.Elements {
 			existing[e.ID] = true
 		}
@@ -91,7 +91,7 @@ func (s *Service) update(ctx context.Context, c Clock) ([]Element, error) {
 // SaveWithFiller stores the filler chosen in the dialog for each short
 // segment, on the segment's holder element, and the pool if given. Every
 // short segment must have a filler afterwards, so the clock is complete.
-func (s *Service) SaveWithFiller(ctx context.Context, id int64, choice FillerChoice) (Result, error) {
+func (s *Service) SaveWithFiller(ctx context.Context, id uint64, choice FillerChoice) (Result, error) {
 	errs := &validation.Error{}
 	for i, ch := range choice.Segments {
 		path := fmt.Sprintf("segments[%d]", i)
@@ -149,12 +149,12 @@ func (s *Service) SaveWithFiller(ctx context.Context, id int64, choice FillerCho
 // SaveIncomplete acknowledges a short clock without a filler choice: the
 // clock stays incomplete and shows its warning. Reminders for its hours in
 // the planning window are created by rotation (Phase 8, §7).
-func (s *Service) SaveIncomplete(ctx context.Context, id int64) (Result, error) {
+func (s *Service) SaveIncomplete(ctx context.Context, id uint64) (Result, error) {
 	return s.result(ctx, id, nil)
 }
 
 // Delete deletes a clock that no grid slot uses and that has no history.
-func (s *Service) Delete(ctx context.Context, id int64) error {
+func (s *Service) Delete(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.store.Delete(ctx, id)
@@ -173,7 +173,7 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 }
 
 // Pool returns the filler pool of a clock.
-func (s *Service) Pool(ctx context.Context, id int64) ([]PoolEntry, error) {
+func (s *Service) Pool(ctx context.Context, id uint64) ([]PoolEntry, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	if _, err := s.store.Get(ctx, id); err != nil {
@@ -184,7 +184,7 @@ func (s *Service) Pool(ctx context.Context, id int64) ([]PoolEntry, error) {
 
 // SetPool replaces the unused rows of the filler pool with trackIDs, in
 // order. Used rows stay as history (§4).
-func (s *Service) SetPool(ctx context.Context, id int64, trackIDs []int64) ([]PoolEntry, error) {
+func (s *Service) SetPool(ctx context.Context, id uint64, trackIDs []uint64) ([]PoolEntry, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
@@ -252,7 +252,7 @@ func orDefault(v *int, def int) int {
 // checkRefs names the request field of every playlist or artist that does
 // not exist, so the panel can mark the element.
 func (s *Service) checkRefs(ctx context.Context, c Clock) error {
-	var playlists, artists []int64
+	var playlists, artists []uint64
 	addSource := func(f *Filler) {
 		if f == nil || f.SourceID == nil {
 			return
@@ -302,7 +302,7 @@ func (s *Service) checkRefs(ctx context.Context, c Clock) error {
 // checkChoiceSources refuses a filler choice whose playlist or artist does
 // not exist.
 func (s *Service) checkChoiceSources(ctx context.Context, choices []SegmentChoice) error {
-	var playlists, artists []int64
+	var playlists, artists []uint64
 	for _, ch := range choices {
 		switch {
 		case ch.Filler.SourceID == nil:
@@ -328,8 +328,8 @@ func (s *Service) checkChoiceSources(ctx context.Context, choices []SegmentChoic
 	return errs.Err()
 }
 
-func (s *Service) missing(ctx context.Context, playlists, artists []int64) (map[int64]bool, map[int64]bool, error) {
-	mp, ma := map[int64]bool{}, map[int64]bool{}
+func (s *Service) missing(ctx context.Context, playlists, artists []uint64) (map[uint64]bool, map[uint64]bool, error) {
+	mp, ma := map[uint64]bool{}, map[uint64]bool{}
 	if len(playlists) > 0 {
 		ids, err := s.store.MissingPlaylists(ctx, uniq(playlists))
 		if err != nil {
@@ -351,7 +351,7 @@ func (s *Service) missing(ctx context.Context, playlists, artists []int64) (map[
 	return mp, ma, nil
 }
 
-func uniq(ids []int64) []int64 {
+func uniq(ids []uint64) []uint64 {
 	out := slices.Clone(ids)
 	slices.Sort(out)
 	return slices.Compact(out)
@@ -415,7 +415,7 @@ func shortSegments(segs []Segment) string {
 }
 
 // result reads the saved clock and runs the dry check on it.
-func (s *Service) result(ctx context.Context, id int64, replaced []Element) (Result, error) {
+func (s *Service) result(ctx context.Context, id uint64, replaced []Element) (Result, error) {
 	v, err := s.Get(ctx, id)
 	if err != nil {
 		return Result{}, err

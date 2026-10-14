@@ -26,8 +26,8 @@ func stationTZ(t *testing.T) *time.Location {
 // jingle playlist of 30-second jingles.
 type clockFixture struct {
 	*libraryAPI
-	music, jingles int64
-	tracks         []int64
+	music, jingles uint64
+	tracks         []uint64
 }
 
 func newClockFixture(t *testing.T) *clockFixture {
@@ -51,8 +51,8 @@ func newClockFixture(t *testing.T) *clockFixture {
 	return f
 }
 
-func element(playlist int64, minutes int, extra ...any) map[string]any {
-	e := map[string]any{"nominal_duration_ms": minutes * 60000, "playlist_ids": []int64{playlist}}
+func element(playlist uint64, minutes int, extra ...any) map[string]any {
+	e := map[string]any{"nominal_duration_ms": minutes * 60000, "playlist_ids": []uint64{playlist}}
 	for i := 0; i+1 < len(extra); i += 2 {
 		e[extra[i].(string)] = extra[i+1]
 	}
@@ -102,7 +102,7 @@ func TestClockSaveFlow(t *testing.T) {
 	})
 	f.ok(http.StatusOK, http.MethodPost, path+"/save-with-filler", map[string]any{
 		"segments":       []any{map[string]any{"segment": 0, "filler_mode": "pool"}},
-		"pool_track_ids": []int64{f.tracks[3], f.tracks[2]},
+		"pool_track_ids": []uint64{f.tracks[3], f.tracks[2]},
 	}, &saved)
 	require.Equal(t, "complete", saved.Clock.Status)
 	require.False(t, saved.Check.RequiresFillerChoice)
@@ -171,7 +171,7 @@ func TestClockRefusals(t *testing.T) {
 	post("elements[0].playlist_ids", errcodes.UnknownID, element(9999, 10))
 	post("elements[0].filler_source_id", errcodes.Required, element(f.music, 10, "filler_mode", "playlist"))
 	post("elements[0].id", errcodes.UnknownID, element(f.music, 10, "id", 12345))
-	post("elements[0].playlist_ids", errcodes.Length, map[string]any{"nominal_duration_ms": 60000, "playlist_ids": []int64{}})
+	post("elements[0].playlist_ids", errcodes.Length, map[string]any{"nominal_duration_ms": 60000, "playlist_ids": []uint64{}})
 	f.fieldError("default_filler_mode", errcodes.Enum, http.MethodPost, "/api/clocks", map[string]any{
 		"name": "X", "default_filler_mode": "pool", "elements": []any{element(f.music, 60)},
 	})
@@ -279,7 +279,7 @@ func TestClockDryCheckUsesGridAndPlayRules(t *testing.T) {
 		"name": "Early", "window_from": "06:00", "window_to": "07:00",
 	}, &rule)
 	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/play-rules", f.jingles), map[string]any{
-		"rule_ids": []int64{rule.ID},
+		"rule_ids": []uint64{rule.ID},
 	}, nil)
 	today := grid.Date(time.Now().In(stationTZ(t)))
 	f.ok(http.StatusOK, http.MethodPost, "/api/grid/assign", map[string]any{

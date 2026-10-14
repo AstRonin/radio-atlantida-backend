@@ -17,7 +17,7 @@ import (
 
 // OperationStore reads operations.
 type OperationStore interface {
-	Get(ctx context.Context, id int64) (operations.Operation, error)
+	Get(ctx context.Context, id uint64) (operations.Operation, error)
 	List(ctx context.Context, f operations.ListFilter) ([]operations.Operation, error)
 }
 
@@ -90,14 +90,14 @@ func errorsWith(statuses ...int) []int { return append(statuses, commonErrors...
 
 // idInput addresses a resource by its ID.
 type idInput struct {
-	ID int64 `path:"id" minimum:"1"`
+	ID uint64 `path:"id" minimum:"1"`
 }
 
 // emptyIDs returns ids, or an empty list instead of nil, so the API sends []
 // rather than null.
-func emptyIDs(ids []int64) []int64 {
+func emptyIDs(ids []uint64) []uint64 {
 	if ids == nil {
-		return []int64{}
+		return []uint64{}
 	}
 	return ids
 }

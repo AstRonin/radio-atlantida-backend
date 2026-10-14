@@ -37,7 +37,7 @@ type Job struct {
 
 // Operations runs a function as an operation in the calling goroutine.
 type Operations interface {
-	Do(ctx context.Context, kind operations.Kind, component logging.Component, fn operations.Func) (int64, error)
+	Do(ctx context.Context, kind operations.Kind, component logging.Component, fn operations.Func) (uint64, error)
 }
 
 // ErrLocked reports that another session holds the lock of a job.

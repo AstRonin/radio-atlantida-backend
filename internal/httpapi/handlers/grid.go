@@ -17,12 +17,12 @@ import (
 type Grid interface {
 	ListSlots(ctx context.Context, f grid.Filter) ([]grid.Slot, error)
 	Assign(ctx context.Context, in grid.AssignInput) (grid.AssignResult, error)
-	DeleteSlot(ctx context.Context, id int64) error
+	DeleteSlot(ctx context.Context, id uint64) error
 	Schedule(ctx context.Context, from, to time.Time) ([]grid.ScheduledHour, error)
 }
 
 type listGridSlotsInput struct {
-	ClockID int64  `query:"clock_id" minimum:"0" doc:"Only the slots of this clock."`
+	ClockID uint64 `query:"clock_id" minimum:"0" doc:"Only the slots of this clock."`
 	From    string `query:"from" format:"date" doc:"Only slots valid on some date from this one (station local)."`
 	To      string `query:"to" format:"date" doc:"Only slots valid on some date up to this one."`
 }
@@ -182,7 +182,7 @@ func optionalDate(field, s string) (*time.Time, error) {
 	return &t, nil
 }
 
-func assignInput(clockID int64, weekdays, hours []int, from string, to *string) (grid.AssignInput, error) {
+func assignInput(clockID uint64, weekdays, hours []int, from string, to *string) (grid.AssignInput, error) {
 	a := grid.AssignInput{ClockID: clockID, Weekdays: weekdays, Hours: hours}
 	var err error
 	if a.ValidFrom, err = parseDate("valid_from", from); err != nil {

@@ -82,13 +82,13 @@ const (
 // artist ID for artist, nil otherwise.
 type Filler struct {
 	Mode     FillerMode
-	SourceID *int64
+	SourceID *uint64
 }
 
 // Element is one slot of a clock.
 type Element struct {
 	// ID is 0 for an element that is not stored yet.
-	ID          int64
+	ID          uint64
 	Placement   Placement
 	FixedMinute *int
 	// FixedToleranceMS applies to the start of a fixed element.
@@ -97,7 +97,7 @@ type Element struct {
 	DurationToleranceMS int
 	Filler              Filler
 	// PlaylistIDs: the track is chosen from the union of their tracks.
-	PlaylistIDs []int64
+	PlaylistIDs []uint64
 }
 
 // target is the target start of a fixed element within the hour.
@@ -113,7 +113,7 @@ func (e Element) earliest() int { return e.target() - e.FixedToleranceMS }
 
 // Clock is a 60-minute template.
 type Clock struct {
-	ID     int64
+	ID     uint64
 	Name   string
 	Status Status
 	// DefaultFiller applies when the pool is empty or a reminder expires;
@@ -126,7 +126,7 @@ type Clock struct {
 
 // Summary is a clock in the list.
 type Summary struct {
-	ID           int64
+	ID           uint64
 	Name         string
 	Status       Status
 	ElementCount int
@@ -137,14 +137,14 @@ type Summary struct {
 // from the settings.
 type ElementInput struct {
 	// ID names an existing element of the clock; 0 for a new one.
-	ID                  int64
+	ID                  uint64
 	Placement           Placement
 	FixedMinute         *int
 	FixedToleranceMS    *int
 	NominalDurationMS   int
 	DurationToleranceMS *int
 	Filler              Filler
-	PlaylistIDs         []int64
+	PlaylistIDs         []uint64
 }
 
 // Input is the editable part of a clock.
@@ -165,12 +165,12 @@ type FillerChoice struct {
 	Segments []SegmentChoice
 	// PoolTrackIDs, when not nil, replace the unused rows of the clock's
 	// filler pool, in this order.
-	PoolTrackIDs []int64
+	PoolTrackIDs []uint64
 }
 
 // PoolEntry is a track of a clock's filler pool. Used rows stay as history.
 type PoolEntry struct {
-	TrackID  int64
+	TrackID  uint64
 	Title    string
 	Position int
 	UsedAt   *time.Time
@@ -194,7 +194,7 @@ type View struct {
 // Ref names an entity that blocks a delete.
 type Ref struct {
 	Kind string
-	ID   int64
+	ID   uint64
 	Name string
 }
 
@@ -216,7 +216,7 @@ func (e *InUseError) Unwrap() error { return ErrInUse }
 
 // SlotRef is a grid slot that assigns a clock.
 type SlotRef struct {
-	ID        int64
+	ID        uint64
 	Weekday   int
 	Hour      int
 	ValidFrom time.Time
@@ -230,52 +230,52 @@ type Store interface {
 	// List returns every clock in name order.
 	List(ctx context.Context) ([]Summary, error)
 	// Get returns a clock with its elements, or ErrNotFound.
-	Get(ctx context.Context, id int64) (Clock, error)
+	Get(ctx context.Context, id uint64) (Clock, error)
 	// Lock locks the clock row until the transaction ends. ErrNotFound.
-	Lock(ctx context.Context, id int64) error
+	Lock(ctx context.Context, id uint64) error
 	// Create adds a clock with its elements. ErrNameTaken,
 	// ErrUnknownPlaylist, ErrUnknownArtist.
-	Create(ctx context.Context, c Clock) (int64, error)
+	Create(ctx context.Context, c Clock) (uint64, error)
 	// Update replaces the clock and its elements: elements with an ID are
 	// updated, those left out are deleted, new ones are added. ErrNotFound,
 	// ErrNameTaken, ErrUnknownPlaylist, ErrUnknownArtist.
 	Update(ctx context.Context, c Clock) error
 	// Delete removes a clock. ErrNotFound; ErrInUse while grid slots use
 	// it; ErrHasHistory.
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id uint64) error
 	// Users returns the grid slots of the clock, at most limit.
-	Users(ctx context.Context, id int64, limit int) ([]SlotRef, error)
+	Users(ctx context.Context, id uint64, limit int) ([]SlotRef, error)
 	// MissingPlaylists, MissingArtists, and MissingTracks return the IDs
 	// that do not exist.
-	MissingPlaylists(ctx context.Context, ids []int64) ([]int64, error)
-	MissingArtists(ctx context.Context, ids []int64) ([]int64, error)
+	MissingPlaylists(ctx context.Context, ids []uint64) ([]uint64, error)
+	MissingArtists(ctx context.Context, ids []uint64) ([]uint64, error)
 	// Pool returns the filler pool in position order.
-	Pool(ctx context.Context, clockID int64) ([]PoolEntry, error)
+	Pool(ctx context.Context, clockID uint64) ([]PoolEntry, error)
 	// SetPool replaces the unused pool rows with trackIDs, in order, after
 	// the used ones. ErrUnknownTrack.
-	SetPool(ctx context.Context, clockID int64, trackIDs []int64) error
+	SetPool(ctx context.Context, clockID uint64, trackIDs []uint64) error
 }
 
 // Candidate is a track of an element's playlists, as the dry check sees it.
 type Candidate struct {
-	TrackID    int64
+	TrackID    uint64
 	DurationMS *int
 	// PlaylistIDs are the requested playlists that hold the track.
-	PlaylistIDs []int64
+	PlaylistIDs []uint64
 	// RuleIDs are the play rules of the track and of all its playlists.
-	RuleIDs []int64
+	RuleIDs []uint64
 }
 
 // Candidates are the tracks of a set of playlists and their play rules.
 type Candidates struct {
 	Tracks []Candidate
-	Rules  map[int64]playrules.RuleInput
+	Rules  map[uint64]playrules.RuleInput
 }
 
 // CheckStore reads what the dry check needs (internal/repository/clocks).
 type CheckStore interface {
 	// Candidates returns the tracks of the playlists with their rules.
-	Candidates(ctx context.Context, playlistIDs []int64) (Candidates, error)
+	Candidates(ctx context.Context, playlistIDs []uint64) (Candidates, error)
 	// TrackSeparationHours returns the longest track separation interval.
 	TrackSeparationHours(ctx context.Context) (int, error)
 }
@@ -290,7 +290,7 @@ type Hour struct {
 
 // GridHours returns the hours the grid assigns to a clock (*grid.Service).
 type GridHours interface {
-	ClockHours(ctx context.Context, clockID int64, from, to time.Time) ([]Hour, error)
+	ClockHours(ctx context.Context, clockID uint64, from, to time.Time) ([]Hour, error)
 }
 
 // Settings are the settings the service reads.
@@ -341,7 +341,7 @@ func (s *Service) List(ctx context.Context) ([]Summary, error) {
 }
 
 // Get returns a clock with its layout.
-func (s *Service) Get(ctx context.Context, id int64) (View, error) {
+func (s *Service) Get(ctx context.Context, id uint64) (View, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	c, err := s.store.Get(ctx, id)

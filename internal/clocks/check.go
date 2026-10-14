@@ -67,7 +67,7 @@ func (s *Service) warnings(ctx context.Context, c Clock, l Layout) ([]Warning, e
 		})
 	}
 
-	var playlists []int64
+	var playlists []uint64
 	for _, e := range c.Elements {
 		playlists = append(playlists, e.PlaylistIDs...)
 	}
@@ -117,7 +117,7 @@ func (s *Service) warnings(ctx context.Context, c Clock, l Layout) ([]Warning, e
 
 // gridHours returns the grid hours of the clock within the grid horizon,
 // and the end of the track separation window.
-func (s *Service) gridHours(ctx context.Context, clockID int64) ([]Hour, time.Time, error) {
+func (s *Service) gridHours(ctx context.Context, clockID uint64) ([]Hour, time.Time, error) {
 	set, err := s.settings(ctx)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("read clock settings: %w", err)
@@ -165,7 +165,7 @@ func fewTracks(elements []Element, i, fitting int, hours []Hour, sepEnd time.Tim
 // blockedHours warns about the grid hours in which the time windows of the
 // play rules block every fitting track of the element. Only the window and
 // weekdays are checked: the interval and per-hour limits depend on the plan.
-func blockedHours(e Element, i int, fitting []Candidate, rules map[int64]playrules.RuleInput, hours []Hour) (Warning, bool) {
+func blockedHours(e Element, i int, fitting []Candidate, rules map[uint64]playrules.RuleInput, hours []Hour) (Warning, bool) {
 	// Tracks with the same rules behave the same; one check per rule set.
 	groups := map[string][]playrules.RuleInput{}
 	for _, t := range fitting {
@@ -227,18 +227,18 @@ func anyAllowed(groups map[string][]playrules.RuleInput, wh WeekdayHour, first, 
 	return false
 }
 
-func ruleKey(ids []int64) string {
+func ruleKey(ids []uint64) string {
 	sorted := slices.Clone(ids)
 	slices.Sort(sorted)
 	parts := make([]string, len(sorted))
 	for i, id := range sorted {
-		parts[i] = strconv.FormatInt(id, 10)
+		parts[i] = strconv.FormatUint(id, 10)
 	}
 	return strings.Join(parts, ",")
 }
 
-func intersects(a, b []int64) bool {
-	return slices.ContainsFunc(a, func(x int64) bool { return slices.Contains(b, x) })
+func intersects(a, b []uint64) bool {
+	return slices.ContainsFunc(a, func(x uint64) bool { return slices.Contains(b, x) })
 }
 
 func abs(v int) int {

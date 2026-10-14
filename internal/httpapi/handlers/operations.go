@@ -13,7 +13,7 @@ import (
 )
 
 type getOperationInput struct {
-	ID int64 `path:"id" minimum:"1"`
+	ID uint64 `path:"id" minimum:"1"`
 }
 
 type operationOutput struct {
@@ -22,7 +22,7 @@ type operationOutput struct {
 
 type listOperationsInput struct {
 	Since   time.Time `query:"since" doc:"Only operations started or finished at or after this UTC time."`
-	AfterID int64     `query:"after_id" minimum:"0" doc:"Continue after this operation ID (the last ID of the previous page)."`
+	AfterID uint64    `query:"after_id" minimum:"0" doc:"Continue after this operation ID (the last ID of the previous page)."`
 	Limit   int       `query:"limit" minimum:"1" maximum:"500" default:"100"`
 }
 

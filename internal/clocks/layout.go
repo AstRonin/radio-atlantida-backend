@@ -86,13 +86,13 @@ type Arranged struct {
 // stored elements; an element with an ID is one of them, an element without
 // one is new. Refusals are field errors addressed by the request index
 // (elements[2].fixed_minute).
-func Arrange(elements []Element, existing map[int64]bool) (Arranged, error) {
+func Arrange(elements []Element, existing map[uint64]bool) (Arranged, error) {
 	errs := &validation.Error{}
 	if len(elements) == 0 {
 		errs.Add("elements", validation.Required, "a clock needs at least one element")
 		return Arranged{}, errs
 	}
-	seen := map[int64]bool{}
+	seen := map[uint64]bool{}
 	for i, e := range elements {
 		checkElement(errs, fmt.Sprintf("elements[%d]", i), e)
 		switch {
@@ -148,7 +148,7 @@ func checkElement(errs *validation.Error, path string, e Element) {
 	if len(e.PlaylistIDs) == 0 {
 		errs.Add(field("playlist_ids"), validation.Required, "an element needs at least one playlist")
 	}
-	ids := map[int64]bool{}
+	ids := map[uint64]bool{}
 	for _, id := range e.PlaylistIDs {
 		if ids[id] {
 			errs.Add(field("playlist_ids"), validation.Invalid, "playlist %d is listed twice", id)

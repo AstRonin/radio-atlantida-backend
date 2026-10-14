@@ -19,7 +19,7 @@ type Artists struct {
 func NewArtists(d *db.DB) *Artists { return &Artists{g: d.Gorm} }
 
 type artistRow struct {
-	ID         int64
+	ID         uint64
 	Name       string
 	TrackCount int
 }
@@ -55,7 +55,7 @@ func (s *Artists) List(ctx context.Context, query string) ([]library.Artist, err
 }
 
 // Get returns one artist, or library.ErrArtistNotFound.
-func (s *Artists) Get(ctx context.Context, id int64) (library.Artist, error) {
+func (s *Artists) Get(ctx context.Context, id uint64) (library.Artist, error) {
 	var rows []artistRow
 	if err := s.g.WithContext(ctx).Raw(selectArtists+` WHERE a.id = ?`, id).Scan(&rows).Error; err != nil {
 		return library.Artist{}, fmt.Errorf("select artist %d: %w", id, err)
@@ -67,14 +67,14 @@ func (s *Artists) Get(ctx context.Context, id int64) (library.Artist, error) {
 }
 
 type artistWrite struct {
-	ID   int64 `gorm:"primaryKey"`
+	ID   uint64 `gorm:"primaryKey"`
 	Name string
 }
 
 func (artistWrite) TableName() string { return "artists" }
 
 // Create adds an artist.
-func (s *Artists) Create(ctx context.Context, name string) (int64, error) {
+func (s *Artists) Create(ctx context.Context, name string) (uint64, error) {
 	r := artistWrite{Name: name}
 	if err := s.g.WithContext(ctx).Create(&r).Error; err != nil {
 		return 0, writeError("insert artist", err)
@@ -83,7 +83,7 @@ func (s *Artists) Create(ctx context.Context, name string) (int64, error) {
 }
 
 // Rename changes the name of an artist.
-func (s *Artists) Rename(ctx context.Context, id int64, name string) error {
+func (s *Artists) Rename(ctx context.Context, id uint64, name string) error {
 	res := s.g.WithContext(ctx).Table("artists").Where("id = ?", id).Update("name", name)
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("rename artist %d", id), res.Error)
@@ -96,7 +96,7 @@ func (s *Artists) Rename(ctx context.Context, id int64, name string) error {
 
 // Delete removes an artist. Tracks, clock filler sources, and the play log
 // refuse it (RESTRICT).
-func (s *Artists) Delete(ctx context.Context, id int64) error {
+func (s *Artists) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM artists WHERE id = ?`, id)
 	if res.Error != nil {
 		return deleteError(fmt.Sprintf("delete artist %d", id), res.Error)
@@ -109,7 +109,7 @@ func (s *Artists) Delete(ctx context.Context, id int64) error {
 
 // Users returns the tracks of the artist and the clocks that use it as
 // filler, at most limit of each kind.
-func (s *Artists) Users(ctx context.Context, id int64, limit int) ([]library.Ref, error) {
+func (s *Artists) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
 	var rows []refRow
 	err := s.g.WithContext(ctx).Raw(`
 (SELECT 'track' AS kind, id, title AS name FROM tracks WHERE artist_id = ? ORDER BY title, id LIMIT ?)

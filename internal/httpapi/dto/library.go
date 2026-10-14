@@ -5,7 +5,7 @@ import "time"
 // PlaylistType labels playlists and tracks (§4). It is only a label: it
 // does not limit what a clock element can combine.
 type PlaylistType struct {
-	ID            int64     `json:"id"`
+	ID            uint64    `json:"id"`
 	Code          string    `json:"code" doc:"Unique slug; never changes after creation."`
 	Name          string    `json:"name" doc:"Display name."`
 	IsSystem      bool      `json:"is_system" doc:"True for music, jingle, news, and segment: renamable, never deletable."`
@@ -32,7 +32,7 @@ type RenamePlaylistType struct {
 
 // TypeRef is the type of a playlist or a track.
 type TypeRef struct {
-	ID   int64  `json:"id"`
+	ID   uint64 `json:"id"`
 	Code string `json:"code"`
 	Name string `json:"name"`
 }
@@ -40,11 +40,11 @@ type TypeRef struct {
 // Playlist is a pool of tracks: the order of its tracks is not stored, and
 // rotation chooses the track (§4).
 type Playlist struct {
-	ID          int64     `json:"id"`
+	ID          uint64    `json:"id"`
 	Name        string    `json:"name"`
 	Type        TypeRef   `json:"type"`
 	TrackCount  int       `json:"track_count"`
-	PlayRuleIDs []int64   `json:"play_rule_ids" nullable:"false" doc:"Play rules applied to every track of the playlist, in ID order."`
+	PlayRuleIDs []uint64  `json:"play_rule_ids" nullable:"false" doc:"Play rules applied to every track of the playlist, in ID order."`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -56,28 +56,28 @@ type PlaylistList struct {
 // PlaylistBody is the body of POST /api/playlists and PUT /api/playlists/{id}.
 type PlaylistBody struct {
 	Name   string `json:"name" minLength:"1" maxLength:"200"`
-	TypeID int64  `json:"type_id" minimum:"1" doc:"Playlist type (GET /api/playlist-types)."`
+	TypeID uint64 `json:"type_id" minimum:"1" doc:"Playlist type (GET /api/playlist-types)."`
 }
 
 // SetPlaylistTracks is the body of PUT /api/playlists/{id}/tracks.
 type SetPlaylistTracks struct {
-	TrackIDs []int64 `json:"track_ids" nullable:"false" uniqueItems:"true" maxItems:"100000" doc:"Every track of the playlist; tracks not listed are removed from it. The order is not stored."`
+	TrackIDs []uint64 `json:"track_ids" nullable:"false" uniqueItems:"true" maxItems:"100000" doc:"Every track of the playlist; tracks not listed are removed from it. The order is not stored."`
 }
 
 // SetPlayRules is the body of PUT /api/tracks/{id}/play-rules and
 // PUT /api/playlists/{id}/play-rules.
 type SetPlayRules struct {
-	RuleIDs []int64 `json:"rule_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every play rule of the target; rules not listed are removed from it."`
+	RuleIDs []uint64 `json:"rule_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every play rule of the target; rules not listed are removed from it."`
 }
 
 // PlayRuleIDs is the rules of a track or a playlist after a change.
 type PlayRuleIDs struct {
-	RuleIDs []int64 `json:"rule_ids" nullable:"false" doc:"In ID order."`
+	RuleIDs []uint64 `json:"rule_ids" nullable:"false" doc:"In ID order."`
 }
 
 // Artist is used for artist separation.
 type Artist struct {
-	ID         int64  `json:"id"`
+	ID         uint64 `json:"id"`
 	Name       string `json:"name"`
 	TrackCount int    `json:"track_count"`
 }
@@ -94,13 +94,13 @@ type ArtistBody struct {
 
 // ArtistRef is the artist of a track.
 type ArtistRef struct {
-	ID   int64  `json:"id"`
+	ID   uint64 `json:"id"`
 	Name string `json:"name"`
 }
 
 // Track is a file in the library and its metadata.
 type Track struct {
-	ID           int64      `json:"id"`
+	ID           uint64     `json:"id"`
 	Title        string     `json:"title"`
 	Artist       *ArtistRef `json:"artist,omitempty" doc:"Absent for material without an artist (jingles, station IDs)."`
 	DurationMS   *int       `json:"duration_ms,omitempty" doc:"Absent until entered or read from the file; such a track cannot be planned."`
@@ -112,8 +112,8 @@ type Track struct {
 	QualityNotes string     `json:"quality_notes"`
 	Type         TypeRef    `json:"type"`
 	FileChecksum *string    `json:"file_checksum,omitempty"`
-	PlaylistIDs  []int64    `json:"playlist_ids" nullable:"false" doc:"In ID order."`
-	PlayRuleIDs  []int64    `json:"play_rule_ids" nullable:"false" doc:"Rules of the track itself, in ID order. The rules of its playlists apply too."`
+	PlaylistIDs  []uint64   `json:"playlist_ids" nullable:"false" doc:"In ID order."`
+	PlayRuleIDs  []uint64   `json:"play_rule_ids" nullable:"false" doc:"Rules of the track itself, in ID order. The rules of its playlists apply too."`
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
@@ -128,15 +128,15 @@ type TrackPage struct {
 // left out (duration, format, bitrate, sample rate) is read from the file
 // when it exists.
 type TrackBody struct {
-	Title        string  `json:"title" minLength:"1" maxLength:"500"`
-	ArtistID     *int64  `json:"artist_id,omitempty" nullable:"true" minimum:"1"`
-	FilePath     string  `json:"file_path" minLength:"1" maxLength:"1024" doc:"Relative to the media root, with forward slashes, for example music/song.mp3. No absolute paths, backslashes, or .. elements."`
-	TypeID       int64   `json:"type_id" minimum:"1" doc:"Playlist type of the track (GET /api/playlist-types)."`
-	DurationMS   *int    `json:"duration_ms,omitempty" nullable:"true" minimum:"1" maximum:"21600000" doc:"At most 6 hours."`
-	Format       *string `json:"format,omitempty" nullable:"true" enum:"mp3,aac,m4a,ogg,flac,wav"`
-	Bitrate      *int    `json:"bitrate,omitempty" nullable:"true" minimum:"1" maximum:"10000000" doc:"Bits per second."`
-	SampleRate   *int    `json:"sample_rate,omitempty" nullable:"true" minimum:"1" maximum:"768000" doc:"Hz."`
-	QualityOK    *bool   `json:"quality_ok,omitempty" nullable:"true" doc:"Manual override of the quality check."`
-	QualityNotes string  `json:"quality_notes,omitempty" maxLength:"2000"`
-	PlaylistIDs  []int64 `json:"playlist_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every playlist of the track; playlists not listed lose it."`
+	Title        string   `json:"title" minLength:"1" maxLength:"500"`
+	ArtistID     *uint64  `json:"artist_id,omitempty" nullable:"true" minimum:"1"`
+	FilePath     string   `json:"file_path" minLength:"1" maxLength:"1024" doc:"Relative to the media root, with forward slashes, for example music/song.mp3. No absolute paths, backslashes, or .. elements."`
+	TypeID       uint64   `json:"type_id" minimum:"1" doc:"Playlist type of the track (GET /api/playlist-types)."`
+	DurationMS   *int     `json:"duration_ms,omitempty" nullable:"true" minimum:"1" maximum:"21600000" doc:"At most 6 hours."`
+	Format       *string  `json:"format,omitempty" nullable:"true" enum:"mp3,aac,m4a,ogg,flac,wav"`
+	Bitrate      *int     `json:"bitrate,omitempty" nullable:"true" minimum:"1" maximum:"10000000" doc:"Bits per second."`
+	SampleRate   *int     `json:"sample_rate,omitempty" nullable:"true" minimum:"1" maximum:"768000" doc:"Hz."`
+	QualityOK    *bool    `json:"quality_ok,omitempty" nullable:"true" doc:"Manual override of the quality check."`
+	QualityNotes string   `json:"quality_notes,omitempty" maxLength:"2000"`
+	PlaylistIDs  []uint64 `json:"playlist_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every playlist of the track; playlists not listed lose it."`
 }

@@ -4,7 +4,7 @@ import "time"
 
 // GridClockRef is the clock of a grid slot.
 type GridClockRef struct {
-	ID     int64  `json:"id"`
+	ID     uint64 `json:"id"`
 	Name   string `json:"name"`
 	Status string `json:"status" enum:"complete,incomplete"`
 }
@@ -12,7 +12,7 @@ type GridClockRef struct {
 // GridSlot assigns a clock to a weekday and hour for a range of dates, in
 // station local time (§4, §10.2).
 type GridSlot struct {
-	ID        int64        `json:"id"`
+	ID        uint64       `json:"id"`
 	Weekday   int          `json:"weekday" doc:"1 = Monday ... 7 = Sunday."`
 	Hour      int          `json:"hour"`
 	Clock     GridClockRef `json:"clock"`
@@ -27,7 +27,7 @@ type GridSlotList struct {
 
 // GridAssignBody is the body of POST /api/grid/assign.
 type GridAssignBody struct {
-	ClockID   int64   `json:"clock_id" minimum:"1"`
+	ClockID   uint64  `json:"clock_id" minimum:"1"`
 	Weekdays  []int   `json:"weekdays" minItems:"1" maxItems:"7" uniqueItems:"true" minimum:"1" maximum:"7" doc:"1 = Monday ... 7 = Sunday."`
 	Hours     []int   `json:"hours" minItems:"1" maxItems:"24" uniqueItems:"true" minimum:"0" maximum:"23" doc:"Station local hours."`
 	ValidFrom string  `json:"valid_from" format:"date" doc:"Station local date, from today to the grid horizon (setting rotation.grid_horizon_days)."`
@@ -61,7 +61,7 @@ type GridHour struct {
 	Weekday  int          `json:"weekday"`
 	Hour     int          `json:"hour" doc:"Station local hour."`
 	StartUTC time.Time    `json:"start_utc"`
-	SlotID   int64        `json:"slot_id"`
+	SlotID   uint64       `json:"slot_id"`
 	Clock    GridClockRef `json:"clock"`
 }
 

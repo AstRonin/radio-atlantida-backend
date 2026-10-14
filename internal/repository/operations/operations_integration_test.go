@@ -77,20 +77,20 @@ func TestStore(t *testing.T) {
 
 		all, err := store.List(ctx, operations.ListFilter{Limit: 10})
 		require.NoError(t, err)
-		require.Equal(t, []int64{id, running}, ids(all))
+		require.Equal(t, []uint64{id, running}, ids(all))
 
 		page, err := store.List(ctx, operations.ListFilter{AfterID: id, Limit: 10})
 		require.NoError(t, err)
-		require.Equal(t, []int64{running}, ids(page))
+		require.Equal(t, []uint64{running}, ids(page))
 
 		limited, err := store.List(ctx, operations.ListFilter{Limit: 1})
 		require.NoError(t, err)
-		require.Equal(t, []int64{id}, ids(limited))
+		require.Equal(t, []uint64{id}, ids(limited))
 
 		// Started before, finished at the same instant: kept.
 		since, err := store.List(ctx, operations.ListFilter{Since: t0.Add(2 * time.Hour), Limit: 10})
 		require.NoError(t, err)
-		require.Equal(t, []int64{running}, ids(since))
+		require.Equal(t, []uint64{running}, ids(since))
 	})
 }
 
@@ -100,7 +100,7 @@ func TestStoreWithTx(t *testing.T) {
 	ctx := t.Context()
 	errRollback := errors.New("rollback")
 
-	var id int64
+	var id uint64
 	err := d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		var err error
 		id, err = store.WithTx(tx).Insert(ctx, operations.KindRetention, t0)
@@ -120,8 +120,8 @@ func utc(op operations.Operation) operations.Operation {
 	return op
 }
 
-func ids(ops []operations.Operation) []int64 {
-	out := make([]int64, len(ops))
+func ids(ops []operations.Operation) []uint64 {
+	out := make([]uint64, len(ops))
 	for i, op := range ops {
 		out[i] = op.ID
 	}

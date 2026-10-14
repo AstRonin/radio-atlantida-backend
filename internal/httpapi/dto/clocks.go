@@ -4,15 +4,15 @@ import "time"
 
 // ClockElement is one slot of a clock (§4, §7.2).
 type ClockElement struct {
-	ID                  int64   `json:"id"`
-	Placement           string  `json:"placement" enum:"flow,start,end,fixed"`
-	FixedMinute         *int    `json:"fixed_minute,omitempty" doc:"Target start minute of a fixed element."`
-	FixedToleranceMS    int     `json:"fixed_tolerance_ms" doc:"A fixed element may start this much before or after its minute."`
-	NominalDurationMS   int     `json:"nominal_duration_ms"`
-	DurationToleranceMS int     `json:"duration_tolerance_ms" doc:"A chosen track lasts nominal ± tolerance."`
-	FillerMode          string  `json:"filler_mode" enum:"none,ask,random,playlist,artist,pool" doc:"Filler of the segment this element holds (see ClockSegment.holder_index)."`
-	FillerSourceID      *int64  `json:"filler_source_id,omitempty" doc:"Playlist ID for playlist, artist ID for artist."`
-	PlaylistIDs         []int64 `json:"playlist_ids" nullable:"false" doc:"The track is chosen from the union of their tracks, in ID order."`
+	ID                  uint64   `json:"id"`
+	Placement           string   `json:"placement" enum:"flow,start,end,fixed"`
+	FixedMinute         *int     `json:"fixed_minute,omitempty" doc:"Target start minute of a fixed element."`
+	FixedToleranceMS    int      `json:"fixed_tolerance_ms" doc:"A fixed element may start this much before or after its minute."`
+	NominalDurationMS   int      `json:"nominal_duration_ms"`
+	DurationToleranceMS int      `json:"duration_tolerance_ms" doc:"A chosen track lasts nominal ± tolerance."`
+	FillerMode          string   `json:"filler_mode" enum:"none,ask,random,playlist,artist,pool" doc:"Filler of the segment this element holds (see ClockSegment.holder_index)."`
+	FillerSourceID      *uint64  `json:"filler_source_id,omitempty" doc:"Playlist ID for playlist, artist ID for artist."`
+	PlaylistIDs         []uint64 `json:"playlist_ids" nullable:"false" doc:"The track is chosen from the union of their tracks, in ID order."`
 }
 
 // ClockSegment is a part of the hour between fixed elements, fitted
@@ -40,11 +40,11 @@ type ClockLayout struct {
 
 // Clock is a 60-minute template with its layout.
 type Clock struct {
-	ID                    int64          `json:"id"`
+	ID                    uint64         `json:"id"`
 	Name                  string         `json:"name"`
 	Status                string         `json:"status" enum:"complete,incomplete" doc:"incomplete: a short segment has no filler mode."`
 	DefaultFillerMode     *string        `json:"default_filler_mode,omitempty" enum:"random,playlist,artist" doc:"Used when the pool is empty or a reminder expires; absent: the global setting filler.fallback."`
-	DefaultFillerSourceID *int64         `json:"default_filler_source_id,omitempty"`
+	DefaultFillerSourceID *uint64        `json:"default_filler_source_id,omitempty"`
 	Elements              []ClockElement `json:"elements" nullable:"false" doc:"In position order."`
 	Layout                ClockLayout    `json:"layout"`
 	UpdatedAt             time.Time      `json:"updated_at"`
@@ -52,7 +52,7 @@ type Clock struct {
 
 // ClockSummary is a clock in the list.
 type ClockSummary struct {
-	ID           int64     `json:"id"`
+	ID           uint64    `json:"id"`
 	Name         string    `json:"name"`
 	Status       string    `json:"status" enum:"complete,incomplete"`
 	ElementCount int       `json:"element_count"`
@@ -67,15 +67,15 @@ type ClockList struct {
 // ClockElementBody is an element of a clock save. Its position is its
 // index in elements.
 type ClockElementBody struct {
-	ID                  *int64  `json:"id,omitempty" minimum:"1" doc:"An existing element of the clock; leave out for a new one. A new fixed element whose window overlaps an existing one replaces it."`
-	Placement           string  `json:"placement,omitempty" enum:"flow,start,end,fixed" default:"flow"`
-	FixedMinute         *int    `json:"fixed_minute,omitempty" minimum:"0" maximum:"59" doc:"Required for a fixed element only."`
-	FixedToleranceMS    *int    `json:"fixed_tolerance_ms,omitempty" minimum:"0" maximum:"600000" doc:"Default: setting rotation.default_fixed_tolerance_ms."`
-	NominalDurationMS   int     `json:"nominal_duration_ms" minimum:"1" maximum:"3600000"`
-	DurationToleranceMS *int    `json:"duration_tolerance_ms,omitempty" minimum:"0" maximum:"600000" doc:"Default: setting rotation.default_duration_tolerance_ms."`
-	FillerMode          string  `json:"filler_mode,omitempty" enum:"none,ask,random,playlist,artist,pool" default:"none"`
-	FillerSourceID      *int64  `json:"filler_source_id,omitempty" minimum:"1" doc:"Playlist ID for playlist, artist ID for artist; absent otherwise."`
-	PlaylistIDs         []int64 `json:"playlist_ids" minItems:"1" maxItems:"100" uniqueItems:"true" doc:"One or more playlists of any type."`
+	ID                  *uint64  `json:"id,omitempty" minimum:"1" doc:"An existing element of the clock; leave out for a new one. A new fixed element whose window overlaps an existing one replaces it."`
+	Placement           string   `json:"placement,omitempty" enum:"flow,start,end,fixed" default:"flow"`
+	FixedMinute         *int     `json:"fixed_minute,omitempty" minimum:"0" maximum:"59" doc:"Required for a fixed element only."`
+	FixedToleranceMS    *int     `json:"fixed_tolerance_ms,omitempty" minimum:"0" maximum:"600000" doc:"Default: setting rotation.default_fixed_tolerance_ms."`
+	NominalDurationMS   int      `json:"nominal_duration_ms" minimum:"1" maximum:"3600000"`
+	DurationToleranceMS *int     `json:"duration_tolerance_ms,omitempty" minimum:"0" maximum:"600000" doc:"Default: setting rotation.default_duration_tolerance_ms."`
+	FillerMode          string   `json:"filler_mode,omitempty" enum:"none,ask,random,playlist,artist,pool" default:"none"`
+	FillerSourceID      *uint64  `json:"filler_source_id,omitempty" minimum:"1" doc:"Playlist ID for playlist, artist ID for artist; absent otherwise."`
+	PlaylistIDs         []uint64 `json:"playlist_ids" minItems:"1" maxItems:"100" uniqueItems:"true" doc:"One or more playlists of any type."`
 }
 
 // ClockBody is the body of POST /api/clocks and PUT /api/clocks/{id}. PUT
@@ -83,7 +83,7 @@ type ClockElementBody struct {
 type ClockBody struct {
 	Name                  string             `json:"name" minLength:"1" maxLength:"200"`
 	DefaultFillerMode     *string            `json:"default_filler_mode,omitempty" nullable:"true" enum:"random,playlist,artist" doc:"Leave out for the global setting filler.fallback."`
-	DefaultFillerSourceID *int64             `json:"default_filler_source_id,omitempty" nullable:"true" minimum:"1"`
+	DefaultFillerSourceID *uint64            `json:"default_filler_source_id,omitempty" nullable:"true" minimum:"1"`
 	Elements              []ClockElementBody `json:"elements" minItems:"1" maxItems:"200"`
 }
 
@@ -120,20 +120,20 @@ type ClockSaveResult struct {
 
 // SegmentFillerChoice is the filler chosen for one segment.
 type SegmentFillerChoice struct {
-	Segment        int    `json:"segment" minimum:"0" doc:"Index of the segment."`
-	FillerMode     string `json:"filler_mode" enum:"ask,random,playlist,artist,pool"`
-	FillerSourceID *int64 `json:"filler_source_id,omitempty" minimum:"1" doc:"Playlist ID for playlist, artist ID for artist."`
+	Segment        int     `json:"segment" minimum:"0" doc:"Index of the segment."`
+	FillerMode     string  `json:"filler_mode" enum:"ask,random,playlist,artist,pool"`
+	FillerSourceID *uint64 `json:"filler_source_id,omitempty" minimum:"1" doc:"Playlist ID for playlist, artist ID for artist."`
 }
 
 // SaveWithFillerBody is the body of POST /api/clocks/{id}/save-with-filler.
 type SaveWithFillerBody struct {
 	Segments     []SegmentFillerChoice `json:"segments" minItems:"1" maxItems:"100" doc:"A choice for every short segment; segments filled by the same element need the same choice."`
-	PoolTrackIDs []int64               `json:"pool_track_ids,omitempty" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Replaces the unused tracks of the clock's filler pool, in this order. Leave out to keep the pool."`
+	PoolTrackIDs []uint64              `json:"pool_track_ids,omitempty" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Replaces the unused tracks of the clock's filler pool, in this order. Leave out to keep the pool."`
 }
 
 // FillerPoolEntry is a track of a clock's filler pool.
 type FillerPoolEntry struct {
-	TrackID  int64      `json:"track_id"`
+	TrackID  uint64     `json:"track_id"`
 	Title    string     `json:"title"`
 	Position int        `json:"position"`
 	UsedAt   *time.Time `json:"used_at,omitempty" doc:"When it was taken for filler; used tracks stay as history."`
@@ -146,5 +146,5 @@ type FillerPool struct {
 
 // SetFillerPool is the body of PUT /api/clocks/{id}/filler-pool.
 type SetFillerPool struct {
-	TrackIDs []int64 `json:"track_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Replaces the unused tracks, in this order; used ones stay."`
+	TrackIDs []uint64 `json:"track_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Replaces the unused tracks, in this order; used ones stay."`
 }
