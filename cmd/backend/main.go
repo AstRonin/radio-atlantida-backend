@@ -3,6 +3,7 @@
 //	backend serve        HTTP API, WebSocket hub, background jobs
 //	backend migrate up   apply database migrations and exit
 //	backend openapi      print the OpenAPI specification (JSON) to stdout
+//	backend version      print the release version
 package main
 
 import (
@@ -23,10 +24,11 @@ commands:
   serve        run the HTTP API, WebSocket hub, and background jobs
   migrate up   apply database migrations and exit
   openapi      print the OpenAPI specification (JSON) to stdout
+  version      print the release version
 `
 
 // version is the release version, set at build time with
-// -ldflags "-X main.version=1.2.3".
+// -ldflags "-X main.version=1.2.3" (the Dockerfile's VERSION, make build).
 var version = "dev"
 
 // errUsage marks a command-line error; the usage text is printed with it.
@@ -70,6 +72,12 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		}
 		_, err = stdout.Write(doc)
+		return err
+	case "version":
+		if len(rest) != 0 {
+			return fmt.Errorf("%w: version takes no arguments", errUsage)
+		}
+		_, err := fmt.Fprintln(stdout, version)
 		return err
 	case "help", "-h", "--help":
 		_, err := fmt.Fprint(stdout, usage)

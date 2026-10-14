@@ -22,6 +22,7 @@ func TestRunArguments(t *testing.T) {
 		{"migrate without direction", []string{"migrate"}, true},
 		{"serve with arguments", []string{"serve", "x"}, true},
 		{"openapi with arguments", []string{"openapi", "x"}, true},
+		{"version with arguments", []string{"version", "x"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,4 +54,13 @@ func TestRunOpenAPI(t *testing.T) {
 	var doc map[string]any
 	require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
 	require.Equal(t, "3.1.0", doc["openapi"])
+}
+
+func TestRunVersion(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+
+	require.NoError(t, run(t.Context(), []string{"version"}, &out))
+
+	require.Equal(t, version+"\n", out.String())
 }

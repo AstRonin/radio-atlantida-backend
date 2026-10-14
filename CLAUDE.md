@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice).
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -32,7 +32,8 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | `make inbox` | Generate inbox files with known quality issues into `.dev/media/incoming` (ffmpeg in a container) |
 | `make live-check` | Go live through a running backend with a test tone over WebRTC, no browser (`dev/livecheck`) |
 | `make run` | Run the backend on the host against the dev stack |
-| `make build` | Build `bin/backend` |
+| `make build` | Build `bin/backend` (version from `git describe`) |
+| `make image` | Build the runtime image `radio-atlantida-backend:dev` locally with that version |
 | `make test` | Unit tests with `-race` |
 | `make test-integration` | Unit + integration tests (`-tags integration`, testcontainers-go, needs Docker) |
 | `make lint` | `go vet` + `golangci-lint` |
@@ -44,7 +45,9 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | `make db-up` / `make db-down` | Only PostgreSQL |
 | `docker compose -f docker-compose.dev.yml --profile app up --build` | Stack plus the backend container |
 
-Binary: `backend serve` | `backend migrate up` (no `down`, ever) | `backend openapi`.
+Binary: `backend serve` | `backend migrate up` (no `down`, ever) | `backend openapi` | `backend version`.
+
+Release: push a tag `vX.Y.Z` from `main`. `.github/workflows/release.yml` runs the whole CI, pushes `ghcr.io/astronin/radio-atlantida-backend:X.Y.Z` (never overwrites, no `latest`) and creates the GitHub release with that image's `openapi.json`.
 
 ## Layout
 

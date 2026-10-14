@@ -199,7 +199,7 @@ func serve(ctx context.Context) error {
 	// (§8.4); on shutdown it ends the session.
 	g.Go(func() error { return bridge.Run(gctx) })
 	g.Go(func() error {
-		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
+		apiLog.Info("http server listening", "addr", cfg.HTTPAddr, "version", version)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("http server: %w", err)
 		}

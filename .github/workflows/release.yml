@@ -1,0 +1,106 @@
+name: release
+
+# A tag vX.Y.Z publishes ghcr.io/astronin/radio-atlantida-backend:X.Y.Z and
+# the GitHub release vX.Y.Z with the openapi.json of that image
+# (docs/phase-13-plan.md). The deploy repository refers to X.Y.Z only.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # GHCR needs the owner in lower case (§1.1).
+  IMAGE: ghcr.io/astronin/radio-atlantida-backend
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: tag is vX.Y.Z
+        id: tag
+        # The update script accepts only ^\d+\.\d+\.\d+$ as IMAGE_TAG.
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if ! [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag $tag is not vX.Y.Z; nothing is released"; exit 1
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1
+          fi
+
+  ci:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: [check, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: image tag is not taken
+        # A released tag is never overwritten; a fix gets a new patch version.
+        run: |
+          if docker manifest inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+            echo "::error::$IMAGE:$VERSION already exists"; exit 1
+          fi
+      - name: build
+        run: |
+          docker build -f docker/Dockerfile -t "$IMAGE:$VERSION" \
+            --build-arg VERSION="$VERSION" \
+            --build-arg REVISION="$GITHUB_SHA" \
+            --build-arg CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+      - name: specification from the image
+        # The attached openapi.json is the contract of the shipped binary.
+        run: |
+          got=$(docker run --rm "$IMAGE:$VERSION" version)
+          if [ "$got" != "$VERSION" ]; then
+            echo "::error::image reports version $got, want $VERSION"; exit 1
+          fi
+          docker run --rm "$IMAGE:$VERSION" openapi > openapi.json
+          jq -e --arg v "$VERSION" '.info.version == $v' openapi.json
+      - name: push
+        run: docker push "$IMAGE:$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: openapi.json
+
+  release:
+    needs: [check, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: openapi
+      - name: GitHub release with openapi.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" openapi.json \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Image: \`$IMAGE:$VERSION\`. Frontend: \`npm run api:sync -- openapi.json\`."

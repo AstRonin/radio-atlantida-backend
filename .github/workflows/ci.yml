@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs the whole CI before it builds a release.
+  workflow_call:
 
 permissions:
   contents: read
@@ -25,6 +27,13 @@ jobs:
           version: v2.14.0
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Go version in the Dockerfile
+        run: |
+          mod=$(go mod edit -json | jq -r .Go)
+          img=$(sed -n 's/^ARG GO_VERSION=//p' docker/Dockerfile)
+          if [ "$mod" != "$img" ]; then
+            echo "go.mod says $mod, docker/Dockerfile GO_VERSION says $img"; exit 1
+          fi
       - name: line endings and paths
         # Development is on macOS, runtime on Windows (§9.1): no CRLF and no
         # file names that differ only by case.
