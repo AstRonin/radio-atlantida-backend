@@ -30,6 +30,7 @@ type listTracksInput struct {
 	ArtistID   uint64 `query:"artist_id" minimum:"0" doc:"Only tracks of this artist."`
 	PlaylistID uint64 `query:"playlist_id" minimum:"0" doc:"Only tracks in this playlist."`
 	Query      string `query:"q" maxLength:"200" doc:"Only tracks whose title or artist name contains this text (case-insensitive)."`
+	Quality    string `query:"quality" enum:"ok,issues,unanalysed" doc:"Only tracks analysed without issues, with issues, or never analysed."`
 	Cursor     string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page."`
 	Limit      int    `query:"limit" minimum:"1" maximum:"500" default:"100"`
 }
@@ -62,7 +63,7 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 	}, func(ctx context.Context, in *listTracksInput) (*trackPageOutput, error) {
 		f := library.TrackFilter{
 			TypeID: in.TypeID, ArtistID: in.ArtistID, PlaylistID: in.PlaylistID,
-			Query: in.Query, Limit: in.Limit,
+			Query: in.Query, Quality: in.Quality, Limit: in.Limit,
 		}
 		if in.Cursor != "" {
 			c, err := decodeCursor(in.Cursor)

@@ -115,6 +115,16 @@ type Track struct {
 	PlaylistIDs  []uint64   `json:"playlist_ids" nullable:"false" doc:"In ID order."`
 	PlayRuleIDs  []uint64   `json:"play_rule_ids" nullable:"false" doc:"Rules of the track itself, in ID order. The rules of its playlists apply too."`
 	CreatedAt    time.Time  `json:"created_at"`
+
+	Codec           *string    `json:"codec,omitempty" doc:"Codec of the audio stream as ffprobe names it (mp3, aac, vorbis, flac, pcm_s16le, ...). Absent until analysed."`
+	Channels        *int       `json:"channels,omitempty"`
+	LoudnessLUFS    *float64   `json:"loudness_lufs,omitempty" doc:"Integrated loudness (EBU R128). Absent until analysed, and for a silent file."`
+	TruePeakDBTP    *float64   `json:"true_peak_dbtp,omitempty"`
+	LoudnessRangeLU *float64   `json:"loudness_range_lu,omitempty"`
+	SourceBitrate   *int       `json:"source_bitrate,omitempty" doc:"Bits per second of the lossy file this one was transcoded from; it keeps the low_bitrate issue."`
+	QualityIssues   []string   `json:"quality_issues" nullable:"false" enum:"format,sample_rate,channels,loudness,true_peak,low_bitrate,file_missing" doc:"Problems found by the last analysis against the broadcast standard (settings import.*). low_bitrate and file_missing cannot be fixed by a transcode."`
+	Fixes           []string   `json:"fixes" nullable:"false" enum:"loudness,optimize" doc:"Transcodes that remove at least one issue: the buttons Fix loudness and Optimize track (POST /api/tracks/transcode)."`
+	AnalyzedAt      *time.Time `json:"analyzed_at,omitempty" doc:"Absent until the file is analysed."`
 }
 
 // TrackPage is a page of tracks in title order.

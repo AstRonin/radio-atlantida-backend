@@ -18,19 +18,24 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ingest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
+	"github.com/AstRonin/radio-atlantida-backend/internal/live"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
+	ingestrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/ingest"
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	outagerepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/outage"
 	playoutrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playout"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
@@ -113,6 +118,10 @@ func serve(ctx context.Context) error {
 	if !prober.Available() {
 		apiLog.Warn("ffprobe not found on PATH: track metadata is not read from files")
 	}
+	ff := media.NewFFmpeg(mediaLib)
+	if !ff.Available() {
+		apiLog.Warn("ffmpeg not found on PATH: import, analysis, and transcoding are refused")
+	}
 	librarySvc := library.NewService(database,
 		libraryrepo.NewTypes(database), libraryrepo.NewPlaylists(database),
 		libraryrepo.NewArtists(database), libraryrepo.NewTracks(database),
@@ -125,6 +134,16 @@ func serve(ctx context.Context) error {
 	rotationSvc := rotation.NewService(database, rotationrepo.New(database.Pool), clocksSvc, gridSvc,
 		rotationSettings(settingsSvc), tracker, hub, log, time.Now)
 	playoutSvc := newPlayout(database, settingsSvc, hub, log)
+	ingestSvc := ingest.NewService(database, ingestrepo.New(database.Pool), mediaLib, prober, ff, tracker,
+		ingestSettings(settingsSvc), log, time.Now)
+	outageStore := outagerepo.New(database.Pool)
+	outageSvc := outage.NewService(outageStore, time.Now)
+	detector := outage.NewDetector(database, outageStore, playoutSvc,
+		outage.NewIcecastChecker(&http.Client{}), outage.NewJournal(cfg.PlayoutJournalRoot, playoutSvc, log),
+		tracker, hub, outageSettings(settingsSvc), log, time.Now)
+
+	bridge := live.NewBridge(live.Config{UDPAddr: cfg.LiveUDPAddr, PublicIPs: cfg.LivePublicIPs}, live.DefaultTimeouts,
+		harborTarget(settingsSvc, cfg.Secrets), hub, log, time.Now)
 
 	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
@@ -151,6 +170,9 @@ func serve(ctx context.Context) error {
 		Grid:       gridSvc,
 		Rotation:   rotationSvc,
 		Playout:    playoutSvc,
+		Outages:    outageSvc,
+		Ingest:     ingestSvc,
+		Live:       bridge,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -167,8 +189,17 @@ func serve(ctx context.Context) error {
 	g.Go(func() error { return rotationSvc.Run(gctx) })
 	// The pusher keeps Liquidsoap's hour queues filled (§8.1).
 	g.Go(func() error { return playoutSvc.Run(gctx) })
+	// The outage detector watches Icecast, the callbacks, and the control
+	// link (§7.1); at startup it reconciles the journal.
+	g.Go(func() error { return detector.Run(gctx) })
+	// The media worker runs imports, analyses, and transcodes one at a
+	// time.
+	g.Go(func() error { return ingestSvc.Run(gctx) })
+	// The live voice bridge relays the manager's microphone to the harbor
+	// (§8.4); on shutdown it ends the session.
+	g.Go(func() error { return bridge.Run(gctx) })
 	g.Go(func() error {
-		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
+		apiLog.Info("http server listening", "addr", cfg.HTTPAddr, "version", version)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("http server: %w", err)
 		}
@@ -224,7 +255,29 @@ func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, log *slog.L
 	rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)) //nolint:gosec // G404: not for security; G115: positive
 	p := playout.NewService(database, playoutrepo.New(database.Pool), ctl, playoutSettings(svc), hub, log, time.Now, rnd)
 	settings.OnChange(svc, settings.LiquidsoapMusicGain, p.MusicGainSettingChanged)
+	// The pass reads the duck gain from the settings; wake it to apply a
+	// change at once.
+	settings.OnChange(svc, settings.LiquidsoapDuckGain, func(float64) { p.Wake() })
 	return p
+}
+
+// harborTarget reads where Liquidsoap's live input listens: the control
+// host (the same Liquidsoap) and the harbor port. The script takes the
+// control credentials as the harbor's source credentials.
+func harborTarget(svc *settings.Service, secrets config.Secrets) live.HarborFunc {
+	return func(ctx context.Context) (live.HarborTarget, error) {
+		host, err := settings.Value(ctx, svc, settings.LiquidsoapControlHost)
+		if err != nil {
+			return live.HarborTarget{}, err
+		}
+		port, err := settings.Value(ctx, svc, settings.LiquidsoapHarborPort)
+		if err != nil {
+			return live.HarborTarget{}, err
+		}
+		return live.HarborTarget{
+			Host: host, Port: port, User: secrets.LiquidsoapControlUser, Password: secrets.LiquidsoapControlPassword,
+		}, nil
+	}
 }
 
 // controlAddr reads the Liquidsoap control address from the settings.
@@ -274,13 +327,17 @@ func playoutSettings(svc *settings.Service) playout.SettingsFunc {
 		if err != nil {
 			return playout.Settings{}, err
 		}
+		duck, err := settings.Value(ctx, svc, settings.LiquidsoapDuckGain)
+		if err != nil {
+			return playout.Settings{}, err
+		}
 		emergency, err := settings.Value(ctx, svc, settings.PlayoutEmergencyPlaylistID)
 		if err != nil {
 			return playout.Settings{}, err
 		}
 		return playout.Settings{
 			Location: loc, Lookahead: lookahead, Prepush: time.Duration(prepush) * time.Minute, FadeOutMS: fade,
-			MediaRoot: root, MusicGain: gain, EmergencyPlaylistID: emergency,
+			MediaRoot: root, MusicGain: gain, DuckGain: duck, EmergencyPlaylistID: emergency,
 		}, nil
 	}
 }
@@ -426,13 +483,122 @@ func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
 		if err != nil {
 			return rotation.PlanSettings{}, err
 		}
+		fixedTol, err := settings.Value(ctx, svc, settings.RotationFixedToleranceMS)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
 		return rotation.PlanSettings{
-			Location:         loc,
-			PlanHorizonHours: horizon,
-			ReminderDeadline: time.Duration(deadline) * time.Minute,
-			Fallback:         clocks.Filler{Mode: clocks.FillerMode(fallback.Mode), SourceID: fallback.SourceID},
-			Freeze:           time.Duration(prepush) * time.Minute,
-			Build:            rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
+			Location:                loc,
+			PlanHorizonHours:        horizon,
+			ReminderDeadline:        time.Duration(deadline) * time.Minute,
+			Fallback:                clocks.Filler{Mode: clocks.FillerMode(fallback.Mode), SourceID: fallback.SourceID},
+			Freeze:                  time.Duration(prepush) * time.Minute,
+			DefaultFixedToleranceMS: fixedTol,
+			Build:                   rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
+		}, nil
+	}
+}
+
+// outageSettings reads the detection settings on every evaluation, so a
+// change applies at once (§6.3).
+func outageSettings(svc *settings.Service) outage.SettingsFunc {
+	return func(ctx context.Context) (outage.Settings, error) {
+		timeout, err := settings.Value(ctx, svc, settings.OutageHeartbeatTimeoutSeconds)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		interval, err := settings.Value(ctx, svc, settings.OutageIcecastCheckSeconds)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		checks, err := settings.Value(ctx, svc, settings.OutageFailedChecks)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		prepush, err := settings.Value(ctx, svc, settings.PlayoutPrepushMinutes)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		host, err := settings.Value(ctx, svc, settings.StreamIcecastHost)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		port, err := settings.Value(ctx, svc, settings.StreamIcecastPort)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		mount, err := settings.Value(ctx, svc, settings.StreamMount)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		return outage.Settings{
+			HeartbeatTimeout: time.Duration(timeout) * time.Second,
+			IcecastInterval:  time.Duration(interval) * time.Second,
+			FailedChecks:     checks,
+			Prepush:          time.Duration(prepush) * time.Minute,
+			Icecast:          outage.IcecastTarget{Host: host, Port: port, Mount: mount},
+		}, nil
+	}
+}
+
+// ingestSettings reads the import settings when an operation starts
+// (docs/phase-11-plan.md §2, decision 11). The loudness target is the
+// station's one, stream.loudness_target_lufs.
+func ingestSettings(svc *settings.Service) ingest.SettingsFunc {
+	return func(ctx context.Context) (ingest.Settings, error) {
+		inbox, err := settings.Value(ctx, svc, settings.ImportInboxDir)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		lib, err := settings.Value(ctx, svc, settings.ImportLibraryDir)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		codec, err := settings.Value(ctx, svc, settings.ImportTargetCodec)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		bitrate, err := settings.Value(ctx, svc, settings.ImportTargetBitrateKbps)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		rate, err := settings.Value(ctx, svc, settings.ImportTargetSampleRateHz)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		channels, err := settings.Value(ctx, svc, settings.ImportTargetChannels)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		minBitrate, err := settings.Value(ctx, svc, settings.ImportMinBitrateKbps)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		loudness, err := settings.Value(ctx, svc, settings.StreamLoudnessLUFS)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		tolerance, err := settings.Value(ctx, svc, settings.ImportLoudnessToleranceLU)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		peak, err := settings.Value(ctx, svc, settings.ImportMaxTruePeakDBTP)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		prepush, err := settings.Value(ctx, svc, settings.PlayoutPrepushMinutes)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		return ingest.Settings{
+			InboxDir: inbox, LibraryDir: lib,
+			Standard: ingest.Standard{
+				Format: ingest.StandardFormat(codec), Codec: codec, BitrateKbps: bitrate, SampleRate: rate, Channels: channels,
+				MinBitrateKbps: minBitrate, LoudnessLUFS: loudness, LoudnessToleranceLU: tolerance, MaxTruePeakDBTP: peak,
+			},
+			// The pusher takes items prepush minutes ahead; five more
+			// minutes cover a long encode.
+			BusyAhead: time.Duration(prepush+5) * time.Minute,
 		}, nil
 	}
 }

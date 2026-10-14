@@ -229,6 +229,6 @@ func LevelNames() []string {
 func Components() []Component {
 	return []Component{
 		ComponentAPI, ComponentDB, ComponentRotation, ComponentFiller, ComponentLiquidsoap,
-		ComponentIcecast, ComponentWebRTC, ComponentRetention, ComponentOutage, ComponentReconcile,
+		ComponentIcecast, ComponentWebRTC, ComponentRetention, ComponentOutage, ComponentReconcile, ComponentMedia,
 	}
 }

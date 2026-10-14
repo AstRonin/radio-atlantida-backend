@@ -20,11 +20,14 @@ const (
 	rebuildTimeout = 5 * time.Minute
 )
 
-// rebuild is a queued clock_build operation.
+// rebuild is a queued operation of the planner: a clock_build, or a
+// reschedule when reschedule is set.
 type rebuild struct {
 	opID uint64
 	// force rebuilds the hours in the range even when they are current.
 	force *Range
+	// reschedule places a missed item (operation kind reschedule).
+	reschedule *RescheduleRequest
 }
 
 // Rebuild starts a clock_build operation that syncs the plan after a clock
@@ -50,16 +53,20 @@ func (s *Service) enqueue(ctx context.Context, force *Range) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	s.enqueueOp(ctx, rebuild{opID: id, force: force})
+	return id, nil
+}
+
+// enqueueOp queues a started operation for the planner. If ctx ends first,
+// the operation fails like any other, so its row does not stay running.
+func (s *Service) enqueueOp(ctx context.Context, r rebuild) {
 	select {
-	case s.queue <- rebuild{opID: id, force: force}:
+	case s.queue <- r:
 	case <-ctx.Done():
-		// Never queued: the operation fails like any other, so its row does
-		// not stay running.
-		_ = s.ops.Execute(ctx, id, logging.ComponentRotation, func(context.Context) (string, error) {
-			return "", fmt.Errorf("queue rebuild: %w", ctx.Err())
+		_ = s.ops.Execute(ctx, r.opID, logging.ComponentRotation, func(context.Context) (string, error) {
+			return "", fmt.Errorf("queue operation: %w", ctx.Err())
 		})
 	}
-	return id, nil
 }
 
 // Run is the planner: it runs the queued clock_build operations until ctx
@@ -92,9 +99,24 @@ func (s *Service) drain() []rebuild {
 	}
 }
 
+// runBatch runs the reschedules of a batch one by one, then the clock
+// builds as one sync.
 func (s *Service) runBatch(ctx context.Context, batch []rebuild) {
 	var force []Range
+	var builds []rebuild
 	for _, r := range batch {
+		if r.reschedule != nil {
+			rctx, cancel := context.WithTimeout(ctx, hourTimeout+dbTimeout)
+			// Execute stores, logs, and publishes the outcome; an error
+			// here means the outcome itself could not be stored, and it is
+			// logged.
+			_ = s.ops.Execute(rctx, r.opID, logging.ComponentRotation, func(ctx context.Context) (string, error) {
+				return s.reschedule(ctx, *r.reschedule)
+			})
+			cancel()
+			continue
+		}
+		builds = append(builds, r)
 		if r.force != nil {
 			force = append(force, *r.force)
 		}
@@ -103,7 +125,7 @@ func (s *Service) runBatch(ctx context.Context, batch []rebuild) {
 	defer cancel()
 	var summary string
 	var syncErr error
-	for i, r := range batch {
+	for i, r := range builds {
 		fn := func(ctx context.Context) (string, error) {
 			if i == 0 {
 				res, err := s.Sync(ctx, force)
@@ -111,8 +133,6 @@ func (s *Service) runBatch(ctx context.Context, batch []rebuild) {
 			}
 			return summary, syncErr
 		}
-		// Execute stores, logs, and publishes the outcome; an error here
-		// means the outcome itself could not be stored, and it is logged.
 		_ = s.ops.Execute(rctx, r.opID, logging.ComponentRotation, fn)
 	}
 }

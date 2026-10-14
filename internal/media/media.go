@@ -96,6 +96,12 @@ func (l *Library) Open(rel string) (*os.File, error) {
 	return f, nil
 }
 
+// abs returns the host path of the relative path rel. Only for handing a
+// file that Open accepted to ffmpeg or ffprobe, which take a path.
+func (l *Library) abs(rel string) string {
+	return filepath.Join(l.root, filepath.FromSlash(rel))
+}
+
 // isEscape reports the error of os.OpenInRoot for a symbolic link that
 // points outside the root. To the caller such a file does not exist.
 func isEscape(err error) bool {

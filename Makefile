@@ -5,9 +5,11 @@ GOLANGCI_LINT ?= golangci-lint
 REDOCLY       ?= npx --yes @redocly/cli@2.61.0
 COMPOSE       := $(DOCKER) compose -f docker-compose.dev.yml
 BIN           := bin/backend
+VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+IMAGE         ?= radio-atlantida-backend:dev
 
 .PHONY: help run build test test-integration lint fmt vuln migrate openapi openapi-lint \
-        db-up db-down stack-up stack-down stack-logs media env
+        image db-up db-down stack-up stack-down stack-logs media inbox live-check env
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -19,7 +21,12 @@ run: env ## Run the backend on the host against the dev stack
 	go run ./cmd/backend serve
 
 build: ## Build the binary into bin/
-	CGO_ENABLED=0 go build -trimpath -o $(BIN) ./cmd/backend
+	CGO_ENABLED=0 go build -trimpath -ldflags="-X main.version=$(VERSION)" -o $(BIN) ./cmd/backend
+
+image: ## Build the runtime image locally ($(IMAGE), version from git describe)
+	$(DOCKER) build -f docker/Dockerfile -t $(IMAGE) \
+		--build-arg VERSION=$(VERSION) --build-arg REVISION=$$(git rev-parse HEAD) \
+		--build-arg CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ) .
 
 test: ## Unit tests (race detector on)
 	go test -race ./...
@@ -66,3 +73,10 @@ stack-logs: ## Follow the dev stack logs
 
 media: ## Generate test MP3 files into .dev/media
 	dev/scripts/gen-media.sh ./.dev/media
+
+inbox: ## Generate inbox files with known quality issues into .dev/media/incoming
+	dev/scripts/gen-inbox.sh ./.dev/media
+
+live-check: ## Go live through a running backend with a test tone (WebRTC, no browser)
+	dev/scripts/gen-live.sh ./.dev/live-check.ogg
+	go run ./dev/livecheck -file ./.dev/live-check.ogg

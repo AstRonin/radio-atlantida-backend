@@ -22,9 +22,11 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/handlers"
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -106,8 +108,8 @@ func TestGetOperation(t *testing.T) {
 		"result_summary":"deleted 3 play log rows and 1 operations"}`, rec.Body.String())
 }
 
-// Until playout and outage detection exist, everything but the time is
-// unknown, and unknown is an explicit null (the update script treats it as on air).
+// Without its sources, everything but the time is unknown, and unknown is
+// an explicit null (the update script treats it as on air).
 func TestLiveStatusUnknown(t *testing.T) {
 	t.Parallel()
 	h, _ := newAPIRouter(t, &fakeOperations{}, t.TempDir())
@@ -297,6 +299,9 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/play-rules", "/api/play-rules/{id}", "/api/play-rules/{id}/targets",
 		"/api/separation-rules", "/api/separation-rules/{id}",
 		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/music-gain",
+		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
+		"/api/outages",
+		"/api/live/session", "/api/live/status",
 	} {
 		require.Contains(t, doc.Paths, p)
 	}
@@ -304,13 +309,19 @@ func TestOpenAPIDocument(t *testing.T) {
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 9)
+	require.Len(t, schemas["Event"].OneOf, 12)
+	require.Equal(t, []string{ws.EventLiveState}, schemas["LiveStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackPlanWarning}, schemas["TrackPlanWarningEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventFillerRequestCreated}, schemas["FillerRequestCreatedEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventNowPlaying}, schemas["NowPlayingEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventLiquidsoapState}, schemas["LiquidsoapStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventIcecastState}, schemas["IcecastStateEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventOutageStarted}, schemas["OutageStartedEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventOutageEnded}, schemas["OutageEndedEvent"].Properties["type"].Enum)
+	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindMissedItems.CompletedEvent())
+	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindReschedule.FailedEvent())
+	require.Equal(t, stringsOf(rotation.WarningCodes()), schemas["TrackPlanWarning"].Properties["code"].Enum)
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindClockBuild.CompletedEvent())
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindRetention.CompletedEvent())
 	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindRetention.FailedEvent())
@@ -340,6 +351,29 @@ func TestLogComponentEnumMatchesLogging(t *testing.T) {
 	}
 	require.Equal(t, stringsOf(logging.Components()), enums["component"])
 	require.Equal(t, logging.LevelNames(), enums["level"])
+}
+
+// The quality issue codes and fixes of the track DTO are the domain's: the
+// panel words and offers them by code.
+func TestTrackQualityEnumsMatchLibrary(t *testing.T) {
+	t.Parallel()
+	raw, err := OpenAPI("dev")
+	require.NoError(t, err)
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					Items struct {
+						Enum []string `json:"enum"`
+					} `json:"items"`
+				} `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	track := doc.Components.Schemas["Track"].Properties
+	require.Equal(t, stringsOf(library.QualityIssues()), track["quality_issues"].Items.Enum)
+	require.Equal(t, stringsOf([]library.Fix{library.FixLoudness, library.FixOptimize}), track["fixes"].Items.Enum)
 }
 
 func stringsOf[T ~string](vs []T) []string {

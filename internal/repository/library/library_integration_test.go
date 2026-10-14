@@ -194,3 +194,66 @@ func TestTrackHistoryAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, page)
 }
+
+func TestTrackQualityFilter(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	fresh := f.track("fresh", nil)
+	ok := f.track("ok", nil)
+	bad := f.track("bad", nil)
+	_, err := f.d.Pool.Exec(ctx, `
+UPDATE tracks SET analyzed_at = now(), quality_issues = '{}', quality_ok = true, codec = 'mp3', channels = 2,
+                  loudness_lufs = -16.1, true_peak_dbtp = -1.2, loudness_range_lu = 4.5
+WHERE id = $1`, ok)
+	require.NoError(t, err)
+	_, err = f.d.Pool.Exec(ctx, `
+UPDATE tracks SET analyzed_at = now(), quality_issues = '{loudness,low_bitrate}', quality_ok = false, source_bitrate = 96000
+WHERE id = $1`, bad)
+	require.NoError(t, err)
+
+	ids := func(quality string) []uint64 {
+		page, lerr := f.tracks.List(ctx, library.TrackFilter{Quality: quality, Limit: 10})
+		require.NoError(t, lerr)
+		var out []uint64
+		for _, tr := range page {
+			out = append(out, tr.ID)
+		}
+		return out
+	}
+	require.Equal(t, []uint64{ok}, ids(library.QualityOK))
+	require.Equal(t, []uint64{bad}, ids(library.QualityIssuesFound))
+	require.Equal(t, []uint64{fresh}, ids(library.QualityUnanalysed))
+	require.Len(t, ids(""), 3)
+
+	tr, err := f.tracks.Get(ctx, ok)
+	require.NoError(t, err)
+	require.Equal(t, "mp3", *tr.Codec)
+	require.Equal(t, 2, *tr.Channels)
+	require.Equal(t, -16.1, *tr.LoudnessLUFS)
+	require.Equal(t, -1.2, *tr.TruePeakDBTP)
+	require.Equal(t, 4.5, *tr.LoudnessRangeLU)
+	require.Empty(t, tr.QualityIssues)
+	require.NotNil(t, tr.AnalyzedAt)
+
+	tr, err = f.tracks.Get(ctx, bad)
+	require.NoError(t, err)
+	require.Equal(t, []library.QualityIssue{library.IssueLoudness, library.IssueLowBitrate}, tr.QualityIssues)
+	require.Equal(t, 96000, *tr.SourceBitrate)
+
+	tr, err = f.tracks.Get(ctx, fresh)
+	require.NoError(t, err)
+	require.Nil(t, tr.AnalyzedAt)
+	require.NotNil(t, tr.QualityIssues)
+	require.Empty(t, tr.QualityIssues)
+
+	// The database takes every issue code of the domain, and no other.
+	all := make([]string, 0, len(library.QualityIssues()))
+	for _, c := range library.QualityIssues() {
+		all = append(all, string(c))
+	}
+	_, err = f.d.Pool.Exec(ctx, `UPDATE tracks SET quality_issues = $2 WHERE id = $1`, bad, all)
+	require.NoError(t, err)
+	_, err = f.d.Pool.Exec(ctx, `UPDATE tracks SET quality_issues = '{noise}' WHERE id = $1`, bad)
+	require.ErrorContains(t, err, "ck_tracks_quality_issues")
+}

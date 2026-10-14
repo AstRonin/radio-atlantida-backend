@@ -264,12 +264,13 @@ func newHarness(t *testing.T, items ...Item) *harness {
 		store: newFakeStore(items...), ctl: newFakeControl(), pub: &publisher{}, now: h10.Add(10 * time.Second),
 		set: Settings{
 			Location: yerevan, Lookahead: 2, Prepush: 5 * time.Minute, FadeOutMS: 2500, MediaRoot: "/media", MusicGain: 1,
+			DuckGain: 0.2,
 		},
 	}
 	h.svc = NewService(txRunner{}, h.store, h.ctl,
 		func(context.Context) (Settings, error) { return h.set, nil }, h.pub,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return h.now }, rand.New(rand.NewPCG(1, 2))) //nolint:gosec // G404: emergency picks, not security
-	h.svc.push.shift = -1
+	h.svc.push.shift, h.svc.push.duck = -1, -1
 	return h
 }
 
@@ -418,6 +419,26 @@ func TestMusicGainSettingChange(t *testing.T) {
 	st, err := h.svc.Status(t.Context())
 	require.NoError(t, err)
 	require.InDelta(t, 0.5, *st.MusicGain, 0)
+}
+
+func TestDuckGain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Equal(t, "0.2", h.ctl.vars[varDuckGain])
+
+	// A settings change is set at the next pass.
+	h.set.DuckGain = 0
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Equal(t, "0.", h.ctl.vars[varDuckGain])
+
+	// A new connection (Liquidsoap restarted) gets it again.
+	delete(h.ctl.vars, varDuckGain)
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.NotContains(t, h.ctl.vars, varDuckGain, "same connection: not set again")
+	h.ctl.gen++
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Equal(t, "0.", h.ctl.vars[varDuckGain])
 }
 
 func TestCallbacks(t *testing.T) {

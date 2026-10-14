@@ -42,6 +42,9 @@ type Deps struct {
 	Grid       Grid
 	Rotation   Rotation
 	Playout    Playout
+	Outages    Outages
+	Ingest     Ingest
+	Live       Live
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -51,7 +54,7 @@ func Register(api huma.API, d Deps) {
 	log := logging.For(d.Log, logging.ComponentAPI)
 	registerOperations(api, log, d.Operations)
 	registerLogs(api, log, d.Logs)
-	registerStatus(api, log, d.Now)
+	registerStatus(api, log, d.Now, d.Live, d.Outages, d.Grid)
 	registerSettings(api, log, d.Settings)
 	registerPlaylistTypes(api, log, d.Library)
 	registerPlaylists(api, log, d.Library, d.PlayRules)
@@ -63,6 +66,9 @@ func Register(api huma.API, d Deps) {
 	registerGrid(api, log, d.Grid, d.Rotation)
 	registerRotation(api, log, d.Rotation)
 	registerPlayout(api, log, d.Playout)
+	registerOutages(api, log, d.Outages, d.Rotation)
+	registerIngest(api, log, d.Ingest)
+	registerLive(api, log, d.Live)
 }
 
 // Streaming is the operation metadata key of routes that stream a response

@@ -15,10 +15,13 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ingest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
+	"github.com/AstRonin/radio-atlantida-backend/internal/live"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
@@ -39,6 +42,7 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 		libraryInUse   *library.InUseError
 		ruleInUse      *playrules.InUseError
 		clockInUse     *clocks.InUseError
+		badOffer       *live.OfferError
 	)
 	switch {
 	case errors.As(err, &p):
@@ -63,6 +67,8 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 		for _, r := range clockInUse.UsedBy {
 			p.UsedBy = append(p.UsedBy, dto.EntityRef{Kind: r.Kind, ID: r.ID, Name: r.Name})
 		}
+	case errors.As(err, &badOffer):
+		p = dto.NewProblem(http.StatusUnprocessableEntity, errcodes.LiveOfferInvalid, badOffer.Error())
 	case errors.Is(err, media.ErrFileNotFound):
 		// The manager sees a popup; the log keeps the path (§6.6).
 		log.WarnContext(ctx, "track file not found",
@@ -131,6 +137,12 @@ var refusals = []refusal{
 	{rotation.ErrNotAnswerable, http.StatusConflict, errcodes.FillerRequestNotAnswerable},
 	{rotation.ErrHourStarted, http.StatusConflict, errcodes.HourStarted},
 	{playout.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiquidsoapUnavailable},
+	{outage.ErrMissedNotFound, http.StatusNotFound, errcodes.MissedItemNotFound},
+	{outage.ErrMissedResolved, http.StatusConflict, errcodes.MissedItemResolved},
+	{ingest.ErrRunning, http.StatusConflict, errcodes.MediaOperationRunning},
+	{ingest.ErrToolsUnavailable, http.StatusServiceUnavailable, errcodes.MediaToolsUnavailable},
+	{live.ErrSessionActive, http.StatusConflict, errcodes.LiveSessionActive},
+	{live.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiveUnavailable},
 }
 
 func refusalFor(err error) *refusal {

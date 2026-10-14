@@ -19,6 +19,7 @@ type Grid interface {
 	Assign(ctx context.Context, in grid.AssignInput) (grid.AssignResult, error)
 	DeleteSlot(ctx context.Context, id uint64) error
 	Schedule(ctx context.Context, from, to time.Time) ([]grid.ScheduledHour, error)
+	Hours(ctx context.Context, from, to time.Time) ([]grid.ScheduledHour, error)
 }
 
 type listGridSlotsInput struct {

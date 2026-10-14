@@ -23,6 +23,7 @@ type Rotation interface {
 	Requests(ctx context.Context, status rotation.RequestStatus) ([]rotation.FillerRequest, error)
 	Answer(ctx context.Context, id, trackID uint64) (rotation.FillerRequest, error)
 	PoolRefilled(ctx context.Context, clockID uint64) error
+	Rescheduler
 }
 
 type trackPlanInput struct {

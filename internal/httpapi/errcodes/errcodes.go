@@ -107,6 +107,24 @@ const (
 	// LiquidsoapUnavailable: the backend cannot reach Liquidsoap's control
 	// interface; the command was not applied.
 	LiquidsoapUnavailable Problem = "liquidsoap_unavailable"
+	// MissedItemNotFound: no missed item with that ID.
+	MissedItemNotFound Problem = "missed_item_not_found"
+	// MissedItemResolved: the missed item was already rescheduled or
+	// dismissed.
+	MissedItemResolved Problem = "missed_item_resolved"
+	// MediaOperationRunning: an import, analysis, or transcode is running;
+	// they run one at a time. Wait for its terminal event.
+	MediaOperationRunning Problem = "media_operation_running"
+	// MediaToolsUnavailable: ffmpeg or ffprobe is not installed where the
+	// backend runs.
+	MediaToolsUnavailable Problem = "media_tools_unavailable"
+	// LiveSessionActive: a live session is running; send takeover to end
+	// it and start a new one.
+	LiveSessionActive Problem = "live_session_active"
+	// LiveOfferInvalid: the WebRTC offer is not an SDP or has no Opus audio.
+	LiveOfferInvalid Problem = "live_offer_invalid"
+	// LiveUnavailable: the live voice bridge could not open its UDP port.
+	LiveUnavailable Problem = "live_unavailable"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -126,6 +144,9 @@ func Problems() []Problem {
 		GridSlotNotFound, GridConflict,
 		FillerRequestNotFound, FillerRequestClosed, FillerRequestNotAnswerable, HourStarted,
 		LiquidsoapUnavailable,
+		MissedItemNotFound, MissedItemResolved,
+		MediaOperationRunning, MediaToolsUnavailable,
+		LiveSessionActive, LiveOfferInvalid, LiveUnavailable,
 	}
 }
 

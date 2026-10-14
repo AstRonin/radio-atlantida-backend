@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-12)
+Status: Draft (v7-15)
 Last updated: 2026-10-14
 
 ## 1. Overview
@@ -115,7 +115,7 @@ Responsibilities:
 
 **Configuration split**
 
-- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`), and the host paths `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. The host paths are set once in the Compose `.env` file and never change. `PLAYOUT_JOURNAL_ROOT` is the host directory to which Liquidsoap writes its playout journal (§7.1); the backend mounts it read-only. All other backend settings are managed in the admin panel (see §6.3).
+- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`), and the host paths `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. The host paths are set once in the Compose `.env` file and never change. Like the API listen address (`HTTP_ADDR`), the UDP address of the live voice bridge (`LIVE_UDP_ADDR`) and the addresses on which the browser reaches it (`LIVE_PUBLIC_IPS`) are environment variables, because they belong to the compose port mapping (v7-15, `docs/phase-12-plan.md` §2). `PLAYOUT_JOURNAL_ROOT` is the host directory to which Liquidsoap writes its playout journal (§7.1); the backend mounts it read-only. All other backend settings are managed in the admin panel (see §6.3).
 - **Admin settings (PostgreSQL)**: the Icecast output profile, station timezone, fade length, outage detection thresholds, and other backend settings are edited in the Angular admin panel and stored in the database (see §6.3).
 
 **Precedence (highest first)**
@@ -138,6 +138,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **playlists**: id, name, type_id (FK to `playlist_types`), created_at.
 - **artists**: id, name. Used for artist separation rules.
 - **tracks**: id, title, artist_id, duration_ms, file_path (relative to the media root, see §8.7), format, bitrate, sample_rate, quality_ok (bool), quality_notes, type_id (FK to `playlist_types`), file_checksum, created_at.
+  - Analysis columns (v7-14, `docs/phase-11-plan.md` §2): codec, channels, loudness_lufs, true_peak_dbtp, loudness_range_lu (EBU R128), source_bitrate (the lossy file a transcoded file was made from), quality_issues (`text[]` of `format`, `sample_rate`, `channels`, `loudness`, `true_peak`, `low_bitrate`, `file_missing`), analyzed_at. An analysis sets `quality_ok` to "no issues"; a manual value lasts until the next analysis. `file_checksum` is the SHA-256 of the file, indexed for the duplicate check of an import.
 - **track_playlists**: track_id, playlist_id (many-to-many). A track may belong to several playlists.
 - **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), default_filler_mode (nullable: `random`, `playlist`, or `artist`; null falls back to the global filler setting, §6.3), default_filler_playlist_id (nullable, FK to `playlists`; set only for `playlist`), default_filler_artist_id (nullable, FK to `artists`; set only for `artist`), updated_at. The default mode is chosen in the clock editor (§6.2). It applies when the filler pool is empty or a filler reminder expires (§7); `ask` and `pool` are not allowed here because they would fall back to themselves.
 - **clock_elements**: id, clock_id, position, placement (enum: `flow` (default), `start`, `end`, `fixed`), fixed_minute (int 0 to 59, nullable; required when `placement = fixed`), fixed_tolerance_ms (int, default 60000; applies to the start of a fixed element), nominal_duration_ms, duration_tolerance_ms (int, default 30000), filler_mode (enum: `none`, `ask`, `random`, `playlist`, `artist`, `pool`), filler_playlist_id (nullable, FK to `playlists`; set only for `playlist` mode), filler_artist_id (nullable, FK to `artists`; set only for `artist` mode), created_at. Stored as rows; a JSONB column may hold optional per-element settings.
@@ -158,6 +159,8 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
   - `missed` means the item was planned but did not reach the air because of a broadcast outage (see §7.1).
   - `clock_element_id` (nullable, FK to `clock_elements`, `ON DELETE SET NULL`): the element the item was planned for; null for filler. `filler_pool_id` (nullable, FK to `clock_filler_pool`, `ON DELETE SET NULL`): the pool row a `filler_pool` item took; a rebuild of the hour sets that row's `used_at` back to null (v7-11).
 - **plan_hours**: hour_start_utc (primary key), clock_id (FK, `ON DELETE CASCADE`), clock_updated_at, grid_slot_id (nullable, `ON DELETE SET NULL`), seed, built_at, filler_request_id (nullable, `ON DELETE SET NULL`). One row per built hour of the track plan (v7-11, `docs/phase-8-plan.md` §2). An hour is stale when the grid now assigns another clock or none, or the clock's `updated_at` changed; the seed makes a rebuild after a reminder answer reproducible.
+- **hour_inserts**: id, hour_start_utc, track_id (FK, `ON DELETE RESTRICT`), missed_id (nullable, FK to `play_log`, `ON DELETE SET NULL`), placement (`start`, `end`, `fixed`), fixed_minute, fixed_tolerance_ms, created_at. One-time elements of a single hour: a missed item rescheduled into it (§7.1, §7.2). Every build of the hour places them; the clock template is not changed (v7-13, `docs/phase-10-plan.md` §2).
+- **backend_heartbeat**: one row, alive_at. Written by the outage detector every 30 seconds, so a restart can tell how long the backend was down (v7-13).
 - **broadcast_outages**: id, started_at (timestamptz, UTC), ended_at (timestamptz, UTC, nullable while the outage is open), detected_by (`icecast`, `liquidsoap_callback`, `liquidsoap_control`, `backend`), component (`icecast`, `liquidsoap`, `backend`, `network`), reason (short text, nullable), reconciled_at (timestamptz, nullable). One row per interruption. An open outage has `ended_at` null.
 - **play_rules**: id, name, window_from (time, nullable), window_to (time, nullable), weekdays (array of 1 to 7, nullable; null means every day), min_interval_minutes (int, nullable), max_per_hour (int, nullable), notes, created_at. A reusable, named rule (see §7.3). Times are station local time (§10.2).
   - Every constraint is optional, but at least one must be set. `window_from` and `window_to` are set together or not at all. A window may cross midnight (for example, 22:00 to 02:00); the weekday then refers to the day on which the window starts.
@@ -313,12 +316,13 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Station**: timezone (default `Asia/Yerevan`), station name.
 - **Playlist types**: the list of types (system and custom). The manager can add a type, rename it, and delete a custom type that is not in use. System types can be renamed but not deleted (§4).
 - **Stream output (Icecast)**: host, port, mount point, codec, bitrate, sample rate, channels, loudness target, stream metadata, HLS on or off.
-- **Liquidsoap**: default music gain, fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
+- **Liquidsoap**: default music gain, the music level under live voice (`liquidsoap.duck_gain`, default 0.2; v7-15), fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
 - **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and its reminders cannot be answered.
 - **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults, the shortest gap that gets filler (`rotation.min_filler_gap_ms`, default 10 s), and the limit of the emergency tolerance relaxation (`rotation.max_relaxed_tolerance_ms`, default 120 s). The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
 - **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
 - **Retention**: play log days (default 10), application log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1).
+- **Import** (v7-14): the inbox folder (`import.inbox_dir`, default `incoming`) and the library folder (`import.library_dir`, default `library`) under the media root; the broadcast standard of track files: target codec (`mp3`, `aac`, or `vorbis`; default `mp3`), bitrate (320 kbps), sample rate (44100 Hz), channels (2); the lowest acceptable bitrate of a lossy file (128 kbps), the loudness tolerance around `stream.loudness_target_lufs` (2 LU), and the highest true peak (−1 dBTP).
 - Any future backend setting follows the same pattern.
 
 Playlist types are data in the `playlist_types` table, not entries in the `settings` table. They are listed on the settings pages for convenience, and they are served by their own endpoints (§6.4). A clock's default filler mode is data of the clock (§4), so it is edited in the clock editor, not on the settings pages.
@@ -393,6 +397,29 @@ Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead o
 | `GET /api/playout/status` | Control link, Icecast output, now playing, items waiting in Liquidsoap's queues, music gain |
 | `PUT /api/playout/music-gain` | Body: `gain` (0 to 1). Sets the live music gain (§8.5); refused with `liquidsoap_unavailable` when the control link is down |
 
+**Implemented in v7-13 (`docs/phase-10-plan.md` §4).** The v7-6 endpoints above are implemented with these details: `GET /api/play-history` takes `from` and `to` (at most 31 days), an optional `status`, and is keyset paginated (`limit`, `cursor`, `next_cursor`); `GET /api/outages` takes at most 7 days; reschedule refuses the checks that need no build per field (422) and a resolved item with 409 `missed_item_resolved`, and its operation fails when the track breaks a rule at its place or does not fit whole. `POST /api/playout/callback` also takes a `heartbeat` event, sent by Liquidsoap every 5 seconds and not journaled.
+
+**Endpoints added in v7-14 (import, analysis, transcoding, `docs/phase-11-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/import/inbox` | Files waiting in the inbox folder (at most 1,000) |
+| `POST /api/import` | Body: `type_id`, `playlist_ids`. Imports the inbox; returns `accepted` with an operation ID (`import`) |
+| `POST /api/tracks/analyse` | Body: `track_ids` (absent: every track never analysed), `force`. Returns `accepted` (`analyse`) |
+| `POST /api/tracks/transcode` | Body: `track_ids`, `fix` (`loudness` or `optimize`), `output` (`replace` or `copy`). Returns `accepted` (`transcode`) |
+
+Track responses carry the analysis columns, `quality_issues`, and `fixes` (the transcodes that remove at least one issue); `GET /api/tracks` takes `quality` (`ok`, `issues`, `unanalysed`). Import, analysis, and transcode run one at a time: a second request is refused with 409 `media_operation_running`; without ffmpeg they are refused with 503 `media_tools_unavailable`.
+
+**Endpoints added in v7-15 (live voice, `docs/phase-12-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /api/live/session` | Body: `offer` (the browser's WebRTC SDP, candidates gathered), `takeover`. Returns the answer SDP and the session ID. One session at a time: 409 `live_session_active` unless `takeover`; 422 `live_offer_invalid`; 503 `live_unavailable` |
+| `DELETE /api/live/session` | Ends the live session. Synchronous |
+| `GET /api/live/status` | State of the live input (`off`, `connecting`, `on_air`, `reconnecting`), session, harbor connection, packets |
+
+`GET /api/status/live` now answers `on_air` (a live session sends audio), `open_outage_id`, and `current_clock` (the clock the grid assigns to the current hour). The live state is sent as the `live.state` event.
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -413,7 +440,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - The HTTP request that starts the operation returns at once with an operation ID and status `accepted`. It does not wait for the work to complete.
 - When the operation finishes, the backend sends exactly one terminal event over the WebSocket hub: either a success event or a failure event. The event carries the operation ID.
 - Long operations may also send progress events (for example, "12 of 40 files analysed"). Progress is optional. The terminal event is mandatory.
-- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.marked`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`.
+- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.completed`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`, `analyse.completed`, `transcode.completed` (and their `.failed` and `.progress` events).
 - A failure event contains a short error message, the component that failed (§10.1), and the UTC time. The same error is written to the log file (§10.1) and shown in the panel as an error popup (§6, §10.1).
 - A success event contains the operation ID, a short result summary, and the UTC time, so the panel can refresh the affected view.
 - The event schemas are part of the OpenAPI contract (§6.4). Each event type is a named schema, so the TypeScript client has typed handlers for every event.
@@ -423,6 +450,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - `broadcast_outage.started`: outage opened, with `started_at`, `component`, and `reason`.
 - `broadcast_outage.ended`: outage closed, with `started_at`, `ended_at`, and the number of items marked missed.
 - `icecast.state`: connection state of the Icecast output (connected, disconnected, reconnecting).
+- `live.state`: state of the live voice input (`off`, `connecting`, `on_air`, `reconnecting`), with the reason when a session ends (v7-15).
 
 **Operation tracking**
 
@@ -434,7 +462,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 
 - The operator saves a clock. The save returns `accepted` with an operation ID. When the clock's hours are recalculated, the backend sends `clock_build.completed`. If a track fails the rules and no candidate is found, it sends `clock_build.failed` with the reason.
 - The rotation engine extends the track plan for the next hour. On success it sends `track_plan.completed`. On failure it sends `track_plan.failed` and creates a filler request or emergency warning as described in §7.
-- Icecast drops. The outage detector opens an outage and sends `broadcast_outage.started`. When Icecast reconnects, the outage closes, the missed items are marked, and the backend sends `missed_items.marked` with the count.
+- Icecast drops. The outage detector opens an outage and sends `broadcast_outage.started`. When Icecast reconnects, the outage closes, the missed items are marked, and the backend sends `missed_items.completed` with the count, then `broadcast_outage.ended` with the same count.
 
 **Scope**
 
@@ -509,18 +537,21 @@ An outage is a period when the station's audio did not reach listeners, for exam
 - The outage detector runs in the backend and watches three signals:
   1. **Icecast state**: the backend checks the mount point on the Icecast server at the configured interval (§6.3). Liquidsoap also reports its output connection state through its callbacks (§8.3).
   2. **Liquidsoap callbacks**: track start and end events. If no callback arrives within the heartbeat timeout while the station should be on air, the detector treats the playout as stalled.
-  3. **Liquidsoap control link**: the backend's connection to the control interface (§8.1). Loss of this link is treated as an outage if the callbacks also stop.
+  3. **Liquidsoap control link**: the backend's connection to the control interface (§8.1). Loss of this link for longer than the heartbeat timeout is treated as an outage while planned items are due: Liquidsoap keeps streaming (its queue, then the emergency source), but planned items cannot be pushed, so they become missed and the manager can reschedule them (decided 2026-10-14, v7-13).
+- Liquidsoap sends a heartbeat callback every 5 seconds, so a stalled playout is told apart from a long track (v7-13).
 - An outage opens after the configured number of consecutive failed checks, so a single dropped request does not create a false outage. It is written to `broadcast_outages` with `started_at`, `detected_by`, and `component`.
 - The outage closes when all signals report normal operation again. `ended_at` is set and `broadcast_outage.ended` is sent (§6.5).
 - Detection must not block playout. It runs in its own goroutine and only writes state.
 
 **Marking missed items**
 
-- When an outage closes, every `scheduled_items` row in status `planned`, `queued`, or `aired` whose planned window (`planned_start_utc` to `planned_start_utc` + `planned_out_ms`) overlaps the outage period is examined.
+- When an outage closes, every `scheduled_items` row in status `planned` or `queued` (aired items have already moved to `play_log`) whose planned window (`planned_start_utc` to `planned_start_utc` + `planned_out_ms`) overlaps the outage period is examined.
 - An item is marked `missed` if it has no confirmed playback in the local playout journal (§8.3). Its `outage_id` and `missed_at` are set, and the reason is stored from the outage.
 - Items that were confirmed as played (fully or partly) are not marked missed. A partly played item is recorded with `status = truncated` and its actual duration, as described in §7.
-- Marking runs as an asynchronous operation (`missed_items.marked` or `missed_items.failed`, §6.5).
+- Marking runs as an asynchronous operation (`missed_items.completed` or `missed_items.failed`, §6.5).
 - Missed items are moved to `play_log` with `status = missed`, `resolution = 'open'`, and `outage_id` set, so the played-tracks list shows them next to aired items.
+
+**Implementation decisions (v7-13, `docs/phase-10-plan.md` §2).** The journal decides what aired: an item Liquidsoap started counts as aired even if Icecast was down at that moment. Items that did not air while no outage was open (a leftover flushed at the hour switch, an item more than 30 seconds late) are dropped from the plan like tracks removed by overflow: not missed, no separation count. Before marking or dropping, the journal of the window is replayed through the same idempotent logic as the callbacks, so no cursor is kept. At startup, if the backend was down longer than the heartbeat timeout and planned items did not air, the downtime is recorded as a closed outage (`component = backend`) and its items are marked missed.
 
 **Reconciliation after backend downtime**
 
@@ -651,10 +682,12 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 - **Latency target:** at most 1 second end to end, from microphone to air. The system runs on a single local machine with local Docker, so the network path adds negligible delay.
 - Live voice is not an automation item. Live time is not marked as missed and does not appear as a missed item. If the live session drops during an outage, the automation items for that time are handled by §7.1.
 
+**Implementation (v7-15, `docs/phase-12-plan.md` §2).** The bridge does not decode: the browser's Opus packets are written unchanged as an Ogg/Opus stream (channel count taken from the packets) and sent with the Icecast source protocol to the harbor mount `live`, with the Liquidsoap control credentials. Signalling is one HTTP exchange without trickle ICE; every session uses one UDP port (`LIVE_UDP_ADDR`), and the host candidates carry `LIVE_PUBLIC_IPS`, so the bridge works behind the Docker port mapping. No STUN or TURN (§10). One session at a time; a new offer can take over. A session ends when it is stopped, replaced, gets no audio for 10 s after the answer, has a 5 s dropout, or the backend shuts down. The harbor buffer is 0.3 s. Nothing is written to `play_log`; the log records each session.
+
 ### 8.5 Mixing, ducking, and fades
 
 - Music gain is a variable inside Liquidsoap (for example `music_gain`), changed at runtime by Go through the control interface. Typical values: 1.0 (normal), 0.2 (background under voice), 0.0 (music off).
-- Automatic ducking (lowering music when voice is present) is implemented inside Liquidsoap, so control-path latency does not affect it.
+- Automatic ducking (lowering music when voice is present) is implemented inside Liquidsoap, so control-path latency does not affect it. The script mixes with `smooth_add`: while the live input has a source, automation fades over 0.5 s to `duck_gain` (setting `liquidsoap.duck_gain`, set by the backend on connect) and back afterwards (v7-15).
 - Go sends explicit commands only for scenarios such as "music off for interview" or "music back on".
 - Fades are defined in Liquidsoap to avoid clicks. The end-of-clock fade-out uses `fade_out_ms` (default 2500 ms) and finishes at the hour boundary.
 
@@ -671,9 +704,9 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 Audio files are about 800 files and must not be copied into Docker images or volumes.
 
 - Media files stay on the host filesystem, outside Docker, in a single directory configured as `MEDIA_ROOT`.
-- The host directory is bind-mounted into the containers that need it: `liquidsoap` (read-only) and `backend` (read-only for analysis, read-write only if uploads go through the panel).
+- The host directory is bind-mounted into the containers that need it: `liquidsoap` (read-only) and `backend` (read-write: an import moves files from the inbox folder into the library folder, and a transcode writes fixed files; v7-14).
 - PostgreSQL stores only metadata and the path relative to `MEDIA_ROOT`. Relative paths let the same database work on different machines where the absolute location differs.
-- Import and quality analysis (ffmpeg) read files from the mounted directory. Transcoded output is written to a separate output directory on the host, not inside a container.
+- Import and quality analysis (ffmpeg) read files from the mounted directory. New files arrive through an inbox folder under the media root; there is no upload through the panel. Transcoded output is written under the media root, so Liquidsoap can play it: the manager chooses whether it replaces the original or is written as `<name>.optimal.<ext>` next to it, the original then staying on disk (decided 2026-10-14, v7-14, `docs/phase-11-plan.md` §2). It is written to a hidden temporary file first and renamed into place, and a track that is queued, on air, or about to be pushed is skipped.
 - Checksums are stored so that a moved or changed file can be detected.
 - The backend also streams a track to the panel for preview, through the same read-only mount (§6.6).
 
@@ -740,6 +773,7 @@ The production machine runs the stack from the **radio-atlantida-deploy** reposi
 - `radio-atlantida-backend` (Go) and `radio-atlantida-frontend` (Angular) are built by CI (GitHub Actions) on tagged releases and pushed to GitHub Container Registry as `ghcr.io/astronin/radio-atlantida-backend:<tag>` and `ghcr.io/astronin/radio-atlantida-frontend:<tag>`.
 - Both images are built from the same tag, so a release is one version number for the whole system. The OpenAPI specification and the generated TypeScript client are part of that same tag (§6.4).
 - Images are private. The production machine logs in with a read-only token (`read:packages`) stored in `.env`.
+- **Implemented in Phase 13 (`docs/phase-13-plan.md`).** The Git tag is `vX.Y.Z`; the image tag and the version are `X.Y.Z` (no `latest`, never overwritten). The release workflow runs the full CI, builds `linux/amd64`, and attaches the `openapi.json` produced by the shipped image to the GitHub release `vX.Y.Z`; the frontend copies it into its snapshot. `backend version` prints the version.
 
 **Deploy repository contents (`radio-atlantida-deploy`)**
 
@@ -820,7 +854,7 @@ Steps, in order:
 
 - Logs are written as JSON Lines: one JSON object per line. The panel and tools like `jq` can read them directly.
 - Library: `log/slog` from the Go standard library, with its JSON handler. It needs no extra dependency and is fast enough for this volume. `zap` or `zerolog` are alternatives if profiling shows a need.
-- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `filler`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`. API errors also carry `request_id`.
+- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `filler`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`, `media` (import, analysis, transcoding; v7-14). API errors also carry `request_id`.
 - Secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`) are never logged. A handler masks any field with a sensitive name.
 
 **What is logged**
@@ -911,6 +945,8 @@ The open questions from the previous version are closed. The decisions are recor
 25. **Journal path is an environment variable.** `PLAYOUT_JOURNAL_ROOT` is a host path set in `.env`, like `MEDIA_ROOT` and `LOG_ROOT`. Liquidsoap writes the journal to it, and the backend reads it read-only (§3.1, §7.1, §9).
 
 26. **Repository layer.** All SQL lives in `internal/repository/<domain>`, one package per domain, named as the domain package. Domain code depends on interfaces it declares itself, and the repositories implement them. Reason: business rules stay free of SQL and driver errors, and a domain rename changes the domain and its repository in the same change (§5.1).
+27. **Import and transcoding.** New files arrive through an inbox folder under the media root and are moved into the library folder on import; there is no upload through the panel. Analysis flags problems against the broadcast standard set in the admin settings, and nothing changes audio without the manager: the panel offers "Fix loudness" and "Optimize track", and the manager chooses whether the fixed file replaces the original or is kept as an optimal copy next to it (§8.7, decided 2026-10-14).
+28. **Live voice without transcoding.** The bridge relays the browser's Opus packets to the harbor as Ogg/Opus, without decoding, using `pion/webrtc` (pure Go, no cgo). Its UDP port and public addresses are environment variables like `HTTP_ADDR`, because they belong to the compose port mapping (§8.4, decided 2026-10-14).
 
 ## 12. Non-functional Requirements
 

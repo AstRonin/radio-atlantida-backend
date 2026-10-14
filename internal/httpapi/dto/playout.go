@@ -6,7 +6,7 @@ import "time"
 // journal (§8.3, dev/liquidsoap/radio.liq). Liquidsoap sends absent
 // annotations as empty strings.
 type PlayoutCallbackBody struct {
-	Event     string    `json:"event" enum:"start,end,output"`
+	Event     string    `json:"event" enum:"start,end,output,heartbeat" doc:"heartbeat: sent every few seconds while Liquidsoap runs (not journaled)."`
 	Time      time.Time `json:"time" doc:"When Liquidsoap wrote the event (UTC)."`
 	Source    string    `json:"source,omitempty" enum:"plan,emergency" doc:"start and end: a plan item or an emergency track."`
 	RID       string    `json:"rid,omitempty" doc:"Liquidsoap request ID."`

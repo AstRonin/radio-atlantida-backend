@@ -145,16 +145,24 @@ WHERE scheduled_item_id = $1 AND ended_at IS NULL AND status <> 'missed'`, itemI
 }
 
 // LogEmergency logs an emergency track that played (§8.6): no plan fields.
+// The start is computed from the journal line, so a replayed line hits
+// uq_play_log_emergency and changes nothing.
 func (s *Store) LogEmergency(ctx context.Context, trackID uint64, startedAt time.Time, elapsedMS int) error {
-	tag, err := s.q.Exec(ctx, `INSERT INTO play_log (track_id, artist_id, status, started_at, ended_at,
-                      actual_duration_ms, source)
-SELECT t.id, t.artist_id, 'aired', $2::timestamptz, $2::timestamptz + make_interval(secs => $3::integer / 1000.0),
-       $3::integer, 'emergency'
-FROM tracks t WHERE t.id = $1`, trackID, startedAt, elapsedMS)
+	var found bool
+	err := s.q.QueryRow(ctx, `WITH track AS (
+    SELECT id, artist_id FROM tracks WHERE id = $1
+), logged AS (
+    INSERT INTO play_log (track_id, artist_id, status, started_at, ended_at, actual_duration_ms, source)
+    SELECT t.id, t.artist_id, 'aired', $2::timestamptz, $2::timestamptz + make_interval(secs => $3::integer / 1000.0),
+           $3::integer, 'emergency'
+    FROM track t
+    ON CONFLICT (track_id, started_at) WHERE source = 'emergency' DO NOTHING
+)
+SELECT EXISTS (SELECT 1 FROM track)`, trackID, startedAt, elapsedMS).Scan(&found)
 	if err != nil {
 		return fmt.Errorf("log emergency track %d: %w", trackID, err)
 	}
-	if tag.RowsAffected() == 0 {
+	if !found {
 		return fmt.Errorf("log emergency track %d: %w", trackID, errNoTrack)
 	}
 	return nil

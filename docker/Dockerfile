@@ -4,15 +4,28 @@
 ARG GO_VERSION=1.27.2
 
 FROM golang:${GO_VERSION}-trixie AS build
+# The release version (the tag without the leading v); `backend version`
+# and the OpenAPI document report it.
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/backend ./cmd/backend
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/backend ./cmd/backend
 
 FROM debian:trixie-20261005-slim
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=unknown
+# source links the GHCR package to the repository, so access to the private
+# image follows the repository's.
+LABEL org.opencontainers.image.title="radio-atlantida-backend" \
+      org.opencontainers.image.source="https://github.com/AstRonin/radio-atlantida-backend" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}"
 # ffmpeg: import, analysis, transcoding. tzdata: station timezone validation.
 # curl: container health check.
 RUN apt-get update \

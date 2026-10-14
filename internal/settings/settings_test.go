@@ -99,6 +99,7 @@ func TestDefaultsMatchDevStack(t *testing.T) {
 		"liquidsoap.control_port": 1234,           // liquidsoap TELNET_PORT
 		"liquidsoap.harbor_port":  8005,           // liquidsoap HARBOR_PORT
 		"liquidsoap.media_root":   "/media",       // liquidsoap volume MEDIA_ROOT:/media
+		"liquidsoap.duck_gain":    0.2,            // dev/liquidsoap/radio.liq duck_gain
 		"station.timezone":        "Asia/Yerevan", // §10.2
 		"liquidsoap.fade_out_ms":  2500,           // §6.3
 	}
@@ -115,7 +116,7 @@ func TestRegistryDefinitions(t *testing.T) {
 	keyPattern := regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`) // ck_settings_key
 	groups := []settings.Group{
 		settings.GroupStation, settings.GroupStream, settings.GroupLiquidsoap, settings.GroupRotation,
-		settings.GroupFiller, settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout,
+		settings.GroupFiller, settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout, settings.GroupImport,
 	}
 	reg := settings.NewRegistry()
 	for _, d := range append(reg.Settings(), reg.Secrets()...) {

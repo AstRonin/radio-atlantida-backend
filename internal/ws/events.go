@@ -108,7 +108,7 @@ type TrackPlanWarningData struct {
 
 // TrackPlanWarning is one warning of a build. The panel translates by code.
 type TrackPlanWarning struct {
-	Code         string  `json:"code" enum:"element_blocked_by_play_rules,element_tolerance_relaxed,element_general_pool,element_emergency,pool_track_refused,pool_empty,filler_waiting,gap_unfilled"`
+	Code         string  `json:"code" enum:"element_blocked_by_play_rules,element_tolerance_relaxed,element_general_pool,element_emergency,pool_track_refused,pool_empty,filler_waiting,gap_unfilled,element_replaced,reschedule_dropped"`
 	Message      string  `json:"message" doc:"English message for developers."`
 	ElementIndex *int    `json:"element_index,omitempty" doc:"Index into the clock's elements."`
 	SegmentIndex *int    `json:"segment_index,omitempty"`
@@ -195,4 +195,64 @@ type IcecastStateEvent struct {
 // IcecastStateData is the payload of [IcecastStateEvent].
 type IcecastStateData struct {
 	State string `json:"state" enum:"connected,disconnected"`
+}
+
+// EventOutageStarted is the type of [OutageStartedEvent].
+const EventOutageStarted = "broadcast_outage.started"
+
+// EventOutageEnded is the type of [OutageEndedEvent].
+const EventOutageEnded = "broadcast_outage.ended"
+
+// OutageStartedEvent reports an outage that has just opened (§6.5, §7.1).
+// The panel shows a banner until the outage ends.
+type OutageStartedEvent struct {
+	Type string            `json:"type" doc:"Always broadcast_outage.started."`
+	Time time.Time         `json:"time"`
+	Data OutageStartedData `json:"data"`
+}
+
+// OutageStartedData is the payload of [OutageStartedEvent].
+type OutageStartedData struct {
+	OutageID   uint64    `json:"outage_id"`
+	StartedAt  time.Time `json:"started_at"`
+	Component  string    `json:"component" enum:"icecast,liquidsoap,backend,network"`
+	DetectedBy string    `json:"detected_by" enum:"icecast,liquidsoap_callback,liquidsoap_control,backend"`
+	Reason     *string   `json:"reason,omitempty"`
+}
+
+// OutageEndedEvent reports an outage that has closed, after its missed
+// items were marked (§6.5, §7.1).
+type OutageEndedEvent struct {
+	Type string          `json:"type" doc:"Always broadcast_outage.ended."`
+	Time time.Time       `json:"time"`
+	Data OutageEndedData `json:"data"`
+}
+
+// OutageEndedData is the payload of [OutageEndedEvent].
+type OutageEndedData struct {
+	OutageID  uint64    `json:"outage_id"`
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at"`
+	Component string    `json:"component" enum:"icecast,liquidsoap,backend,network"`
+	// MissedCount is absent when the marking failed; it is retried, and the
+	// missed_items operation events report the result.
+	MissedCount *int `json:"missed_count,omitempty" doc:"Items marked missed; absent when the marking failed (it is retried)."`
+}
+
+// EventLiveState is the type of [LiveStateEvent].
+const EventLiveState = "live.state"
+
+// LiveStateEvent reports a change of the live voice input (§8.4).
+type LiveStateEvent struct {
+	Type string        `json:"type" doc:"Always live.state."`
+	Time time.Time     `json:"time"`
+	Data LiveStateData `json:"data"`
+}
+
+// LiveStateData is the payload of [LiveStateEvent].
+type LiveStateData struct {
+	State      string     `json:"state" enum:"off,connecting,on_air,reconnecting" doc:"connecting: waiting for audio; on_air: audio reaches Liquidsoap; reconnecting: audio arrives but Liquidsoap's live input is not reachable."`
+	SessionID  *uint64    `json:"session_id,omitempty" doc:"Absent when off."`
+	OnAirSince *time.Time `json:"on_air_since,omitempty" doc:"When audio first reached Liquidsoap in this session."`
+	Reason     *string    `json:"reason,omitempty" enum:"stopped,replaced,no_audio,dropout,shutdown" doc:"Why the session ended; only with state off."`
 }

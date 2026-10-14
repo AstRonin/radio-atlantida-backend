@@ -2,6 +2,7 @@ package rotation
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"time"
@@ -46,6 +47,8 @@ type builder struct {
 	plan HourPlan
 	// answered: the answer track was offered to a segment.
 	answered bool
+	// placed are the inserts whose pinned track is planned.
+	placed map[uint64]bool
 }
 
 // Build plans one hour of a clock (§7, §7.2). It is deterministic for a
@@ -64,10 +67,11 @@ type builder struct {
 //   - A gap before the segment's earliest end is closed with filler.
 func Build(in HourInput) HourPlan {
 	b := &builder{
-		in:   in,
-		rng:  rand.New(rand.NewPCG(in.Seed, in.Seed^0x9e3779b97f4a7c15)), //nolint:gosec // G404: rotation needs a seeded, reproducible source, not a secure one
-		chk:  newChecker(in),
-		pool: slices.Clone(in.Pool),
+		in:     in,
+		rng:    rand.New(rand.NewPCG(in.Seed, in.Seed^0x9e3779b97f4a7c15)), //nolint:gosec // G404: rotation needs a seeded, reproducible source, not a secure one
+		chk:    newChecker(in),
+		pool:   slices.Clone(in.Pool),
+		placed: map[uint64]bool{},
 	}
 	elements := in.Clock.Elements
 	segs := in.Layout.Segments
@@ -89,6 +93,13 @@ func Build(in HourInput) HourPlan {
 			cursor = b.fill(seg, cursor, w)
 		}
 	}
+	// A pinned element after the end of a full segment is never reached.
+	for _, i := range slices.Sorted(maps.Keys(in.Pins)) {
+		p := in.Pins[i]
+		if !b.placed[p.InsertID] && !slices.Contains(b.plan.PinsRefused, p.InsertID) {
+			b.refusePin(i, p, "its segment is full before it")
+		}
+	}
 	return b.plan
 }
 
@@ -103,6 +114,9 @@ func (b *builder) element(i, cursor int, w window, last bool) (int, bool) {
 	if cursor >= w.latest {
 		return cursor, true
 	}
+	if p, ok := b.in.Pins[i]; ok {
+		return b.pinned(i, p, cursor, w)
+	}
 	e := b.in.Clock.Elements[i]
 	target := e.NominalDurationMS
 	if last {
@@ -113,6 +127,34 @@ func (b *builder) element(i, cursor int, w window, last bool) (int, bool) {
 		return cursor, false
 	}
 	return b.place(t, &e.ID, cursor, w, SourceClock, nil)
+}
+
+// pinned plans an element with a fixed track (a rescheduled item). The
+// track must play whole: it is never truncated, relaxed, or replaced; if it
+// cannot, the insert is refused and the segment goes on without it.
+func (b *builder) pinned(i int, p Pin, cursor int, w window) (int, bool) {
+	at := b.at(cursor)
+	t, ok := b.in.Library.track(p.TrackID)
+	switch {
+	case !ok:
+		b.refusePin(i, p, "the track has no duration")
+		return cursor, false
+	case !b.chk.eligible(t, at):
+		b.refusePin(i, p, fmt.Sprintf("the track breaks separation or a play rule at %s", b.clock(at)))
+		return cursor, false
+	case cursor+t.DurationMS > w.latest:
+		b.refusePin(i, p, fmt.Sprintf("starting at %s it runs past the end of its segment", b.clock(at)))
+		return cursor, false
+	}
+	cursor, full := b.place(t, nil, cursor, w, SourceReschedule, nil)
+	b.plan.Items[len(b.plan.Items)-1].RescheduleOfID = copyPtr(p.MissedID)
+	b.placed[p.InsertID] = true
+	return cursor, full
+}
+
+func (b *builder) refusePin(i int, p Pin, reason string) {
+	b.plan.PinsRefused = append(b.plan.PinsRefused, p.InsertID)
+	b.warn(WarnRescheduleDropped, &i, nil, &p.TrackID, "the rescheduled item cannot be placed: %s", reason)
 }
 
 // pick chooses the track of an element starting at at, with the emergency

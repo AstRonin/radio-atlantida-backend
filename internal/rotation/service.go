@@ -167,6 +167,23 @@ type Store interface {
 	// Plan returns the built hours that start in [from, to) with their
 	// items.
 	Plan(ctx context.Context, from, to time.Time) ([]PlannedHour, error)
+
+	// Missed returns a missed item; outage.ErrMissedNotFound.
+	Missed(ctx context.Context, id uint64) (MissedItem, error)
+	// LockMissed returns a missed item locked for update;
+	// outage.ErrMissedNotFound.
+	LockMissed(ctx context.Context, id uint64) (MissedItem, error)
+	// Inserts returns the inserts of the hour, in ID order.
+	Inserts(ctx context.Context, hourStart time.Time) ([]Insert, error)
+	// CreateInsert stores an insert and returns its ID.
+	CreateInsert(ctx context.Context, ins Insert) (uint64, error)
+	// DeleteInsert deletes an insert.
+	DeleteInsert(ctx context.Context, id uint64) error
+	// ReopenMissed sets a rescheduled missed item open again.
+	ReopenMissed(ctx context.Context, missedID uint64) error
+	// LinkRescheduled resolves a missed item as rescheduled to the plan
+	// row that airs it again (keeping the first resolved_at).
+	LinkRescheduled(ctx context.Context, missedID uint64, at time.Time) error
 }
 
 // ClockSource reads a clock with its layout (*clocks.Service).
@@ -202,7 +219,11 @@ type PlanSettings struct {
 	// have pushed its first items to Liquidsoap (playout.prepush_minutes),
 	// so a built hour is no longer rebuilt, cleared, or answered.
 	Freeze time.Duration
-	Build  Settings
+	// DefaultFixedToleranceMS is the start tolerance of a rescheduled item
+	// at a fixed minute when the request gives none
+	// (rotation.default_fixed_tolerance_ms).
+	DefaultFixedToleranceMS int
+	Build                   Settings
 }
 
 // frozen reports whether the hour that starts at start is on air, over, or
@@ -398,6 +419,9 @@ type hourJob struct {
 	// request is the reminder of a default or answer build.
 	request       FillerRequest
 	answerTrackID uint64
+	// reschedule stores this insert before the build and fails the build
+	// when it cannot be placed.
+	reschedule *RescheduleRequest
 }
 
 // hourOutcome is what a build wrote.
@@ -437,6 +461,8 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	now := s.now().UTC()
 	c := j.view.Clock
 	switch {
+	case j.reschedule != nil && set.frozen(j.start, now):
+		return hourOutcome{}, ErrHourStarted
 	case found && set.frozen(j.start, now) && j.kind == buildAnswer:
 		return hourOutcome{}, ErrHourStarted
 	case found && set.frozen(j.start, now):
@@ -463,10 +489,21 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	if err != nil {
 		return hourOutcome{}, err
 	}
+	var insertID uint64
+	if r := j.reschedule; r != nil {
+		if insertID, err = s.storeInsert(ctx, st, *r); err != nil {
+			return hourOutcome{}, err
+		}
+	}
+	inserts, err := st.Inserts(ctx, j.start)
+	if err != nil {
+		return hourOutcome{}, err
+	}
+	ih := applyInserts(c, j.view.Layout, inserts, lib)
 
 	deadline := j.start.Add(-set.ReminderDeadline)
 	in := HourInput{
-		Start: j.start, Location: set.Location, Clock: c, Layout: j.view.Layout,
+		Start: j.start, Location: set.Location, Clock: ih.clock, Layout: ih.layout, Pins: ih.pins,
 		DefaultFiller: set.Fallback, Library: lib, History: history, Separation: sep, Pool: pool,
 		Settings: set.Build, Seed: uint64(j.start.Unix()), //nolint:gosec // G115: hour starts are after 1970
 	}
@@ -500,6 +537,9 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	if j.kind == buildAnswer && plan.AnswerRefused {
 		return hourOutcome{}, validation.Field("track_id", validation.Blocked,
 			"the track breaks separation or a play rule at that time, or has no duration")
+	}
+	if err := s.settleInserts(ctx, st, j, insertID, inserts, &ih, &plan); err != nil {
+		return hourOutcome{}, err
 	}
 
 	out := hourOutcome{plan: plan}
@@ -538,6 +578,9 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 		}
 	}
 	if err := st.ReplaceHour(ctx, next, plan.Items); err != nil {
+		return hourOutcome{}, err
+	}
+	if err := linkRescheduled(ctx, st, plan.Items, now); err != nil {
 		return hourOutcome{}, err
 	}
 	return out, nil
@@ -596,6 +639,22 @@ func (s *Service) clear(ctx context.Context, start time.Time) error {
 		}
 		if err := st.ExpirePending(ctx, start); err != nil {
 			return err
+		}
+		// The hour no longer plays: its rescheduled items are open again.
+		inserts, err := st.Inserts(ctx, start)
+		if err != nil {
+			return err
+		}
+		ids := make([]uint64, len(inserts))
+		for i, ins := range inserts {
+			ids[i] = ins.ID
+		}
+		if err := dropInserts(ctx, st, inserts, ids); err != nil {
+			return err
+		}
+		if len(inserts) > 0 {
+			s.log.Warn("the grid no longer plays an hour with rescheduled items; their missed items are open again",
+				"hour_start_utc", start, "count", len(inserts))
 		}
 		return st.ClearHour(ctx, start)
 	})

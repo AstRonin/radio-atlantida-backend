@@ -29,6 +29,8 @@ const (
 	ComponentRetention  Component = "retention"
 	ComponentOutage     Component = "outage"
 	ComponentReconcile  Component = "reconcile"
+	// ComponentMedia: import, analysis, and transcoding of track files.
+	ComponentMedia Component = "media"
 )
 
 // Attribute keys shared across packages.

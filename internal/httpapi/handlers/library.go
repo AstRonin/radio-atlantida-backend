@@ -67,6 +67,16 @@ func trackDTO(t library.Track) dto.Track {
 		Type: typeRefDTO(t.Type), FileChecksum: t.FileChecksum,
 		PlaylistIDs: emptyIDs(t.PlaylistIDs), PlayRuleIDs: emptyIDs(t.PlayRuleIDs),
 		CreatedAt: t.CreatedAt.UTC(),
+
+		Codec: t.Codec, Channels: t.Channels, LoudnessLUFS: t.LoudnessLUFS, TruePeakDBTP: t.TruePeakDBTP,
+		LoudnessRangeLU: t.LoudnessRangeLU, SourceBitrate: t.SourceBitrate,
+		QualityIssues: make([]string, len(t.QualityIssues)), Fixes: []string{}, AnalyzedAt: t.AnalyzedAt,
+	}
+	for i, q := range t.QualityIssues {
+		out.QualityIssues[i] = string(q)
+	}
+	for _, f := range library.FixesFor(t.QualityIssues) {
+		out.Fixes = append(out.Fixes, string(f))
 	}
 	if t.Artist != nil {
 		out.Artist = &dto.ArtistRef{ID: t.Artist.ID, Name: t.Artist.Name}

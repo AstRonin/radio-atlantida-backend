@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"slices"
 	"sort"
 	"strings"
@@ -27,9 +28,22 @@ type Config struct {
 	MediaRoot string `env:"MEDIA_ROOT,required,notEmpty"`
 	// LogRoot is the directory for the daily JSON log files (§10.1).
 	LogRoot string `env:"LOG_ROOT,required,notEmpty"`
+	// PlayoutJournalRoot is the directory where Liquidsoap writes its
+	// playout journal; the backend only reads it, to reconcile what aired
+	// (§7.1).
+	PlayoutJournalRoot string `env:"PLAYOUT_JOURNAL_ROOT,required,notEmpty"`
 	// HTTPAddr is the listen address of the API. It must stay on localhost or
 	// a private network, because the API has no authentication (§10).
 	HTTPAddr string `env:"HTTP_ADDR" envDefault:"127.0.0.1:8080"`
+	// LiveUDPAddr is the one UDP socket of the live voice bridge (WebRTC,
+	// docs/phase-12-plan.md §2 decision 4). Like HTTPAddr, it is a listen
+	// address tied to the compose port mapping and stays on localhost or a
+	// private network.
+	LiveUDPAddr string `env:"LIVE_UDP_ADDR" envDefault:"127.0.0.1:8189"`
+	// LivePublicIPs are the addresses on which the browser reaches
+	// LiveUDPAddr (inside Docker the container's own address is not
+	// reachable). Empty: the host's interface addresses.
+	LivePublicIPs []string `env:"LIVE_PUBLIC_IPS" envSeparator:","`
 
 	Secrets Secrets
 }
@@ -72,7 +86,34 @@ type Migrate struct {
 //
 // The returned error lists every missing or invalid variable at once.
 func Load(dotenvPath string) (Config, error) {
-	return load[Config](dotenvPath)
+	cfg, err := load[Config](dotenvPath)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// validate checks the values the env tags cannot.
+func (c *Config) validate() error {
+	if _, _, err := net.SplitHostPort(c.LiveUDPAddr); err != nil {
+		return fmt.Errorf("invalid environment variables: LIVE_UDP_ADDR: %w", err)
+	}
+	ips := c.LivePublicIPs[:0]
+	for _, ip := range c.LivePublicIPs {
+		ip = strings.TrimSpace(ip)
+		if ip == "" {
+			continue
+		}
+		if net.ParseIP(ip) == nil {
+			return fmt.Errorf("invalid environment variables: LIVE_PUBLIC_IPS: %q is not an IP address", ip)
+		}
+		ips = append(ips, ip)
+	}
+	c.LivePublicIPs = ips
+	return nil
 }
 
 // LoadMigrate reads the configuration of `backend migrate up`, with the same

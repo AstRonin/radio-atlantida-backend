@@ -126,7 +126,8 @@ type Store interface {
 	// yet: the actual duration, and truncated when it played less than its
 	// planned length minus cutMarginMS. False when there is no such row.
 	End(ctx context.Context, itemID uint64, elapsedMS, cutMarginMS int) (bool, error)
-	// LogEmergency logs an emergency track that played.
+	// LogEmergency logs an emergency track that played; a track already
+	// logged with the same start is not logged again.
 	LogEmergency(ctx context.Context, trackID uint64, startedAt time.Time, elapsedMS int) error
 	// Logged returns the logged plan item as now playing; false if it is
 	// not logged.
@@ -171,7 +172,10 @@ type Settings struct {
 	// MediaRoot is the media directory as Liquidsoap sees it.
 	MediaRoot string
 	// MusicGain is the default music gain, set on the first connect.
-	MusicGain           float64
+	MusicGain float64
+	// DuckGain is the music level under live voice, set on every connect
+	// and when it changes.
+	DuckGain            float64
 	EmergencyPlaylistID *uint64
 }
 
@@ -268,6 +272,9 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	}
 	return st, nil
 }
+
+// Link returns the state of the Liquidsoap control link.
+func (s *Service) Link() liquidsoap.State { return s.ctl.State() }
 
 // SetMusicGain sets the live music gain (§8.5). It is kept in memory and
 // set again after a reconnect; the setting liquidsoap.music_gain is only

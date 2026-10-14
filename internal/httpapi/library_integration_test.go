@@ -26,17 +26,21 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ingest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
+	ingestrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/ingest"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	outagerepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/outage"
 	playoutrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playout"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
@@ -61,6 +65,9 @@ type libraryAPI struct {
 	clock      *testClock
 	// emergency is the setting playout.emergency_playlist_id.
 	emergency atomicID
+	// tools reports whether ffmpeg and ffprobe are installed: the import
+	// tests run end to end with them and expect a refusal without.
+	tools bool
 }
 
 // atomicID is a setting value the test changes while services read it.
@@ -107,9 +114,11 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	log := dbtest.Logger(t)
 	root := t.TempDir()
 	lib := media.New(root)
+	prober := media.NewProber(lib)
+	ff := media.NewFFmpeg(lib)
 	svc := library.NewService(d,
 		libraryrepo.NewTypes(d), libraryrepo.NewPlaylists(d), libraryrepo.NewArtists(d), libraryrepo.NewTracks(d),
-		lib, media.NewProber(lib), log)
+		lib, prober, log)
 	gridSvc := grid.NewService(d, gridrepo.New(d), func(context.Context) (grid.Settings, error) {
 		return grid.Settings{Location: stationTZ(t), HorizonDays: 30}, nil // setting defaults
 	}, time.Now)
@@ -125,14 +134,28 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		func(context.Context) (rotation.PlanSettings, error) {
 			return rotation.PlanSettings{ // setting defaults
 				Location: stationTZ(t), PlanHorizonHours: 48, ReminderDeadline: 2 * time.Hour,
-				Fallback: clocks.Filler{Mode: clocks.FillerRandom},
-				Build:    rotation.Settings{MinFillerGapMS: 10000, MaxRelaxedToleranceMS: 120000},
-				Freeze:   5 * time.Minute,
+				Fallback:                clocks.Filler{Mode: clocks.FillerRandom},
+				Build:                   rotation.Settings{MinFillerGapMS: 10000, MaxRelaxedToleranceMS: 120000},
+				Freeze:                  5 * time.Minute,
+				DefaultFixedToleranceMS: 60000,
 			}, nil
 		}, tracker, hub, log, clock.now)
 	fakeLS := newFakeLiquidsoap(t)
 	ctl := liquidsoap.New(func(context.Context) (string, error) { return fakeLS.addr(), nil }, time.Now, nil)
-	a := &libraryAPI{t: t, db: d, mediaRoot: root, rotation: rotationSvc, clock: clock, liquidsoap: fakeLS}
+	a := &libraryAPI{
+		t: t, db: d, mediaRoot: root, rotation: rotationSvc, clock: clock, liquidsoap: fakeLS,
+		tools: prober.Available() && ff.Available(),
+	}
+	ingestSvc := ingest.NewService(d, ingestrepo.New(d.Pool), lib, prober, ff, tracker,
+		func(context.Context) (ingest.Settings, error) {
+			return ingest.Settings{ // setting defaults
+				InboxDir: "incoming", LibraryDir: "library", BusyAhead: 10 * time.Minute,
+				Standard: ingest.Standard{
+					Format: media.FormatMP3, Codec: "mp3", BitrateKbps: 320, SampleRate: 44100, Channels: 2,
+					MinBitrateKbps: 128, LoudnessLUFS: -16, LoudnessToleranceLU: 2, MaxTruePeakDBTP: -1,
+				},
+			}, nil
+		}, log, clock.now)
 	a.playout = playout.NewService(d, playoutrepo.New(d.Pool), ctl, func(context.Context) (playout.Settings, error) {
 		return playout.Settings{ // setting defaults
 			Location: stationTZ(t), Lookahead: 3, Prepush: 5 * time.Minute, FadeOutMS: 2500, MediaRoot: "/media",
@@ -144,10 +167,16 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		defer close(planner)
 		_ = rotationSvc.Run(t.Context())
 	}()
+	worker := make(chan struct{})
+	go func() {
+		defer close(worker)
+		_ = ingestSvc.Run(t.Context())
+	}()
 	// t.Context ends before the cleanups; this one runs before the database
 	// closes (last-in first-out).
 	t.Cleanup(func() {
 		<-planner
+		<-worker
 		pool.Close()
 		hub.Close()
 	})
@@ -162,6 +191,8 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		Clocks:  clocksSvc,
 		Grid:    gridSvc,
 		Playout: a.playout,
+		Outages: outage.NewService(outagerepo.New(d.Pool), time.Now),
+		Ingest:  ingestSvc,
 		Now:     time.Now,
 	}))
 	t.Cleanup(srv.Close)
