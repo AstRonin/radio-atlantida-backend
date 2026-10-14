@@ -19,10 +19,14 @@ const (
 	EventStart  EventKind = "start"
 	EventEnd    EventKind = "end"
 	EventOutput EventKind = "output"
+	// EventHeartbeat is sent every few seconds while Liquidsoap runs, so the
+	// outage detector can tell a stalled playout from a long track (§7.1).
+	// It is not written to the journal.
+	EventHeartbeat EventKind = "heartbeat"
 )
 
 // Event is one callback from Liquidsoap: a line of its playout journal
-// (§8.3). Phase 10 replays journal lines through the same function.
+// (§8.3). Journal lines are replayed through Replay.
 type Event struct {
 	Kind EventKind
 	// Time is when Liquidsoap wrote the event (UTC).
@@ -49,18 +53,20 @@ func (s *Service) Callback(ctx context.Context, e Event) error {
 	s.mu.Unlock()
 
 	switch {
+	case e.Kind == EventHeartbeat:
+		return nil
 	case e.Kind == EventOutput:
 		s.setOutput(e)
 		return nil
 	case e.Source == SourcePlan && e.ItemID != nil && e.Kind == EventStart:
 		defer s.Wake() // a queue slot was freed
-		return s.started(ctx, *e.ItemID, e.Time)
+		return s.started(ctx, *e.ItemID, e.Time, true)
 	case e.Source == SourcePlan && e.ItemID != nil && e.Kind == EventEnd:
-		return s.ended(ctx, *e.ItemID, e)
+		return s.ended(ctx, *e.ItemID, e, true)
 	case e.Source == SourceEmergency && e.TrackID != nil && e.Kind == EventStart:
 		return s.emergencyStarted(ctx, *e.TrackID, e.Time)
 	case e.Source == SourceEmergency && e.TrackID != nil && e.Kind == EventEnd:
-		return s.emergencyEnded(ctx, *e.TrackID, e)
+		return s.emergencyEnded(ctx, *e.TrackID, e, true)
 	default:
 		// A request pushed by hand over telnet, or an older script.
 		s.log.Warn("liquidsoap callback without an item or a track ignored",
@@ -69,8 +75,37 @@ func (s *Service) Callback(ctx context.Context, e Event) error {
 	}
 }
 
-// started moves the item to the play log and makes it now playing.
-func (s *Service) started(ctx context.Context, itemID uint64, at time.Time) error {
+// Replay records a journal line that may have missed its callback (§7.1):
+// the same play log changes as Callback, without what only a live event
+// does (now playing, the last callback time, the output state). It is
+// idempotent like Callback, so a window may be replayed any number of
+// times. Lines other than track starts and ends are ignored.
+func (s *Service) Replay(ctx context.Context, e Event) error {
+	switch {
+	case e.Source == SourcePlan && e.ItemID != nil && e.Kind == EventStart:
+		return s.started(ctx, *e.ItemID, e.Time, false)
+	case e.Source == SourcePlan && e.ItemID != nil && e.Kind == EventEnd:
+		return s.ended(ctx, *e.ItemID, e, false)
+	case e.Source == SourceEmergency && e.TrackID != nil && e.Kind == EventEnd:
+		return s.emergencyEnded(ctx, *e.TrackID, e, false)
+	}
+	return nil
+}
+
+// LastCallback returns when the last callback arrived; nil before the
+// first.
+func (s *Service) LastCallback() *time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastCallback == nil {
+		return nil
+	}
+	return new(*s.lastCallback)
+}
+
+// started moves the item to the play log and, for a live event, makes it
+// now playing.
+func (s *Service) started(ctx context.Context, itemID uint64, at time.Time, live bool) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	moved, err := s.store.Start(ctx, itemID, at)
@@ -85,15 +120,18 @@ func (s *Service) started(ctx context.Context, itemID uint64, at time.Time) erro
 		s.log.Warn("liquidsoap started an item that is not in the plan", "item_id", itemID)
 		return nil
 	}
-	if moved {
+	if moved && live {
 		s.setNowPlaying(&np)
+	}
+	if moved && !live {
+		s.log.Info("start of an item recorded from the journal", "item_id", itemID, "started_at", at)
 	}
 	return nil
 }
 
 // ended records the actual duration. An end whose start never arrived
 // (lost callback) logs the item first, started elapsed before the end.
-func (s *Service) ended(ctx context.Context, itemID uint64, e Event) error {
+func (s *Service) ended(ctx context.Context, itemID uint64, e Event, live bool) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
@@ -113,6 +151,9 @@ func (s *Service) ended(ctx context.Context, itemID uint64, e Event) error {
 	})
 	if err != nil {
 		return fmt.Errorf("log end of item %d: %w", itemID, err)
+	}
+	if !live {
+		return nil
 	}
 	s.mu.Lock()
 	if s.nowPlaying != nil && s.nowPlaying.ItemID != nil && *s.nowPlaying.ItemID == itemID {
@@ -141,13 +182,16 @@ func (s *Service) emergencyStarted(ctx context.Context, trackID uint64, at time.
 }
 
 // emergencyEnded logs the emergency track (§8.6): only on its end, with the
-// time it actually played.
-func (s *Service) emergencyEnded(ctx context.Context, trackID uint64, e Event) error {
+// time it actually played. A repeated end (journal replay) is a no-op.
+func (s *Service) emergencyEnded(ctx context.Context, trackID uint64, e Event, live bool) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	started := e.Time.Add(-time.Duration(e.ElapsedMS) * time.Millisecond)
 	if err := s.store.LogEmergency(ctx, trackID, started, e.ElapsedMS); err != nil {
 		return fmt.Errorf("log emergency track %d: %w", trackID, err)
+	}
+	if !live {
+		return nil
 	}
 	s.mu.Lock()
 	if s.nowPlaying != nil && s.nowPlaying.ItemID == nil && s.nowPlaying.TrackID == trackID {

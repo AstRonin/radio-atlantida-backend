@@ -221,6 +221,11 @@ func TestEmergency(t *testing.T) {
 	require.Equal(t, 5000, r.Actual)
 	require.Nil(t, r.Planned)
 	require.Equal(t, hour.Add(5*time.Second), r.Ended.UTC())
+	// A replayed journal line logs nothing new.
+	require.NoError(t, f.store.LogEmergency(ctx, f.tracks[0], hour, 5000))
+	var n int
+	require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT count(*) FROM play_log WHERE source = 'emergency'`).Scan(&n))
+	require.Equal(t, 1, n)
 	require.Error(t, f.store.LogEmergency(ctx, 999999, hour, 5000))
 }
 

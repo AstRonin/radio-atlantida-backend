@@ -15,7 +15,7 @@ import (
 // run in parallel (t.Setenv forbids it).
 
 var allVars = []string{
-	"DATABASE_URL", "MEDIA_ROOT", "LOG_ROOT", "HTTP_ADDR",
+	"DATABASE_URL", "MEDIA_ROOT", "LOG_ROOT", "PLAYOUT_JOURNAL_ROOT", "HTTP_ADDR",
 	"ICECAST_SOURCE_PASSWORD", "LIQUIDSOAP_CONTROL_USER", "LIQUIDSOAP_CONTROL_PASSWORD",
 }
 
@@ -34,7 +34,7 @@ func TestLoadMissingListsEveryVariable(t *testing.T) {
 	_, err := Load("")
 
 	require.EqualError(t, err,
-		"missing required environment variables: DATABASE_URL, LOG_ROOT, MEDIA_ROOT")
+		"missing required environment variables: DATABASE_URL, LOG_ROOT, MEDIA_ROOT, PLAYOUT_JOURNAL_ROOT")
 }
 
 func TestLoadEmptyRequiredCountsAsMissing(t *testing.T) {
@@ -42,6 +42,7 @@ func TestLoadEmptyRequiredCountsAsMissing(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("MEDIA_ROOT", "")
 	t.Setenv("LOG_ROOT", "/logs")
+	t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
 
 	_, err := Load("")
 
@@ -65,6 +66,7 @@ func TestLoadDefaultsAndSecrets(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("MEDIA_ROOT", "/media")
 	t.Setenv("LOG_ROOT", "/logs")
+	t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
 	t.Setenv("ICECAST_SOURCE_PASSWORD", "s3cret")
 
 	cfg, err := Load("")
@@ -80,7 +82,7 @@ func TestLoadDotenvDoesNotOverrideEnvironment(t *testing.T) {
 	t.Setenv("MEDIA_ROOT", "/from-env")
 	dotenv := filepath.Join(t.TempDir(), ".env")
 	require.NoError(t, os.WriteFile(dotenv, []byte(
-		"DATABASE_URL=postgres://dotenv\nMEDIA_ROOT=/from-file\nLOG_ROOT=/logs\n"), 0o600))
+		"DATABASE_URL=postgres://dotenv\nMEDIA_ROOT=/from-file\nLOG_ROOT=/logs\nPLAYOUT_JOURNAL_ROOT=/journal\n"), 0o600))
 
 	cfg, err := Load(dotenv)
 
@@ -94,6 +96,7 @@ func TestLoadMissingDotenvIsNotAnError(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("MEDIA_ROOT", "/media")
 	t.Setenv("LOG_ROOT", "/logs")
+	t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
 
 	_, err := Load(filepath.Join(t.TempDir(), "absent.env"))
 

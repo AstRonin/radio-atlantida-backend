@@ -115,6 +115,9 @@ const (
 	SourceFillerPlaylist Source = "filler_playlist"
 	SourceFillerArtist   Source = "filler_artist"
 	SourceFillerAnswer   Source = "filler_answer"
+	// SourceReschedule: a missed item placed into this hour by the manager
+	// (§7.1).
+	SourceReschedule Source = "reschedule"
 )
 
 // Item is a planned track.
@@ -130,6 +133,18 @@ type Item struct {
 	Source    Source
 	// PoolRowID is the pool row a filler_pool item took.
 	PoolRowID *uint64
+	// RescheduleOfID is the missed play log row a reschedule item airs
+	// again.
+	RescheduleOfID *uint64
+}
+
+// Pin is an element whose track is fixed: a one-time insert of the hour
+// (hour_inserts), a rescheduled missed item (§7.1).
+type Pin struct {
+	InsertID uint64
+	TrackID  uint64
+	// MissedID is the missed play log row; nil when retention deleted it.
+	MissedID *uint64
 }
 
 // WarningCode is the stable code of a build warning; the panel translates by
@@ -159,6 +174,12 @@ const (
 	WarnFillerWaiting WarningCode = "filler_waiting"
 	// WarnGapUnfilled: no filler track could close the gap.
 	WarnGapUnfilled WarningCode = "gap_unfilled"
+	// WarnElementReplaced: a rescheduled item at a fixed minute replaces
+	// the clock's fixed element in this hour (§7.2).
+	WarnElementReplaced WarningCode = "element_replaced"
+	// WarnRescheduleDropped: a rescheduled item no longer fits its hour or
+	// breaks a rule there; it is removed and its missed item is open again.
+	WarnRescheduleDropped WarningCode = "reschedule_dropped"
 )
 
 // WarningCodes lists every warning code.
@@ -166,6 +187,7 @@ func WarningCodes() []WarningCode {
 	return []WarningCode{
 		WarnBlockedByPlayRules, WarnToleranceRelaxed, WarnGeneralPool, WarnEmergency,
 		WarnPoolTrackRefused, WarnPoolEmpty, WarnFillerWaiting, WarnGapUnfilled,
+		WarnElementReplaced, WarnRescheduleDropped,
 	}
 }
 
@@ -235,8 +257,10 @@ type HourInput struct {
 	Waiting Waiting
 	// AnswerTrackID is the answer of WaitAnswer.
 	AnswerTrackID uint64
-	Settings      Settings
-	Seed          uint64
+	// Pins are the elements with a fixed track, by element index.
+	Pins     map[int]Pin
+	Settings Settings
+	Seed     uint64
 }
 
 // HourPlan is the result of a build.
@@ -255,4 +279,8 @@ type HourPlan struct {
 	// AnswerRefused: the answer track breaks separation or a play rule at
 	// its time, or is not in the library.
 	AnswerRefused bool
+	// PinsRefused are the inserts whose pinned track could not be placed
+	// whole: it breaks a rule at its start, does not fit its segment, or
+	// its segment was full.
+	PinsRefused []uint64
 }

@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-12)
+Status: Draft (v7-13)
 Last updated: 2026-10-14
 
 ## 1. Overview
@@ -158,6 +158,8 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
   - `missed` means the item was planned but did not reach the air because of a broadcast outage (see §7.1).
   - `clock_element_id` (nullable, FK to `clock_elements`, `ON DELETE SET NULL`): the element the item was planned for; null for filler. `filler_pool_id` (nullable, FK to `clock_filler_pool`, `ON DELETE SET NULL`): the pool row a `filler_pool` item took; a rebuild of the hour sets that row's `used_at` back to null (v7-11).
 - **plan_hours**: hour_start_utc (primary key), clock_id (FK, `ON DELETE CASCADE`), clock_updated_at, grid_slot_id (nullable, `ON DELETE SET NULL`), seed, built_at, filler_request_id (nullable, `ON DELETE SET NULL`). One row per built hour of the track plan (v7-11, `docs/phase-8-plan.md` §2). An hour is stale when the grid now assigns another clock or none, or the clock's `updated_at` changed; the seed makes a rebuild after a reminder answer reproducible.
+- **hour_inserts**: id, hour_start_utc, track_id (FK, `ON DELETE RESTRICT`), missed_id (nullable, FK to `play_log`, `ON DELETE SET NULL`), placement (`start`, `end`, `fixed`), fixed_minute, fixed_tolerance_ms, created_at. One-time elements of a single hour: a missed item rescheduled into it (§7.1, §7.2). Every build of the hour places them; the clock template is not changed (v7-13, `docs/phase-10-plan.md` §2).
+- **backend_heartbeat**: one row, alive_at. Written by the outage detector every 30 seconds, so a restart can tell how long the backend was down (v7-13).
 - **broadcast_outages**: id, started_at (timestamptz, UTC), ended_at (timestamptz, UTC, nullable while the outage is open), detected_by (`icecast`, `liquidsoap_callback`, `liquidsoap_control`, `backend`), component (`icecast`, `liquidsoap`, `backend`, `network`), reason (short text, nullable), reconciled_at (timestamptz, nullable). One row per interruption. An open outage has `ended_at` null.
 - **play_rules**: id, name, window_from (time, nullable), window_to (time, nullable), weekdays (array of 1 to 7, nullable; null means every day), min_interval_minutes (int, nullable), max_per_hour (int, nullable), notes, created_at. A reusable, named rule (see §7.3). Times are station local time (§10.2).
   - Every constraint is optional, but at least one must be set. `window_from` and `window_to` are set together or not at all. A window may cross midnight (for example, 22:00 to 02:00); the weekday then refers to the day on which the window starts.
@@ -393,6 +395,8 @@ Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead o
 | `GET /api/playout/status` | Control link, Icecast output, now playing, items waiting in Liquidsoap's queues, music gain |
 | `PUT /api/playout/music-gain` | Body: `gain` (0 to 1). Sets the live music gain (§8.5); refused with `liquidsoap_unavailable` when the control link is down |
 
+**Implemented in v7-13 (`docs/phase-10-plan.md` §4).** The v7-6 endpoints above are implemented with these details: `GET /api/play-history` takes `from` and `to` (at most 31 days), an optional `status`, and is keyset paginated (`limit`, `cursor`, `next_cursor`); `GET /api/outages` takes at most 7 days; reschedule refuses the checks that need no build per field (422) and a resolved item with 409 `missed_item_resolved`, and its operation fails when the track breaks a rule at its place or does not fit whole. `POST /api/playout/callback` also takes a `heartbeat` event, sent by Liquidsoap every 5 seconds and not journaled.
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -413,7 +417,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - The HTTP request that starts the operation returns at once with an operation ID and status `accepted`. It does not wait for the work to complete.
 - When the operation finishes, the backend sends exactly one terminal event over the WebSocket hub: either a success event or a failure event. The event carries the operation ID.
 - Long operations may also send progress events (for example, "12 of 40 files analysed"). Progress is optional. The terminal event is mandatory.
-- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.marked`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`.
+- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.completed`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`.
 - A failure event contains a short error message, the component that failed (§10.1), and the UTC time. The same error is written to the log file (§10.1) and shown in the panel as an error popup (§6, §10.1).
 - A success event contains the operation ID, a short result summary, and the UTC time, so the panel can refresh the affected view.
 - The event schemas are part of the OpenAPI contract (§6.4). Each event type is a named schema, so the TypeScript client has typed handlers for every event.
@@ -434,7 +438,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 
 - The operator saves a clock. The save returns `accepted` with an operation ID. When the clock's hours are recalculated, the backend sends `clock_build.completed`. If a track fails the rules and no candidate is found, it sends `clock_build.failed` with the reason.
 - The rotation engine extends the track plan for the next hour. On success it sends `track_plan.completed`. On failure it sends `track_plan.failed` and creates a filler request or emergency warning as described in §7.
-- Icecast drops. The outage detector opens an outage and sends `broadcast_outage.started`. When Icecast reconnects, the outage closes, the missed items are marked, and the backend sends `missed_items.marked` with the count.
+- Icecast drops. The outage detector opens an outage and sends `broadcast_outage.started`. When Icecast reconnects, the outage closes, the missed items are marked, and the backend sends `missed_items.completed` with the count, then `broadcast_outage.ended` with the same count.
 
 **Scope**
 
@@ -509,18 +513,21 @@ An outage is a period when the station's audio did not reach listeners, for exam
 - The outage detector runs in the backend and watches three signals:
   1. **Icecast state**: the backend checks the mount point on the Icecast server at the configured interval (§6.3). Liquidsoap also reports its output connection state through its callbacks (§8.3).
   2. **Liquidsoap callbacks**: track start and end events. If no callback arrives within the heartbeat timeout while the station should be on air, the detector treats the playout as stalled.
-  3. **Liquidsoap control link**: the backend's connection to the control interface (§8.1). Loss of this link is treated as an outage if the callbacks also stop.
+  3. **Liquidsoap control link**: the backend's connection to the control interface (§8.1). Loss of this link for longer than the heartbeat timeout is treated as an outage while planned items are due: Liquidsoap keeps streaming (its queue, then the emergency source), but planned items cannot be pushed, so they become missed and the manager can reschedule them (decided 2026-10-14, v7-13).
+- Liquidsoap sends a heartbeat callback every 5 seconds, so a stalled playout is told apart from a long track (v7-13).
 - An outage opens after the configured number of consecutive failed checks, so a single dropped request does not create a false outage. It is written to `broadcast_outages` with `started_at`, `detected_by`, and `component`.
 - The outage closes when all signals report normal operation again. `ended_at` is set and `broadcast_outage.ended` is sent (§6.5).
 - Detection must not block playout. It runs in its own goroutine and only writes state.
 
 **Marking missed items**
 
-- When an outage closes, every `scheduled_items` row in status `planned`, `queued`, or `aired` whose planned window (`planned_start_utc` to `planned_start_utc` + `planned_out_ms`) overlaps the outage period is examined.
+- When an outage closes, every `scheduled_items` row in status `planned` or `queued` (aired items have already moved to `play_log`) whose planned window (`planned_start_utc` to `planned_start_utc` + `planned_out_ms`) overlaps the outage period is examined.
 - An item is marked `missed` if it has no confirmed playback in the local playout journal (§8.3). Its `outage_id` and `missed_at` are set, and the reason is stored from the outage.
 - Items that were confirmed as played (fully or partly) are not marked missed. A partly played item is recorded with `status = truncated` and its actual duration, as described in §7.
-- Marking runs as an asynchronous operation (`missed_items.marked` or `missed_items.failed`, §6.5).
+- Marking runs as an asynchronous operation (`missed_items.completed` or `missed_items.failed`, §6.5).
 - Missed items are moved to `play_log` with `status = missed`, `resolution = 'open'`, and `outage_id` set, so the played-tracks list shows them next to aired items.
+
+**Implementation decisions (v7-13, `docs/phase-10-plan.md` §2).** The journal decides what aired: an item Liquidsoap started counts as aired even if Icecast was down at that moment. Items that did not air while no outage was open (a leftover flushed at the hour switch, an item more than 30 seconds late) are dropped from the plan like tracks removed by overflow: not missed, no separation count. Before marking or dropping, the journal of the window is replayed through the same idempotent logic as the callbacks, so no cursor is kept. At startup, if the backend was down longer than the heartbeat timeout and planned items did not air, the downtime is recorded as a closed outage (`component = backend`) and its items are marked missed.
 
 **Reconciliation after backend downtime**
 

@@ -24,6 +24,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
@@ -31,6 +32,7 @@ import (
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	outagerepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/outage"
 	playoutrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playout"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
@@ -125,6 +127,11 @@ func serve(ctx context.Context) error {
 	rotationSvc := rotation.NewService(database, rotationrepo.New(database.Pool), clocksSvc, gridSvc,
 		rotationSettings(settingsSvc), tracker, hub, log, time.Now)
 	playoutSvc := newPlayout(database, settingsSvc, hub, log)
+	outageStore := outagerepo.New(database.Pool)
+	outageSvc := outage.NewService(outageStore, time.Now)
+	detector := outage.NewDetector(database, outageStore, playoutSvc,
+		outage.NewIcecastChecker(&http.Client{}), outage.NewJournal(cfg.PlayoutJournalRoot, playoutSvc, log),
+		tracker, hub, outageSettings(settingsSvc), log, time.Now)
 
 	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
@@ -151,6 +158,7 @@ func serve(ctx context.Context) error {
 		Grid:       gridSvc,
 		Rotation:   rotationSvc,
 		Playout:    playoutSvc,
+		Outages:    outageSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -167,6 +175,9 @@ func serve(ctx context.Context) error {
 	g.Go(func() error { return rotationSvc.Run(gctx) })
 	// The pusher keeps Liquidsoap's hour queues filled (§8.1).
 	g.Go(func() error { return playoutSvc.Run(gctx) })
+	// The outage detector watches Icecast, the callbacks, and the control
+	// link (§7.1); at startup it reconciles the journal.
+	g.Go(func() error { return detector.Run(gctx) })
 	g.Go(func() error {
 		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -426,13 +437,60 @@ func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
 		if err != nil {
 			return rotation.PlanSettings{}, err
 		}
+		fixedTol, err := settings.Value(ctx, svc, settings.RotationFixedToleranceMS)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
 		return rotation.PlanSettings{
-			Location:         loc,
-			PlanHorizonHours: horizon,
-			ReminderDeadline: time.Duration(deadline) * time.Minute,
-			Fallback:         clocks.Filler{Mode: clocks.FillerMode(fallback.Mode), SourceID: fallback.SourceID},
-			Freeze:           time.Duration(prepush) * time.Minute,
-			Build:            rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
+			Location:                loc,
+			PlanHorizonHours:        horizon,
+			ReminderDeadline:        time.Duration(deadline) * time.Minute,
+			Fallback:                clocks.Filler{Mode: clocks.FillerMode(fallback.Mode), SourceID: fallback.SourceID},
+			Freeze:                  time.Duration(prepush) * time.Minute,
+			DefaultFixedToleranceMS: fixedTol,
+			Build:                   rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
+		}, nil
+	}
+}
+
+// outageSettings reads the detection settings on every evaluation, so a
+// change applies at once (§6.3).
+func outageSettings(svc *settings.Service) outage.SettingsFunc {
+	return func(ctx context.Context) (outage.Settings, error) {
+		timeout, err := settings.Value(ctx, svc, settings.OutageHeartbeatTimeoutSeconds)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		interval, err := settings.Value(ctx, svc, settings.OutageIcecastCheckSeconds)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		checks, err := settings.Value(ctx, svc, settings.OutageFailedChecks)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		prepush, err := settings.Value(ctx, svc, settings.PlayoutPrepushMinutes)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		host, err := settings.Value(ctx, svc, settings.StreamIcecastHost)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		port, err := settings.Value(ctx, svc, settings.StreamIcecastPort)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		mount, err := settings.Value(ctx, svc, settings.StreamMount)
+		if err != nil {
+			return outage.Settings{}, err
+		}
+		return outage.Settings{
+			HeartbeatTimeout: time.Duration(timeout) * time.Second,
+			IcecastInterval:  time.Duration(interval) * time.Second,
+			FailedChecks:     checks,
+			Prepush:          time.Duration(prepush) * time.Minute,
+			Icecast:          outage.IcecastTarget{Host: host, Port: port, Mount: mount},
 		}, nil
 	}
 }

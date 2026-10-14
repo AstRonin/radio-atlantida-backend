@@ -25,6 +25,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -297,6 +298,8 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/play-rules", "/api/play-rules/{id}", "/api/play-rules/{id}/targets",
 		"/api/separation-rules", "/api/separation-rules/{id}",
 		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/music-gain",
+		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
+		"/api/outages",
 	} {
 		require.Contains(t, doc.Paths, p)
 	}
@@ -304,13 +307,18 @@ func TestOpenAPIDocument(t *testing.T) {
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 9)
+	require.Len(t, schemas["Event"].OneOf, 11)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackPlanWarning}, schemas["TrackPlanWarningEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventFillerRequestCreated}, schemas["FillerRequestCreatedEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventNowPlaying}, schemas["NowPlayingEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventLiquidsoapState}, schemas["LiquidsoapStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventIcecastState}, schemas["IcecastStateEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventOutageStarted}, schemas["OutageStartedEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventOutageEnded}, schemas["OutageEndedEvent"].Properties["type"].Enum)
+	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindMissedItems.CompletedEvent())
+	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindReschedule.FailedEvent())
+	require.Equal(t, stringsOf(rotation.WarningCodes()), schemas["TrackPlanWarning"].Properties["code"].Enum)
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindClockBuild.CompletedEvent())
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindRetention.CompletedEvent())
 	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindRetention.FailedEvent())

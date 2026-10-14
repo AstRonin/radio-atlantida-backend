@@ -31,12 +31,14 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	outagerepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/outage"
 	playoutrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playout"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
@@ -125,9 +127,10 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		func(context.Context) (rotation.PlanSettings, error) {
 			return rotation.PlanSettings{ // setting defaults
 				Location: stationTZ(t), PlanHorizonHours: 48, ReminderDeadline: 2 * time.Hour,
-				Fallback: clocks.Filler{Mode: clocks.FillerRandom},
-				Build:    rotation.Settings{MinFillerGapMS: 10000, MaxRelaxedToleranceMS: 120000},
-				Freeze:   5 * time.Minute,
+				Fallback:                clocks.Filler{Mode: clocks.FillerRandom},
+				Build:                   rotation.Settings{MinFillerGapMS: 10000, MaxRelaxedToleranceMS: 120000},
+				Freeze:                  5 * time.Minute,
+				DefaultFixedToleranceMS: 60000,
 			}, nil
 		}, tracker, hub, log, clock.now)
 	fakeLS := newFakeLiquidsoap(t)
@@ -162,6 +165,7 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		Clocks:  clocksSvc,
 		Grid:    gridSvc,
 		Playout: a.playout,
+		Outages: outage.NewService(outagerepo.New(d.Pool), time.Now),
 		Now:     time.Now,
 	}))
 	t.Cleanup(srv.Close)

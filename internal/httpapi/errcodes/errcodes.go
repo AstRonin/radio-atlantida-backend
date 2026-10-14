@@ -107,6 +107,11 @@ const (
 	// LiquidsoapUnavailable: the backend cannot reach Liquidsoap's control
 	// interface; the command was not applied.
 	LiquidsoapUnavailable Problem = "liquidsoap_unavailable"
+	// MissedItemNotFound: no missed item with that ID.
+	MissedItemNotFound Problem = "missed_item_not_found"
+	// MissedItemResolved: the missed item was already rescheduled or
+	// dismissed.
+	MissedItemResolved Problem = "missed_item_resolved"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -126,6 +131,7 @@ func Problems() []Problem {
 		GridSlotNotFound, GridConflict,
 		FillerRequestNotFound, FillerRequestClosed, FillerRequestNotAnswerable, HourStarted,
 		LiquidsoapUnavailable,
+		MissedItemNotFound, MissedItemResolved,
 	}
 }
 

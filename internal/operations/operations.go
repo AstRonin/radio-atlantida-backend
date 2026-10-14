@@ -38,10 +38,19 @@ const (
 	// KindClockBuild rebuilds the planned hours after a clock or grid
 	// change (§6.5, §7).
 	KindClockBuild Kind = "clock_build"
+	// KindMissedItems marks the items of a closed outage missed (§7.1).
+	KindMissedItems Kind = "missed_items"
+	// KindPlayoutReconcile replays the playout journal after the backend
+	// was down, at startup (§7.1).
+	KindPlayoutReconcile Kind = "playout_reconcile"
+	// KindReschedule places a missed item into a later hour (§7.1).
+	KindReschedule Kind = "reschedule"
 )
 
 // Kinds lists every operation kind (for the OpenAPI event type enums).
-func Kinds() []Kind { return []Kind{KindRetention, KindTrackPlan, KindClockBuild} }
+func Kinds() []Kind {
+	return []Kind{KindRetention, KindTrackPlan, KindClockBuild, KindMissedItems, KindPlayoutReconcile, KindReschedule}
+}
 
 // CompletedEvent is the type of the success event.
 func (k Kind) CompletedEvent() string { return string(k) + ".completed" }

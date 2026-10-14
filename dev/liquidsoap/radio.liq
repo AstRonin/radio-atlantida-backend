@@ -10,7 +10,8 @@
 #     source behind `fallback`, so the stream never stops;
 #   - a harbor input for live voice and an interactive `music_gain` variable;
 #   - output to Icecast, with its connection state reported to the backend;
-#   - a UTC playout journal and an HTTP callback on every track start and end.
+#   - a UTC playout journal and an HTTP callback on every track start and end;
+#   - a heartbeat callback every 5 seconds, for the outage detector.
 #
 # Every startup value comes from the environment (set in docker-compose.dev.yml).
 # The production script lives in radio-atlantida-deploy/config/. When the
@@ -114,6 +115,35 @@ def report(event, source, m, elapsed_ms) =
   journal(line)
   callback(line)
 end
+
+# A heartbeat every 5 seconds, callback only (not journaled): the outage
+# detector tells a stalled Liquidsoap from a long track by it (§7.1).
+thread.run(
+  every=5.,
+  fun () ->
+    callback(
+      json.stringify(compact=true, {event="heartbeat", time=utc_now()})
+    )
+)
+
+# The journal is kept 10 days (§7.1). The backend mounts it read-only, so
+# Liquidsoap deletes the older files, checking a few days back in case it was
+# not running when a file came of age.
+thread.run(
+  every=3600.,
+  fun () ->
+    list.iter(
+      fun (d) ->
+        begin
+          name =
+            journal_dir ^ "/journal-" ^
+              time.string(time=time() - float(d) * 86400., "%Y-%m-%d") ^
+              ".jsonl"
+          if file.exists(name) then file.remove(name) end
+        end,
+      [11, 12, 13, 14, 15]
+    )
+)
 
 # The Icecast output connection state (§8.3), for the outage detector.
 def report_output(connected) =

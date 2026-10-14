@@ -75,7 +75,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ${MEDIA_ROOT:?set in .env}:/media:ro
-      - ./.dev/journal:/journal
+      - ${PLAYOUT_JOURNAL_ROOT:?set in .env}:/journal
       - ./dev/liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
     depends_on:
       icecast:
@@ -114,6 +114,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
       MEDIA_ROOT: /media
       LOG_ROOT: /logs
+      PLAYOUT_JOURNAL_ROOT: /journal
       HTTP_ADDR: 0.0.0.0:8080
       ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set in .env}
       LIQUIDSOAP_CONTROL_USER: ${LIQUIDSOAP_CONTROL_USER:-source}
@@ -123,8 +124,8 @@ services:
     volumes:
       - ${MEDIA_ROOT:?set in .env}:/media:ro
       - ${LOG_ROOT:?set in .env}:/logs
-      # Playout journal, read for reconciliation (§7.1; path setting added later).
-      - ./.dev/journal:/journal:ro
+      # Playout journal, read for reconciliation (§7.1).
+      - ${PLAYOUT_JOURNAL_ROOT:?set in .env}:/journal:ro
     depends_on:
       db:
         condition: service_healthy

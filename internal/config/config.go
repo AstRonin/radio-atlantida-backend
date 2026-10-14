@@ -27,6 +27,10 @@ type Config struct {
 	MediaRoot string `env:"MEDIA_ROOT,required,notEmpty"`
 	// LogRoot is the directory for the daily JSON log files (§10.1).
 	LogRoot string `env:"LOG_ROOT,required,notEmpty"`
+	// PlayoutJournalRoot is the directory where Liquidsoap writes its
+	// playout journal; the backend only reads it, to reconcile what aired
+	// (§7.1).
+	PlayoutJournalRoot string `env:"PLAYOUT_JOURNAL_ROOT,required,notEmpty"`
 	// HTTPAddr is the listen address of the API. It must stay on localhost or
 	// a private network, because the API has no authentication (§10).
 	HTTPAddr string `env:"HTTP_ADDR" envDefault:"127.0.0.1:8080"`

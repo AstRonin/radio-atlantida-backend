@@ -93,7 +93,7 @@ func (s *Store) ReplaceHour(ctx context.Context, h rotation.PlanHour, items []ro
 	for i, it := range items {
 		rows[i] = []any{
 			h.GridSlotID, h.ClockID, it.TrackID, h.Start.Add(time.Duration(it.OffsetMS) * time.Millisecond),
-			it.OutMS, it.Truncated, string(it.Source), it.ElementID, it.PoolRowID,
+			it.OutMS, it.Truncated, string(it.Source), it.ElementID, it.PoolRowID, it.RescheduleOfID,
 		}
 		if it.PoolRowID != nil {
 			used = append(used, *it.PoolRowID)
@@ -102,7 +102,7 @@ func (s *Store) ReplaceHour(ctx context.Context, h rotation.PlanHour, items []ro
 	if len(rows) > 0 {
 		_, err := s.q.CopyFrom(ctx, pgx.Identifier{"scheduled_items"}, []string{
 			"grid_slot_id", "clock_id", "track_id", "planned_start_utc",
-			"planned_out_ms", "truncated", "source", "clock_element_id", "filler_pool_id",
+			"planned_out_ms", "truncated", "source", "clock_element_id", "filler_pool_id", "reschedule_of_id",
 		}, pgx.CopyFromRows(rows))
 		if err != nil {
 			return fmt.Errorf("insert planned items: %w", err)

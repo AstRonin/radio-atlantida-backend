@@ -38,6 +38,7 @@ var writeErrors = map[string]error{
 var historyConstraints = map[string]error{
 	"fk_play_log_track_id":        library.ErrTrackHasHistory,
 	"fk_scheduled_items_track_id": library.ErrTrackHasHistory,
+	"fk_hour_inserts_track_id":    library.ErrTrackHasHistory,
 	"fk_play_log_artist_id":       library.ErrArtistHasHistory,
 }
 
