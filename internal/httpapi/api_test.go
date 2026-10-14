@@ -22,6 +22,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/handlers"
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
@@ -348,6 +349,29 @@ func TestLogComponentEnumMatchesLogging(t *testing.T) {
 	}
 	require.Equal(t, stringsOf(logging.Components()), enums["component"])
 	require.Equal(t, logging.LevelNames(), enums["level"])
+}
+
+// The quality issue codes and fixes of the track DTO are the domain's: the
+// panel words and offers them by code.
+func TestTrackQualityEnumsMatchLibrary(t *testing.T) {
+	t.Parallel()
+	raw, err := OpenAPI("dev")
+	require.NoError(t, err)
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]struct {
+					Items struct {
+						Enum []string `json:"enum"`
+					} `json:"items"`
+				} `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	track := doc.Components.Schemas["Track"].Properties
+	require.Equal(t, stringsOf(library.QualityIssues()), track["quality_issues"].Items.Enum)
+	require.Equal(t, stringsOf([]library.Fix{library.FixLoudness, library.FixOptimize}), track["fixes"].Items.Enum)
 }
 
 func stringsOf[T ~string](vs []T) []string {

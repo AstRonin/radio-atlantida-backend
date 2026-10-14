@@ -122,7 +122,9 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - ${MEDIA_ROOT:?set in .env}:/media:ro
+      # Read-write: an import moves files from the inbox into the library
+      # folder, and a transcode writes fixed files (docs/phase-11-plan.md).
+      - ${MEDIA_ROOT:?set in .env}:/media
       - ${LOG_ROOT:?set in .env}:/logs
       # Playout journal, read for reconciliation (§7.1).
       - ${PLAYOUT_JOURNAL_ROOT:?set in .env}:/journal:ro

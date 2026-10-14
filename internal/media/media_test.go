@@ -120,17 +120,22 @@ func TestParseProbe(t *testing.T) {
 
 // The testdata files are the real output of ffprobe 9.0 (linuxserver/ffmpeg
 // 9.0-cli-ls84, the image of dev/scripts/gen-media.sh) with the arguments
-// of Probe.
+// of Probe, for a stereo MP3 with tags in the container and a mono Ogg
+// Vorbis file with a tag in the stream.
 func TestParseProbeRealOutput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		file       string
 		format     string
+		codec      string
+		channels   int
 		durationMS int
 		bitrate    int
+		title      string
+		artist     string
 	}{
-		{"ffprobe-mp3.json", FormatMP3, 3000, 130517},
-		{"ffprobe-ogg.json", FormatOgg, 2000, 27652},
+		{"ffprobe-mp3.json", FormatMP3, "mp3", 2, 3000, 130634, "Test Tone", "Test Artist"},
+		{"ffprobe-ogg.json", FormatOgg, "vorbis", 1, 2000, 27732, "Station ID", ""},
 	}
 	for _, tt := range tests {
 		out, err := os.ReadFile(filepath.Join("testdata", tt.file))
@@ -138,9 +143,13 @@ func TestParseProbeRealOutput(t *testing.T) {
 		info, err := parseProbe(out)
 		require.NoError(t, err, tt.file)
 		require.Equal(t, tt.format, *info.Format, tt.file)
+		require.Equal(t, tt.codec, *info.Codec, tt.file)
+		require.Equal(t, tt.channels, *info.Channels, tt.file)
 		require.Equal(t, tt.durationMS, *info.DurationMS, tt.file)
 		require.Equal(t, tt.bitrate, *info.Bitrate, tt.file)
 		require.Equal(t, 44100, *info.SampleRate, tt.file)
+		require.Equal(t, tt.title, info.Title, tt.file)
+		require.Equal(t, tt.artist, info.Artist, tt.file)
 	}
 }
 

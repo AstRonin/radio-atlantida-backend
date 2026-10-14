@@ -57,6 +57,7 @@ type Deps struct {
 	Rotation   handlers.Rotation
 	Playout    handlers.Playout
 	Outages    handlers.Outages
+	Ingest     handlers.Ingest
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -96,7 +97,7 @@ func NewRouter(d Deps) http.Handler {
 	handlers.Register(api, handlers.Deps{
 		Log: d.Log, Operations: d.Operations, Logs: d.Logs, Settings: d.Settings,
 		Library: d.Library, PlayRules: d.PlayRules, Separation: d.Separation,
-		Clocks: d.Clocks, Grid: d.Grid, Rotation: d.Rotation, Playout: d.Playout, Outages: d.Outages, Now: d.Now,
+		Clocks: d.Clocks, Grid: d.Grid, Rotation: d.Rotation, Playout: d.Playout, Outages: d.Outages, Ingest: d.Ingest, Now: d.Now,
 	})
 
 	return r

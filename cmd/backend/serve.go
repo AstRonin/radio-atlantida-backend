@@ -18,6 +18,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ingest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
@@ -29,6 +30,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
+	ingestrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/ingest"
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
@@ -115,6 +117,10 @@ func serve(ctx context.Context) error {
 	if !prober.Available() {
 		apiLog.Warn("ffprobe not found on PATH: track metadata is not read from files")
 	}
+	ff := media.NewFFmpeg(mediaLib)
+	if !ff.Available() {
+		apiLog.Warn("ffmpeg not found on PATH: import, analysis, and transcoding are refused")
+	}
 	librarySvc := library.NewService(database,
 		libraryrepo.NewTypes(database), libraryrepo.NewPlaylists(database),
 		libraryrepo.NewArtists(database), libraryrepo.NewTracks(database),
@@ -127,6 +133,8 @@ func serve(ctx context.Context) error {
 	rotationSvc := rotation.NewService(database, rotationrepo.New(database.Pool), clocksSvc, gridSvc,
 		rotationSettings(settingsSvc), tracker, hub, log, time.Now)
 	playoutSvc := newPlayout(database, settingsSvc, hub, log)
+	ingestSvc := ingest.NewService(database, ingestrepo.New(database.Pool), mediaLib, prober, ff, tracker,
+		ingestSettings(settingsSvc), log, time.Now)
 	outageStore := outagerepo.New(database.Pool)
 	outageSvc := outage.NewService(outageStore, time.Now)
 	detector := outage.NewDetector(database, outageStore, playoutSvc,
@@ -159,6 +167,7 @@ func serve(ctx context.Context) error {
 		Rotation:   rotationSvc,
 		Playout:    playoutSvc,
 		Outages:    outageSvc,
+		Ingest:     ingestSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -178,6 +187,9 @@ func serve(ctx context.Context) error {
 	// The outage detector watches Icecast, the callbacks, and the control
 	// link (§7.1); at startup it reconciles the journal.
 	g.Go(func() error { return detector.Run(gctx) })
+	// The media worker runs imports, analyses, and transcodes one at a
+	// time.
+	g.Go(func() error { return ingestSvc.Run(gctx) })
 	g.Go(func() error {
 		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -491,6 +503,68 @@ func outageSettings(svc *settings.Service) outage.SettingsFunc {
 			FailedChecks:     checks,
 			Prepush:          time.Duration(prepush) * time.Minute,
 			Icecast:          outage.IcecastTarget{Host: host, Port: port, Mount: mount},
+		}, nil
+	}
+}
+
+// ingestSettings reads the import settings when an operation starts
+// (docs/phase-11-plan.md §2, decision 11). The loudness target is the
+// station's one, stream.loudness_target_lufs.
+func ingestSettings(svc *settings.Service) ingest.SettingsFunc {
+	return func(ctx context.Context) (ingest.Settings, error) {
+		inbox, err := settings.Value(ctx, svc, settings.ImportInboxDir)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		lib, err := settings.Value(ctx, svc, settings.ImportLibraryDir)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		codec, err := settings.Value(ctx, svc, settings.ImportTargetCodec)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		bitrate, err := settings.Value(ctx, svc, settings.ImportTargetBitrateKbps)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		rate, err := settings.Value(ctx, svc, settings.ImportTargetSampleRateHz)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		channels, err := settings.Value(ctx, svc, settings.ImportTargetChannels)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		minBitrate, err := settings.Value(ctx, svc, settings.ImportMinBitrateKbps)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		loudness, err := settings.Value(ctx, svc, settings.StreamLoudnessLUFS)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		tolerance, err := settings.Value(ctx, svc, settings.ImportLoudnessToleranceLU)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		peak, err := settings.Value(ctx, svc, settings.ImportMaxTruePeakDBTP)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		prepush, err := settings.Value(ctx, svc, settings.PlayoutPrepushMinutes)
+		if err != nil {
+			return ingest.Settings{}, err
+		}
+		return ingest.Settings{
+			InboxDir: inbox, LibraryDir: lib,
+			Standard: ingest.Standard{
+				Format: ingest.StandardFormat(codec), Codec: codec, BitrateKbps: bitrate, SampleRate: rate, Channels: channels,
+				MinBitrateKbps: minBitrate, LoudnessLUFS: loudness, LoudnessToleranceLU: tolerance, MaxTruePeakDBTP: peak,
+			},
+			// The pusher takes items prepush minutes ahead; five more
+			// minutes cover a long encode.
+			BusyAhead: time.Duration(prepush+5) * time.Minute,
 		}, nil
 	}
 }

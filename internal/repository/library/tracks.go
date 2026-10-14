@@ -41,12 +41,25 @@ type trackRow struct {
 	TypeName     string
 	FileChecksum *string
 	CreatedAt    time.Time
+
+	Codec           *string
+	Channels        *int
+	LoudnessLUFS    *float64 `gorm:"column:loudness_lufs"`
+	TruePeakDBTP    *float64 `gorm:"column:true_peak_dbtp"`
+	LoudnessRangeLU *float64 `gorm:"column:loudness_range_lu"`
+	SourceBitrate   *int
+	// QualityIssues is the text[] joined with commas: database/sql does not
+	// scan arrays. The codes contain no comma (ck_tracks_quality_issues).
+	QualityIssues string
+	AnalyzedAt    *time.Time
 }
 
 const selectTracks = `
 SELECT tr.id, tr.title, tr.artist_id, a.name AS artist_name, tr.duration_ms, tr.file_path,
        tr.format, tr.bitrate, tr.sample_rate, tr.quality_ok, tr.quality_notes,
-       t.id AS type_id, t.code AS type_code, t.name AS type_name, tr.file_checksum, tr.created_at
+       t.id AS type_id, t.code AS type_code, t.name AS type_name, tr.file_checksum, tr.created_at,
+       tr.codec, tr.channels, tr.loudness_lufs, tr.true_peak_dbtp, tr.loudness_range_lu, tr.source_bitrate,
+       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at
 FROM tracks tr
 JOIN playlist_types t ON t.id = tr.type_id
 LEFT JOIN artists a ON a.id = tr.artist_id`
@@ -81,6 +94,14 @@ func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Tra
 		p := containsPattern(f.Query)
 		where = append(where, "(tr.title ILIKE ? OR a.name ILIKE ?)")
 		args = append(args, p, p)
+	}
+	switch f.Quality {
+	case library.QualityOK:
+		where = append(where, "tr.analyzed_at IS NOT NULL AND cardinality(tr.quality_issues) = 0")
+	case library.QualityIssuesFound:
+		where = append(where, "cardinality(tr.quality_issues) > 0")
+	case library.QualityUnanalysed:
+		where = append(where, "tr.analyzed_at IS NULL")
 	}
 	if f.After != nil {
 		where = append(where, "(tr.title, tr.id) > (?, ?)")
@@ -154,6 +175,13 @@ WHERE track_id IN ? ORDER BY rule_id`, ids).Scan(&rules).Error
 			CreatedAt:    r.CreatedAt.UTC(),
 			PlaylistIDs:  byPlaylist[r.ID],
 			PlayRuleIDs:  byRule[r.ID],
+
+			Codec: r.Codec, Channels: r.Channels,
+			LoudnessLUFS: r.LoudnessLUFS, TruePeakDBTP: r.TruePeakDBTP, LoudnessRangeLU: r.LoudnessRangeLU, SourceBitrate: r.SourceBitrate,
+			QualityIssues: issues(r.QualityIssues),
+		}
+		if r.AnalyzedAt != nil {
+			t.AnalyzedAt = new(r.AnalyzedAt.UTC())
 		}
 		if r.ArtistID != nil && r.ArtistName != nil {
 			t.Artist = &library.ArtistRef{ID: *r.ArtistID, Name: *r.ArtistName}
@@ -161,6 +189,18 @@ WHERE track_id IN ? ORDER BY rule_id`, ids).Scan(&rules).Error
 		out[i] = t
 	}
 	return out, nil
+}
+
+// issues splits the joined quality_issues column.
+func issues(joined string) []library.QualityIssue {
+	out := []library.QualityIssue{}
+	if joined == "" {
+		return out
+	}
+	for c := range strings.SplitSeq(joined, ",") {
+		out = append(out, library.QualityIssue(c))
+	}
+	return out
 }
 
 // trackColumns are the editable columns of a track. A map, so nil and zero

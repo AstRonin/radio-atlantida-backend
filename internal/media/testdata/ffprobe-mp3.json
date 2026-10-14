@@ -7,13 +7,23 @@
     ],
     "streams": [
         {
+            "codec_name": "mp3",
             "codec_type": "audio",
-            "sample_rate": "44100"
+            "sample_rate": "44100",
+            "channels": 2,
+            "tags": {
+                "encoder": "Lavc63.1."
+            }
         }
     ],
     "format": {
         "format_name": "mp3",
         "duration": "3.000000",
-        "bit_rate": "130517"
+        "bit_rate": "130634",
+        "tags": {
+            "title": "Test Tone",
+            "artist": "Test Artist",
+            "encoder": "Lavf63.1.100"
+        }
     }
 }

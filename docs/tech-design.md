@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-13)
+Status: Draft (v7-14)
 Last updated: 2026-10-14
 
 ## 1. Overview
@@ -138,6 +138,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **playlists**: id, name, type_id (FK to `playlist_types`), created_at.
 - **artists**: id, name. Used for artist separation rules.
 - **tracks**: id, title, artist_id, duration_ms, file_path (relative to the media root, see §8.7), format, bitrate, sample_rate, quality_ok (bool), quality_notes, type_id (FK to `playlist_types`), file_checksum, created_at.
+  - Analysis columns (v7-14, `docs/phase-11-plan.md` §2): codec, channels, loudness_lufs, true_peak_dbtp, loudness_range_lu (EBU R128), source_bitrate (the lossy file a transcoded file was made from), quality_issues (`text[]` of `format`, `sample_rate`, `channels`, `loudness`, `true_peak`, `low_bitrate`, `file_missing`), analyzed_at. An analysis sets `quality_ok` to "no issues"; a manual value lasts until the next analysis. `file_checksum` is the SHA-256 of the file, indexed for the duplicate check of an import.
 - **track_playlists**: track_id, playlist_id (many-to-many). A track may belong to several playlists.
 - **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), default_filler_mode (nullable: `random`, `playlist`, or `artist`; null falls back to the global filler setting, §6.3), default_filler_playlist_id (nullable, FK to `playlists`; set only for `playlist`), default_filler_artist_id (nullable, FK to `artists`; set only for `artist`), updated_at. The default mode is chosen in the clock editor (§6.2). It applies when the filler pool is empty or a filler reminder expires (§7); `ask` and `pool` are not allowed here because they would fall back to themselves.
 - **clock_elements**: id, clock_id, position, placement (enum: `flow` (default), `start`, `end`, `fixed`), fixed_minute (int 0 to 59, nullable; required when `placement = fixed`), fixed_tolerance_ms (int, default 60000; applies to the start of a fixed element), nominal_duration_ms, duration_tolerance_ms (int, default 30000), filler_mode (enum: `none`, `ask`, `random`, `playlist`, `artist`, `pool`), filler_playlist_id (nullable, FK to `playlists`; set only for `playlist` mode), filler_artist_id (nullable, FK to `artists`; set only for `artist` mode), created_at. Stored as rows; a JSONB column may hold optional per-element settings.
@@ -321,6 +322,7 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
 - **Retention**: play log days (default 10), application log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1).
+- **Import** (v7-14): the inbox folder (`import.inbox_dir`, default `incoming`) and the library folder (`import.library_dir`, default `library`) under the media root; the broadcast standard of track files: target codec (`mp3`, `aac`, or `vorbis`; default `mp3`), bitrate (320 kbps), sample rate (44100 Hz), channels (2); the lowest acceptable bitrate of a lossy file (128 kbps), the loudness tolerance around `stream.loudness_target_lufs` (2 LU), and the highest true peak (−1 dBTP).
 - Any future backend setting follows the same pattern.
 
 Playlist types are data in the `playlist_types` table, not entries in the `settings` table. They are listed on the settings pages for convenience, and they are served by their own endpoints (§6.4). A clock's default filler mode is data of the clock (§4), so it is edited in the clock editor, not on the settings pages.
@@ -397,6 +399,17 @@ Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead o
 
 **Implemented in v7-13 (`docs/phase-10-plan.md` §4).** The v7-6 endpoints above are implemented with these details: `GET /api/play-history` takes `from` and `to` (at most 31 days), an optional `status`, and is keyset paginated (`limit`, `cursor`, `next_cursor`); `GET /api/outages` takes at most 7 days; reschedule refuses the checks that need no build per field (422) and a resolved item with 409 `missed_item_resolved`, and its operation fails when the track breaks a rule at its place or does not fit whole. `POST /api/playout/callback` also takes a `heartbeat` event, sent by Liquidsoap every 5 seconds and not journaled.
 
+**Endpoints added in v7-14 (import, analysis, transcoding, `docs/phase-11-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/import/inbox` | Files waiting in the inbox folder (at most 1,000) |
+| `POST /api/import` | Body: `type_id`, `playlist_ids`. Imports the inbox; returns `accepted` with an operation ID (`import`) |
+| `POST /api/tracks/analyse` | Body: `track_ids` (absent: every track never analysed), `force`. Returns `accepted` (`analyse`) |
+| `POST /api/tracks/transcode` | Body: `track_ids`, `fix` (`loudness` or `optimize`), `output` (`replace` or `copy`). Returns `accepted` (`transcode`) |
+
+Track responses carry the analysis columns, `quality_issues`, and `fixes` (the transcodes that remove at least one issue); `GET /api/tracks` takes `quality` (`ok`, `issues`, `unanalysed`). Import, analysis, and transcode run one at a time: a second request is refused with 409 `media_operation_running`; without ffmpeg they are refused with 503 `media_tools_unavailable`.
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -417,7 +430,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - The HTTP request that starts the operation returns at once with an operation ID and status `accepted`. It does not wait for the work to complete.
 - When the operation finishes, the backend sends exactly one terminal event over the WebSocket hub: either a success event or a failure event. The event carries the operation ID.
 - Long operations may also send progress events (for example, "12 of 40 files analysed"). Progress is optional. The terminal event is mandatory.
-- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.completed`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`.
+- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.completed`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`, `analyse.completed`, `transcode.completed` (and their `.failed` and `.progress` events).
 - A failure event contains a short error message, the component that failed (§10.1), and the UTC time. The same error is written to the log file (§10.1) and shown in the panel as an error popup (§6, §10.1).
 - A success event contains the operation ID, a short result summary, and the UTC time, so the panel can refresh the affected view.
 - The event schemas are part of the OpenAPI contract (§6.4). Each event type is a named schema, so the TypeScript client has typed handlers for every event.
@@ -678,9 +691,9 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 Audio files are about 800 files and must not be copied into Docker images or volumes.
 
 - Media files stay on the host filesystem, outside Docker, in a single directory configured as `MEDIA_ROOT`.
-- The host directory is bind-mounted into the containers that need it: `liquidsoap` (read-only) and `backend` (read-only for analysis, read-write only if uploads go through the panel).
+- The host directory is bind-mounted into the containers that need it: `liquidsoap` (read-only) and `backend` (read-write: an import moves files from the inbox folder into the library folder, and a transcode writes fixed files; v7-14).
 - PostgreSQL stores only metadata and the path relative to `MEDIA_ROOT`. Relative paths let the same database work on different machines where the absolute location differs.
-- Import and quality analysis (ffmpeg) read files from the mounted directory. Transcoded output is written to a separate output directory on the host, not inside a container.
+- Import and quality analysis (ffmpeg) read files from the mounted directory. New files arrive through an inbox folder under the media root; there is no upload through the panel. Transcoded output is written under the media root, so Liquidsoap can play it: the manager chooses whether it replaces the original or is written as `<name>.optimal.<ext>` next to it, the original then staying on disk (decided 2026-10-14, v7-14, `docs/phase-11-plan.md` §2). It is written to a hidden temporary file first and renamed into place, and a track that is queued, on air, or about to be pushed is skipped.
 - Checksums are stored so that a moved or changed file can be detected.
 - The backend also streams a track to the panel for preview, through the same read-only mount (§6.6).
 
@@ -827,7 +840,7 @@ Steps, in order:
 
 - Logs are written as JSON Lines: one JSON object per line. The panel and tools like `jq` can read them directly.
 - Library: `log/slog` from the Go standard library, with its JSON handler. It needs no extra dependency and is fast enough for this volume. `zap` or `zerolog` are alternatives if profiling shows a need.
-- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `filler`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`. API errors also carry `request_id`.
+- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `filler`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`, `media` (import, analysis, transcoding; v7-14). API errors also carry `request_id`.
 - Secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`) are never logged. A handler masks any field with a sensitive name.
 
 **What is logged**
@@ -918,6 +931,7 @@ The open questions from the previous version are closed. The decisions are recor
 25. **Journal path is an environment variable.** `PLAYOUT_JOURNAL_ROOT` is a host path set in `.env`, like `MEDIA_ROOT` and `LOG_ROOT`. Liquidsoap writes the journal to it, and the backend reads it read-only (§3.1, §7.1, §9).
 
 26. **Repository layer.** All SQL lives in `internal/repository/<domain>`, one package per domain, named as the domain package. Domain code depends on interfaces it declares itself, and the repositories implement them. Reason: business rules stay free of SQL and driver errors, and a domain rename changes the domain and its repository in the same change (§5.1).
+27. **Import and transcoding.** New files arrive through an inbox folder under the media root and are moved into the library folder on import; there is no upload through the panel. Analysis flags problems against the broadcast standard set in the admin settings, and nothing changes audio without the manager: the panel offers "Fix loudness" and "Optimize track", and the manager chooses whether the fixed file replaces the original or is kept as an optimal copy next to it (§8.7, decided 2026-10-14).
 
 ## 12. Non-functional Requirements
 

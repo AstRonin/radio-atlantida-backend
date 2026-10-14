@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,19 @@ type Track struct {
 	Type         TypeRef
 	FileChecksum *string
 	CreatedAt    time.Time
+
+	// Analysis of the file (internal/ingest); nil until it is analysed.
+	Codec           *string
+	Channels        *int
+	LoudnessLUFS    *float64
+	TruePeakDBTP    *float64
+	LoudnessRangeLU *float64
+	// SourceBitrate is the bitrate of the lossy file this one was
+	// transcoded from (the low_bitrate issue stays with the copy).
+	SourceBitrate *int
+	QualityIssues []QualityIssue
+	AnalyzedAt    *time.Time
+
 	// PlaylistIDs and PlayRuleIDs are in ID order.
 	PlaylistIDs []uint64
 	PlayRuleIDs []uint64
@@ -56,6 +70,82 @@ type TrackInput struct {
 	PlaylistIDs  []uint64
 }
 
+// QualityIssue is a problem that the analysis found in a track file
+// (docs/phase-11-plan.md §2, decision 5). The codes are part of the API and
+// of ck_tracks_quality_issues: add codes, never rename one.
+type QualityIssue string
+
+// Quality issues.
+const (
+	// IssueFormat: the container is not the target format.
+	IssueFormat QualityIssue = "format"
+	// IssueSampleRate: the sample rate is not the target.
+	IssueSampleRate QualityIssue = "sample_rate"
+	// IssueChannels: the channel count is not the target.
+	IssueChannels QualityIssue = "channels"
+	// IssueLoudness: the integrated loudness is too far from the target.
+	IssueLoudness QualityIssue = "loudness"
+	// IssueTruePeak: the true peak is above the limit.
+	IssueTruePeak QualityIssue = "true_peak"
+	// IssueLowBitrate: a lossy source below the minimum bitrate. A
+	// transcode cannot add the lost detail; the source must be replaced.
+	IssueLowBitrate QualityIssue = "low_bitrate"
+	// IssueFileMissing: the file is not under the media root.
+	IssueFileMissing QualityIssue = "file_missing"
+)
+
+// QualityIssues lists every issue code (for the API enum).
+func QualityIssues() []QualityIssue {
+	return []QualityIssue{IssueFormat, IssueSampleRate, IssueChannels, IssueLoudness, IssueTruePeak, IssueLowBitrate, IssueFileMissing}
+}
+
+// Fix is a transcode the manager can start for a track: the buttons "Fix
+// loudness" and "Optimize track" of the panel.
+type Fix string
+
+// Fixes.
+const (
+	// FixLoudness brings the loudness to the target; the format stays.
+	FixLoudness Fix = "loudness"
+	// FixOptimize converts to the broadcast standard and fixes the
+	// loudness.
+	FixOptimize Fix = "optimize"
+)
+
+// Covers reports whether the fix removes issue.
+func (f Fix) Covers(issue QualityIssue) bool {
+	switch issue {
+	case IssueLoudness, IssueTruePeak:
+		return f == FixLoudness || f == FixOptimize
+	case IssueFormat, IssueSampleRate, IssueChannels:
+		return f == FixOptimize
+	default:
+		return false
+	}
+}
+
+// FixesFor returns the fixes that remove at least one of issues, in the
+// order loudness, optimize.
+func FixesFor(issues []QualityIssue) []Fix {
+	var out []Fix
+	for _, f := range []Fix{FixLoudness, FixOptimize} {
+		if slices.ContainsFunc(issues, f.Covers) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// Quality filters of the track list.
+const (
+	// QualityOK: analysed, without issues.
+	QualityOK = "ok"
+	// QualityIssuesFound: at least one issue.
+	QualityIssuesFound = "issues"
+	// QualityUnanalysed: never analysed.
+	QualityUnanalysed = "unanalysed"
+)
+
 // TrackCursor is the position after the last track of a page (title order).
 type TrackCursor struct {
 	Title string
@@ -69,8 +159,10 @@ type TrackFilter struct {
 	PlaylistID uint64
 	// Query matches the title or the artist name (case-insensitive).
 	Query string
-	After *TrackCursor
-	Limit int
+	// Quality is one of the Quality* filters, or empty.
+	Quality string
+	After   *TrackCursor
+	Limit   int
 }
 
 // TrackPage is a page of tracks in title order. Next is set when more

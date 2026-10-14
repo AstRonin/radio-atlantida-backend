@@ -42,6 +42,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - name: install ffmpeg
+        # The import tests analyse and encode real files (the runtime image
+        # has ffmpeg too).
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: unit and integration tests
         # testcontainers-go uses the Docker engine of the runner.
         run: go test -race -tags integration ./...

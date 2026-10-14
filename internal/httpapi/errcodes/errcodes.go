@@ -112,6 +112,12 @@ const (
 	// MissedItemResolved: the missed item was already rescheduled or
 	// dismissed.
 	MissedItemResolved Problem = "missed_item_resolved"
+	// MediaOperationRunning: an import, analysis, or transcode is running;
+	// they run one at a time. Wait for its terminal event.
+	MediaOperationRunning Problem = "media_operation_running"
+	// MediaToolsUnavailable: ffmpeg or ffprobe is not installed where the
+	// backend runs.
+	MediaToolsUnavailable Problem = "media_tools_unavailable"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -132,6 +138,7 @@ func Problems() []Problem {
 		FillerRequestNotFound, FillerRequestClosed, FillerRequestNotAnswerable, HourStarted,
 		LiquidsoapUnavailable,
 		MissedItemNotFound, MissedItemResolved,
+		MediaOperationRunning, MediaToolsUnavailable,
 	}
 }
 

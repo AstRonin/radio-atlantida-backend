@@ -7,13 +7,19 @@
     ],
     "streams": [
         {
+            "codec_name": "vorbis",
             "codec_type": "audio",
-            "sample_rate": "44100"
+            "sample_rate": "44100",
+            "channels": 1,
+            "tags": {
+                "encoder": "Lavc63.1.100 libvorbis",
+                "title": "Station ID"
+            }
         }
     ],
     "format": {
         "format_name": "ogg",
         "duration": "2.000000",
-        "bit_rate": "27652"
+        "bit_rate": "27732"
     }
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ingest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
@@ -134,6 +135,8 @@ var refusals = []refusal{
 	{playout.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiquidsoapUnavailable},
 	{outage.ErrMissedNotFound, http.StatusNotFound, errcodes.MissedItemNotFound},
 	{outage.ErrMissedResolved, http.StatusConflict, errcodes.MissedItemResolved},
+	{ingest.ErrRunning, http.StatusConflict, errcodes.MediaOperationRunning},
+	{ingest.ErrToolsUnavailable, http.StatusServiceUnavailable, errcodes.MediaToolsUnavailable},
 }
 
 func refusalFor(err error) *refusal {

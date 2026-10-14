@@ -45,11 +45,21 @@ const (
 	KindPlayoutReconcile Kind = "playout_reconcile"
 	// KindReschedule places a missed item into a later hour (§7.1).
 	KindReschedule Kind = "reschedule"
+	// KindImport imports the files of the inbox folder (phase 11).
+	KindImport Kind = "import"
+	// KindAnalyse analyses the files of tracks against the broadcast
+	// standard.
+	KindAnalyse Kind = "analyse"
+	// KindTranscode fixes track files: loudness, or the whole standard.
+	KindTranscode Kind = "transcode"
 )
 
 // Kinds lists every operation kind (for the OpenAPI event type enums).
 func Kinds() []Kind {
-	return []Kind{KindRetention, KindTrackPlan, KindClockBuild, KindMissedItems, KindPlayoutReconcile, KindReschedule}
+	return []Kind{
+		KindRetention, KindTrackPlan, KindClockBuild, KindMissedItems, KindPlayoutReconcile, KindReschedule,
+		KindImport, KindAnalyse, KindTranscode,
+	}
 }
 
 // CompletedEvent is the type of the success event.

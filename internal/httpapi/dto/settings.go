@@ -6,7 +6,7 @@ import "time"
 // so the panel can build the form field and check it before saving (§6.3).
 type Setting struct {
 	Key         string     `json:"key" doc:"Setting key, for example liquidsoap.fade_out_ms. The part before the first dot is the group."`
-	Group       string     `json:"group" enum:"station,stream,liquidsoap,rotation,filler,outage,retention,playout" doc:"Settings page the key belongs to."`
+	Group       string     `json:"group" enum:"station,stream,liquidsoap,rotation,filler,outage,retention,playout,import" doc:"Settings page the key belongs to."`
 	Description string     `json:"description" doc:"English description for developers; the panel shows its own help texts."`
 	Type        string     `json:"type" enum:"integer,number,string,boolean,object" doc:"JSON type of value."`
 	Unit        string     `json:"unit,omitempty" doc:"Unit of a number, for example ms, seconds, kbps."`
@@ -35,7 +35,7 @@ type SetSetting struct {
 // SecretStatus says whether a secret is set. The value is never returned.
 type SecretStatus struct {
 	Name        string `json:"name" doc:"Environment variable that holds the secret."`
-	Group       string `json:"group" enum:"station,stream,liquidsoap,rotation,filler,outage,retention,playout"`
+	Group       string `json:"group" enum:"station,stream,liquidsoap,rotation,filler,outage,retention,playout,import"`
 	Description string `json:"description"`
 	IsSet       bool   `json:"is_set"`
 }

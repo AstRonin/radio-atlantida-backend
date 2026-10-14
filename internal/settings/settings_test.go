@@ -115,7 +115,7 @@ func TestRegistryDefinitions(t *testing.T) {
 	keyPattern := regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`) // ck_settings_key
 	groups := []settings.Group{
 		settings.GroupStation, settings.GroupStream, settings.GroupLiquidsoap, settings.GroupRotation,
-		settings.GroupFiller, settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout,
+		settings.GroupFiller, settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout, settings.GroupImport,
 	}
 	reg := settings.NewRegistry()
 	for _, d := range append(reg.Settings(), reg.Secrets()...) {

@@ -7,7 +7,7 @@ COMPOSE       := $(DOCKER) compose -f docker-compose.dev.yml
 BIN           := bin/backend
 
 .PHONY: help run build test test-integration lint fmt vuln migrate openapi openapi-lint \
-        db-up db-down stack-up stack-down stack-logs media env
+        db-up db-down stack-up stack-down stack-logs media inbox env
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -66,3 +66,6 @@ stack-logs: ## Follow the dev stack logs
 
 media: ## Generate test MP3 files into .dev/media
 	dev/scripts/gen-media.sh ./.dev/media
+
+inbox: ## Generate inbox files with known quality issues into .dev/media/incoming
+	dev/scripts/gen-inbox.sh ./.dev/media
