@@ -32,10 +32,16 @@ const (
 	// KindRetention is the nightly cleanup of the play log and of old
 	// operations.
 	KindRetention Kind = "retention"
+	// KindTrackPlan is the plan job: due filler reminders, then the track
+	// plan extended to its horizon (§7).
+	KindTrackPlan Kind = "track_plan"
+	// KindClockBuild rebuilds the planned hours after a clock or grid
+	// change (§6.5, §7).
+	KindClockBuild Kind = "clock_build"
 )
 
 // Kinds lists every operation kind (for the OpenAPI event type enums).
-func Kinds() []Kind { return []Kind{KindRetention} }
+func Kinds() []Kind { return []Kind{KindRetention, KindTrackPlan, KindClockBuild} }
 
 // CompletedEvent is the type of the success event.
 func (k Kind) CompletedEvent() string { return string(k) + ".completed" }
@@ -58,7 +64,7 @@ const (
 
 // Operation is the stored state of one operation.
 type Operation struct {
-	ID            int64
+	ID            uint64
 	Kind          string
 	Status        Status
 	StartedAt     time.Time
@@ -84,7 +90,7 @@ type Publisher interface {
 // Store persists operations (internal/repository/operations).
 type Store interface {
 	// Insert stores a running operation and returns its ID.
-	Insert(ctx context.Context, kind Kind, startedAt time.Time) (int64, error)
+	Insert(ctx context.Context, kind Kind, startedAt time.Time) (uint64, error)
 	// Finish moves a running operation to its final state and returns its
 	// kind, or ErrNotRunning if it is not running.
 	Finish(ctx context.Context, f Finish) (Kind, error)
@@ -92,14 +98,14 @@ type Store interface {
 	// the number of rows changed.
 	FailRunning(ctx context.Context, at time.Time, message string) (int64, error)
 	// Get returns one operation or ErrNotFound.
-	Get(ctx context.Context, id int64) (Operation, error)
+	Get(ctx context.Context, id uint64) (Operation, error)
 	// List returns operations in ID order.
 	List(ctx context.Context, f ListFilter) ([]Operation, error)
 }
 
 // Finish is the final state of an operation.
 type Finish struct {
-	ID            int64
+	ID            uint64
 	Status        Status
 	FinishedAt    time.Time
 	ErrorMessage  *string
@@ -138,7 +144,7 @@ func NewTracker(store Store, pub Publisher, pool *workerpool.Pool, log *slog.Log
 }
 
 // Start stores a new running operation and returns its ID.
-func (t *Tracker) Start(ctx context.Context, kind Kind) (int64, error) {
+func (t *Tracker) Start(ctx context.Context, kind Kind) (uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	id, err := t.store.Insert(ctx, kind, t.now().UTC())
@@ -150,7 +156,7 @@ func (t *Tracker) Start(ctx context.Context, kind Kind) (int64, error) {
 
 // Complete stores the success of a running operation and sends
 // <kind>.completed.
-func (t *Tracker) Complete(ctx context.Context, id int64, summary string) error {
+func (t *Tracker) Complete(ctx context.Context, id uint64, summary string) error {
 	at := t.now().UTC()
 	kind, err := t.finish(ctx, id, StatusCompleted, at, nil, &summary)
 	if err != nil {
@@ -168,7 +174,7 @@ func (t *Tracker) Complete(ctx context.Context, id int64, summary string) error 
 // Fail stores the failure of a running operation, logs cause at ERROR with
 // component (which also raises an error alert in the panel), and sends
 // <kind>.failed.
-func (t *Tracker) Fail(ctx context.Context, id int64, component logging.Component, cause error) error {
+func (t *Tracker) Fail(ctx context.Context, id uint64, component logging.Component, cause error) error {
 	at := t.now().UTC()
 	msg := truncate(cause.Error(), maxErrorMessage)
 	kind, err := t.finish(ctx, id, StatusFailed, at, &msg, nil)
@@ -192,7 +198,7 @@ func (t *Tracker) Fail(ctx context.Context, id int64, component logging.Componen
 }
 
 // Progress sends <kind>.progress. It is not stored.
-func (t *Tracker) Progress(id int64, kind Kind, done, total int, message string) {
+func (t *Tracker) Progress(id uint64, kind Kind, done, total int, message string) {
 	t.pub.Publish(ws.OperationProgressEvent{
 		Type:        kind.ProgressEvent(),
 		Time:        t.now().UTC(),
@@ -201,7 +207,7 @@ func (t *Tracker) Progress(id int64, kind Kind, done, total int, message string)
 	})
 }
 
-func (t *Tracker) finish(ctx context.Context, id int64, status Status, at time.Time, errMsg, summary *string) (Kind, error) {
+func (t *Tracker) finish(ctx context.Context, id uint64, status Status, at time.Time, errMsg, summary *string) (Kind, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	kind, err := t.store.Finish(ctx, Finish{
@@ -221,7 +227,7 @@ func (t *Tracker) finish(ctx context.Context, id int64, status Status, at time.T
 // outlives the request that started it (§6.5). Copy request values such as
 // the request ID into it explicitly. A panic in fn fails the operation, and
 // so does a pool that refuses fn (shutdown): the row never stays running.
-func (t *Tracker) Run(ctx context.Context, kind Kind, component logging.Component, fn Func) (int64, error) {
+func (t *Tracker) Run(ctx context.Context, kind Kind, component logging.Component, fn Func) (uint64, error) {
 	id, err := t.Start(ctx, kind)
 	if err != nil {
 		return 0, err
@@ -246,7 +252,7 @@ func (t *Tracker) Run(ctx context.Context, kind Kind, component logging.Componen
 // Do runs fn as an operation in the calling goroutine (scheduled jobs). The
 // outcome of fn is stored, logged, and published; the returned error reports
 // only a failure to store the operation.
-func (t *Tracker) Do(ctx context.Context, kind Kind, component logging.Component, fn Func) (int64, error) {
+func (t *Tracker) Do(ctx context.Context, kind Kind, component logging.Component, fn Func) (uint64, error) {
 	id, err := t.Start(ctx, kind)
 	if err != nil {
 		return 0, err
@@ -257,7 +263,15 @@ func (t *Tracker) Do(ctx context.Context, kind Kind, component logging.Component
 // Wait blocks until every operation started by Run has finished.
 func (t *Tracker) Wait() { t.wg.Wait() }
 
-func (t *Tracker) execute(ctx context.Context, id int64, component logging.Component, fn Func) error {
+// Execute runs fn for an operation already stored by Start, in the calling
+// goroutine, and stores, logs, and publishes its outcome. It serves workers
+// that own their queue (the rotation planner). The returned error reports
+// only a failure to store the outcome.
+func (t *Tracker) Execute(ctx context.Context, id uint64, component logging.Component, fn Func) error {
+	return t.execute(ctx, id, component, fn)
+}
+
+func (t *Tracker) execute(ctx context.Context, id uint64, component logging.Component, fn Func) error {
 	summary, err := call(ctx, fn)
 
 	// The final write must happen even when ctx is cancelled (shutdown), so
@@ -307,7 +321,7 @@ func (t *Tracker) FailInterrupted(ctx context.Context) (int64, error) {
 }
 
 // Get returns one operation, or ErrNotFound.
-func (t *Tracker) Get(ctx context.Context, id int64) (Operation, error) {
+func (t *Tracker) Get(ctx context.Context, id uint64) (Operation, error) {
 	op, err := t.store.Get(ctx, id)
 	if err != nil {
 		return Operation{}, fmt.Errorf("get operation %d: %w", id, err)
@@ -322,7 +336,7 @@ type ListFilter struct {
 	// all.
 	Since time.Time
 	// AfterID continues a previous page: only IDs greater than it.
-	AfterID int64
+	AfterID uint64
 	// Limit is the page size.
 	Limit int
 }

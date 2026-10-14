@@ -19,7 +19,7 @@ func TestDeletePlayLog(t *testing.T) {
 	ctx := t.Context()
 	pool := d.Pool
 
-	var trackID, outageID int64
+	var trackID, outageID uint64
 	require.NoError(t, pool.QueryRow(ctx, `
 		INSERT INTO tracks (title, file_path, type_id)
 		VALUES ('Song', 'a.mp3', (SELECT id FROM playlist_types WHERE code = 'music'))
@@ -31,19 +31,19 @@ func TestDeletePlayLog(t *testing.T) {
 	cutoff := now.Add(-10 * 24 * time.Hour)
 	old := cutoff.Add(-time.Hour)
 	recent := cutoff.Add(time.Hour)
-	insertAired := func(status string, startedAt time.Time) int64 {
-		var id int64
+	insertAired := func(status string, startedAt time.Time) uint64 {
+		var id uint64
 		require.NoError(t, pool.QueryRow(ctx, `
 			INSERT INTO play_log (track_id, status, planned_start_utc, started_at, actual_duration_ms, truncated)
 			VALUES ($1, $2, $3, $3, 1000, $2 = 'truncated') RETURNING id`,
 			trackID, status, startedAt).Scan(&id))
 		return id
 	}
-	insertMissed := func(resolution string, resolvedAt *time.Time) int64 {
-		var id int64
-		var resolvedItem *int64
+	insertMissed := func(resolution string, resolvedAt *time.Time) uint64 {
+		var id uint64
+		var resolvedItem *uint64
 		if resolution == "rescheduled" {
-			one := int64(1)
+			one := uint64(1)
 			resolvedItem = &one
 		}
 		require.NoError(t, pool.QueryRow(ctx, `
@@ -53,7 +53,7 @@ func TestDeletePlayLog(t *testing.T) {
 		return id
 	}
 
-	keep := []int64{
+	keep := []uint64{
 		insertAired("aired", recent),
 		insertMissed("open", nil), // open missed items are never deleted
 		insertMissed("dismissed", &recent),
@@ -72,7 +72,7 @@ func TestDeletePlayLog(t *testing.T) {
 
 	rows, err := pool.Query(ctx, `SELECT id FROM play_log`)
 	require.NoError(t, err)
-	left, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	left, err := pgx.CollectRows(rows, pgx.RowTo[uint64])
 	require.NoError(t, err)
 	require.ElementsMatch(t, keep, left)
 }
@@ -82,8 +82,8 @@ func TestDeleteOperations(t *testing.T) {
 	ctx := t.Context()
 
 	cutoff := now.Add(-10 * 24 * time.Hour)
-	insert := func(status string, finishedAt *time.Time) int64 {
-		var id int64
+	insert := func(status string, finishedAt *time.Time) uint64 {
+		var id uint64
 		var msg *string
 		if status == "failed" {
 			m := "boom"
@@ -97,7 +97,7 @@ func TestDeleteOperations(t *testing.T) {
 	}
 	old := cutoff.Add(-time.Hour)
 	recent := cutoff.Add(time.Hour)
-	keep := []int64{
+	keep := []uint64{
 		insert("running", nil), // running operations are never deleted
 		insert("completed", &recent),
 	}
@@ -114,7 +114,7 @@ func TestDeleteOperations(t *testing.T) {
 
 	rows, err := d.Pool.Query(ctx, `SELECT id FROM operations`)
 	require.NoError(t, err)
-	left, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	left, err := pgx.CollectRows(rows, pgx.RowTo[uint64])
 	require.NoError(t, err)
 	require.ElementsMatch(t, keep, left)
 }

@@ -66,7 +66,7 @@ func TestOperationEventOverWebSocketAndREST(t *testing.T) {
 	require.Contains(t, string(msg), `Z"`, "event time is UTC")
 	tracker.Wait()
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/api/operations/"+strconv.FormatInt(id, 10), nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/api/operations/"+strconv.FormatUint(id, 10), nil)
 	require.NoError(t, err)
 	res, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestOperationEventOverWebSocketAndREST(t *testing.T) {
 	require.Equal(t, http.StatusOK, res.StatusCode, string(body))
 
 	var op struct {
-		ID            int64  `json:"id"`
+		ID            uint64 `json:"id"`
 		Status        string `json:"status"`
 		ResultSummary string `json:"result_summary"`
 	}

@@ -52,6 +52,10 @@ type Deps struct {
 	Library    handlers.Library
 	PlayRules  handlers.PlayRules
 	Separation handlers.Separation
+	Clocks     handlers.Clocks
+	Grid       handlers.Grid
+	Rotation   handlers.Rotation
+	Playout    handlers.Playout
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -90,7 +94,8 @@ func NewRouter(d Deps) http.Handler {
 	api := newAPI(timed, r, d.Version)
 	handlers.Register(api, handlers.Deps{
 		Log: d.Log, Operations: d.Operations, Logs: d.Logs, Settings: d.Settings,
-		Library: d.Library, PlayRules: d.PlayRules, Separation: d.Separation, Now: d.Now,
+		Library: d.Library, PlayRules: d.PlayRules, Separation: d.Separation,
+		Clocks: d.Clocks, Grid: d.Grid, Rotation: d.Rotation, Playout: d.Playout, Now: d.Now,
 	})
 
 	return r

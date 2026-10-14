@@ -11,13 +11,17 @@ import (
 	humavalidation "github.com/danielgtaylor/huma/v2/validation"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
+	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
@@ -34,6 +38,7 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 		invalid        *validation.Error
 		libraryInUse   *library.InUseError
 		ruleInUse      *playrules.InUseError
+		clockInUse     *clocks.InUseError
 	)
 	switch {
 	case errors.As(err, &p):
@@ -51,6 +56,11 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 	case errors.As(err, &ruleInUse):
 		p = dto.NewProblem(http.StatusConflict, errcodes.PlayRuleInUse, ruleInUse.Error())
 		for _, r := range ruleInUse.UsedBy {
+			p.UsedBy = append(p.UsedBy, dto.EntityRef{Kind: r.Kind, ID: r.ID, Name: r.Name})
+		}
+	case errors.As(err, &clockInUse):
+		p = dto.NewProblem(http.StatusConflict, errcodes.ClockInUse, clockInUse.Error())
+		for _, r := range clockInUse.UsedBy {
 			p.UsedBy = append(p.UsedBy, dto.EntityRef{Kind: r.Kind, ID: r.ID, Name: r.Name})
 		}
 	case errors.Is(err, media.ErrFileNotFound):
@@ -112,6 +122,15 @@ var refusals = []refusal{
 	{playrules.ErrTrackNotFound, http.StatusNotFound, errcodes.TrackNotFound},
 	{playrules.ErrPlaylistNotFound, http.StatusNotFound, errcodes.PlaylistNotFound},
 	{separation.ErrNotFound, http.StatusNotFound, errcodes.SeparationRuleNotFound},
+	{clocks.ErrNotFound, http.StatusNotFound, errcodes.ClockNotFound},
+	{clocks.ErrHasHistory, http.StatusConflict, errcodes.ClockHasHistory},
+	{grid.ErrNotFound, http.StatusNotFound, errcodes.GridSlotNotFound},
+	{grid.ErrConflict, http.StatusConflict, errcodes.GridConflict},
+	{rotation.ErrRequestNotFound, http.StatusNotFound, errcodes.FillerRequestNotFound},
+	{rotation.ErrRequestClosed, http.StatusConflict, errcodes.FillerRequestClosed},
+	{rotation.ErrNotAnswerable, http.StatusConflict, errcodes.FillerRequestNotAnswerable},
+	{rotation.ErrHourStarted, http.StatusConflict, errcodes.HourStarted},
+	{playout.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiquidsoapUnavailable},
 }
 
 func refusalFor(err error) *refusal {
@@ -134,12 +153,16 @@ var inUseCodes = map[error]errcodes.Problem{
 // validationRuleCodes map the rules of a domain validation error to field
 // codes.
 var validationRuleCodes = map[validation.Rule]errcodes.Field{
-	validation.Required:  errcodes.Required,
-	validation.Range:     errcodes.Range,
-	validation.Format:    errcodes.Format,
-	validation.Taken:     errcodes.Taken,
-	validation.UnknownID: errcodes.UnknownID,
-	validation.Invalid:   errcodes.Invalid,
+	validation.Required:   errcodes.Required,
+	validation.Range:      errcodes.Range,
+	validation.Format:     errcodes.Format,
+	validation.Taken:      errcodes.Taken,
+	validation.UnknownID:  errcodes.UnknownID,
+	validation.Invalid:    errcodes.Invalid,
+	validation.Overlap:    errcodes.Overlap,
+	validation.DoesNotFit: errcodes.DoesNotFit,
+	validation.Order:      errcodes.Order,
+	validation.Blocked:    errcodes.Blocked,
 }
 
 // settingRuleCodes maps the rules of a refused setting value to field codes.

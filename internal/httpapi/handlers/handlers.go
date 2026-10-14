@@ -17,7 +17,7 @@ import (
 
 // OperationStore reads operations.
 type OperationStore interface {
-	Get(ctx context.Context, id int64) (operations.Operation, error)
+	Get(ctx context.Context, id uint64) (operations.Operation, error)
 	List(ctx context.Context, f operations.ListFilter) ([]operations.Operation, error)
 }
 
@@ -38,6 +38,10 @@ type Deps struct {
 	Library    Library
 	PlayRules  PlayRules
 	Separation Separation
+	Clocks     Clocks
+	Grid       Grid
+	Rotation   Rotation
+	Playout    Playout
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -55,6 +59,10 @@ func Register(api huma.API, d Deps) {
 	registerTracks(api, log, d.Library, d.PlayRules)
 	registerPlayRules(api, log, d.PlayRules)
 	registerSeparationRules(api, log, d.Separation)
+	registerClocks(api, log, d.Clocks, d.Rotation)
+	registerGrid(api, log, d.Grid, d.Rotation)
+	registerRotation(api, log, d.Rotation)
+	registerPlayout(api, log, d.Playout)
 }
 
 // Streaming is the operation metadata key of routes that stream a response
@@ -86,14 +94,14 @@ func errorsWith(statuses ...int) []int { return append(statuses, commonErrors...
 
 // idInput addresses a resource by its ID.
 type idInput struct {
-	ID int64 `path:"id" minimum:"1"`
+	ID uint64 `path:"id" minimum:"1"`
 }
 
 // emptyIDs returns ids, or an empty list instead of nil, so the API sends []
 // rather than null.
-func emptyIDs(ids []int64) []int64 {
+func emptyIDs(ids []uint64) []uint64 {
 	if ids == nil {
-		return []int64{}
+		return []uint64{}
 	}
 	return ids
 }

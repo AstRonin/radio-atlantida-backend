@@ -5,7 +5,7 @@ import "time"
 // PlayRule limits when a track may play (§7.3). Times and weekdays are in
 // station local time.
 type PlayRule struct {
-	ID                 int64     `json:"id"`
+	ID                 uint64    `json:"id"`
 	Name               string    `json:"name"`
 	WindowFrom         *string   `json:"window_from,omitempty" doc:"Start of the allowed window, HH:MM."`
 	WindowTo           *string   `json:"window_to,omitempty" doc:"End of the allowed window, HH:MM; earlier than window_from when the window crosses midnight."`
@@ -13,8 +13,8 @@ type PlayRule struct {
 	MinIntervalMinutes *int      `json:"min_interval_minutes,omitempty" doc:"Minutes between two starts of the same track."`
 	MaxPerHour         *int      `json:"max_per_hour,omitempty" doc:"Starts of the same track within one clock hour."`
 	Notes              string    `json:"notes"`
-	TrackIDs           []int64   `json:"track_ids" nullable:"false" doc:"Tracks the rule is applied to, in ID order."`
-	PlaylistIDs        []int64   `json:"playlist_ids" nullable:"false" doc:"Playlists the rule is applied to, in ID order; it applies to each of their tracks."`
+	TrackIDs           []uint64  `json:"track_ids" nullable:"false" doc:"Tracks the rule is applied to, in ID order."`
+	PlaylistIDs        []uint64  `json:"playlist_ids" nullable:"false" doc:"Playlists the rule is applied to, in ID order; it applies to each of their tracks."`
 	TrackCount         int       `json:"track_count"`
 	PlaylistCount      int       `json:"playlist_count"`
 	CreatedAt          time.Time `json:"created_at"`
@@ -41,14 +41,14 @@ type PlayRuleBody struct {
 
 // SetPlayRuleTargets is the body of PUT /api/play-rules/{id}/targets.
 type SetPlayRuleTargets struct {
-	TrackIDs    []int64 `json:"track_ids" nullable:"false" uniqueItems:"true" maxItems:"100000" doc:"Every track the rule applies to; tracks not listed lose it."`
-	PlaylistIDs []int64 `json:"playlist_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every playlist the rule applies to; playlists not listed lose it."`
+	TrackIDs    []uint64 `json:"track_ids" nullable:"false" uniqueItems:"true" maxItems:"100000" doc:"Every track the rule applies to; tracks not listed lose it."`
+	PlaylistIDs []uint64 `json:"playlist_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every playlist the rule applies to; playlists not listed lose it."`
 }
 
 // SeparationRule is the minimum time between two plays of the same track or
 // of tracks by the same artist (§4). Rotation reads every value from here.
 type SeparationRule struct {
-	ID               int64  `json:"id"`
+	ID               uint64 `json:"id"`
 	Scope            string `json:"scope" enum:"track,artist"`
 	MinIntervalHours int    `json:"min_interval_hours"`
 	Notes            string `json:"notes"`

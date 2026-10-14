@@ -30,18 +30,18 @@ type fakeTracks struct {
 
 func (f *fakeTracks) WithTx(db.Tx) TrackStore { return f }
 
-func (f *fakeTracks) Create(_ context.Context, in TrackInput) (int64, error) {
+func (f *fakeTracks) Create(_ context.Context, in TrackInput) (uint64, error) {
 	f.created = in
 	return 1, nil
 }
 
-func (f *fakeTracks) SetPlaylists(context.Context, int64, []int64) error { return nil }
+func (f *fakeTracks) SetPlaylists(context.Context, uint64, []uint64) error { return nil }
 
-func (f *fakeTracks) Get(context.Context, int64) (Track, error) { return Track{ID: 1}, nil }
+func (f *fakeTracks) Get(context.Context, uint64) (Track, error) { return Track{ID: 1}, nil }
 
-func (f *fakeTracks) Delete(context.Context, int64) error { return f.deleteErr }
+func (f *fakeTracks) Delete(context.Context, uint64) error { return f.deleteErr }
 
-func (f *fakeTracks) Users(context.Context, int64, int) ([]Ref, error) { return f.users, nil }
+func (f *fakeTracks) Users(context.Context, uint64, int) ([]Ref, error) { return f.users, nil }
 
 type fakeProber struct {
 	info media.Info
@@ -177,9 +177,9 @@ type fakeTypes struct {
 	deleted bool
 }
 
-func (f *fakeTypes) Get(context.Context, int64) (PlaylistType, error) { return f.t, nil }
+func (f *fakeTypes) Get(context.Context, uint64) (PlaylistType, error) { return f.t, nil }
 
-func (f *fakeTypes) Delete(context.Context, int64) error {
+func (f *fakeTypes) Delete(context.Context, uint64) error {
 	f.deleted = true
 	return nil
 }

@@ -16,19 +16,19 @@ import (
 // PlayRules manages play rules and their targets (*playrules.Service).
 type PlayRules interface {
 	List(ctx context.Context) ([]playrules.Rule, error)
-	Get(ctx context.Context, id int64) (playrules.Rule, error)
+	Get(ctx context.Context, id uint64) (playrules.Rule, error)
 	Create(ctx context.Context, in playrules.RuleInput) (playrules.Rule, error)
-	Update(ctx context.Context, id int64, in playrules.RuleInput) (playrules.Rule, error)
-	Delete(ctx context.Context, id int64) error
-	SetTargets(ctx context.Context, id int64, trackIDs, playlistIDs []int64) (playrules.Rule, error)
-	SetTrackRules(ctx context.Context, trackID int64, ruleIDs []int64) ([]int64, error)
-	SetPlaylistRules(ctx context.Context, playlistID int64, ruleIDs []int64) ([]int64, error)
+	Update(ctx context.Context, id uint64, in playrules.RuleInput) (playrules.Rule, error)
+	Delete(ctx context.Context, id uint64) error
+	SetTargets(ctx context.Context, id uint64, trackIDs, playlistIDs []uint64) (playrules.Rule, error)
+	SetTrackRules(ctx context.Context, trackID uint64, ruleIDs []uint64) ([]uint64, error)
+	SetPlaylistRules(ctx context.Context, playlistID uint64, ruleIDs []uint64) ([]uint64, error)
 }
 
 // Separation manages separation rules (*separation.Service).
 type Separation interface {
 	List(ctx context.Context) ([]separation.Rule, error)
-	Update(ctx context.Context, id int64, minIntervalHours int, notes string) (separation.Rule, error)
+	Update(ctx context.Context, id uint64, minIntervalHours int, notes string) (separation.Rule, error)
 }
 
 type playRuleOutput struct {
@@ -44,12 +44,12 @@ type createPlayRuleInput struct {
 }
 
 type updatePlayRuleInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.PlayRuleBody
 }
 
 type setPlayRuleTargetsInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.SetPlayRuleTargets
 }
 
@@ -213,7 +213,7 @@ type separationRuleOutput struct {
 }
 
 type updateSeparationRuleInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.UpdateSeparationRule
 }
 

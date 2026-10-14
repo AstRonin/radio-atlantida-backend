@@ -20,7 +20,7 @@ type Types struct {
 func NewTypes(d *db.DB) *Types { return &Types{g: d.Gorm} }
 
 type typeRow struct {
-	ID            int64
+	ID            uint64
 	Code          string
 	Name          string
 	IsSystem      bool
@@ -57,7 +57,7 @@ func (s *Types) List(ctx context.Context) ([]library.PlaylistType, error) {
 }
 
 // Get returns one type, or library.ErrTypeNotFound.
-func (s *Types) Get(ctx context.Context, id int64) (library.PlaylistType, error) {
+func (s *Types) Get(ctx context.Context, id uint64) (library.PlaylistType, error) {
 	var rows []typeRow
 	if err := s.g.WithContext(ctx).Raw(selectTypes+` WHERE t.id = ?`, id).Scan(&rows).Error; err != nil {
 		return library.PlaylistType{}, fmt.Errorf("select playlist type %d: %w", id, err)
@@ -69,7 +69,7 @@ func (s *Types) Get(ctx context.Context, id int64) (library.PlaylistType, error)
 }
 
 type typeInsert struct {
-	ID   int64 `gorm:"primaryKey"`
+	ID   uint64 `gorm:"primaryKey"`
 	Code string
 	Name string
 }
@@ -77,7 +77,7 @@ type typeInsert struct {
 func (typeInsert) TableName() string { return "playlist_types" }
 
 // Create adds a custom type (is_system defaults to false).
-func (s *Types) Create(ctx context.Context, code, name string) (int64, error) {
+func (s *Types) Create(ctx context.Context, code, name string) (uint64, error) {
 	r := typeInsert{Code: code, Name: name}
 	if err := s.g.WithContext(ctx).Create(&r).Error; err != nil {
 		return 0, writeError("insert playlist type", err)
@@ -86,7 +86,7 @@ func (s *Types) Create(ctx context.Context, code, name string) (int64, error) {
 }
 
 // Rename changes the name; the code never changes (§4).
-func (s *Types) Rename(ctx context.Context, id int64, name string) error {
+func (s *Types) Rename(ctx context.Context, id uint64, name string) error {
 	res := s.g.WithContext(ctx).Table("playlist_types").Where("id = ?", id).Update("name", name)
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("rename playlist type %d", id), res.Error)
@@ -99,7 +99,7 @@ func (s *Types) Rename(ctx context.Context, id int64, name string) error {
 
 // Delete removes a type. The database refuses it while a playlist or a
 // track has the type (fk_playlists_type_id, fk_tracks_type_id: RESTRICT).
-func (s *Types) Delete(ctx context.Context, id int64) error {
+func (s *Types) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM playlist_types WHERE id = ?`, id)
 	if res.Error != nil {
 		return deleteError(fmt.Sprintf("delete playlist type %d", id), res.Error)
@@ -111,7 +111,7 @@ func (s *Types) Delete(ctx context.Context, id int64) error {
 }
 
 // Users returns the playlists and tracks of the type, at most limit of each.
-func (s *Types) Users(ctx context.Context, id int64, limit int) ([]library.Ref, error) {
+func (s *Types) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
 	var rows []refRow
 	err := s.g.WithContext(ctx).Raw(`
 (SELECT 'playlist' AS kind, id, name FROM playlists WHERE type_id = ? ORDER BY name, id LIMIT ?)

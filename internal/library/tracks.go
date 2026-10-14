@@ -18,7 +18,7 @@ import (
 
 // Track is a file in the library with its metadata (§4).
 type Track struct {
-	ID     int64
+	ID     uint64
 	Title  string
 	Artist *ArtistRef
 	// DurationMS is nil until it is entered or read from the file; such a
@@ -36,37 +36,37 @@ type Track struct {
 	FileChecksum *string
 	CreatedAt    time.Time
 	// PlaylistIDs and PlayRuleIDs are in ID order.
-	PlaylistIDs []int64
-	PlayRuleIDs []int64
+	PlaylistIDs []uint64
+	PlayRuleIDs []uint64
 }
 
 // TrackInput is the editable part of a track. Nil metadata fields are read
 // from the file when it exists and ffprobe is available.
 type TrackInput struct {
 	Title        string
-	ArtistID     *int64
+	ArtistID     *uint64
 	FilePath     string
-	TypeID       int64
+	TypeID       uint64
 	DurationMS   *int
 	Format       *string
 	Bitrate      *int
 	SampleRate   *int
 	QualityOK    *bool
 	QualityNotes string
-	PlaylistIDs  []int64
+	PlaylistIDs  []uint64
 }
 
 // TrackCursor is the position after the last track of a page (title order).
 type TrackCursor struct {
 	Title string
-	ID    int64
+	ID    uint64
 }
 
 // TrackFilter selects tracks. Zero fields do not filter.
 type TrackFilter struct {
-	TypeID     int64
-	ArtistID   int64
-	PlaylistID int64
+	TypeID     uint64
+	ArtistID   uint64
+	PlaylistID uint64
 	// Query matches the title or the artist name (case-insensitive).
 	Query string
 	After *TrackCursor
@@ -88,23 +88,23 @@ type TrackStore interface {
 	// f.After.
 	List(ctx context.Context, f TrackFilter) ([]Track, error)
 	// Get returns one track, or ErrTrackNotFound.
-	Get(ctx context.Context, id int64) (Track, error)
+	Get(ctx context.Context, id uint64) (Track, error)
 	// Create adds a track without playlists. ErrFilePathTaken,
 	// ErrUnknownType, ErrUnknownArtist.
-	Create(ctx context.Context, in TrackInput) (int64, error)
+	Create(ctx context.Context, in TrackInput) (uint64, error)
 	// Update changes the metadata of a track (not its playlists).
 	// ErrTrackNotFound, ErrFilePathTaken, ErrUnknownType, ErrUnknownArtist.
-	Update(ctx context.Context, id int64, in TrackInput) error
+	Update(ctx context.Context, id uint64, in TrackInput) error
 	// SetPlaylists makes playlistIDs the playlists of the track.
 	// ErrUnknownPlaylist.
-	SetPlaylists(ctx context.Context, id int64, playlistIDs []int64) error
+	SetPlaylists(ctx context.Context, id uint64, playlistIDs []uint64) error
 	// Delete removes a track, its memberships, and its play rule links.
 	// ErrTrackNotFound; ErrTrackHasHistory when the play log or the track
 	// plan refers to it; ErrInUse when a clock filler pool does.
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id uint64) error
 	// Users returns the clocks whose filler pool holds the track, at most
 	// limit.
-	Users(ctx context.Context, id int64, limit int) ([]Ref, error)
+	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
 }
 
 // Files opens track files under MEDIA_ROOT (*media.Library).
@@ -138,7 +138,7 @@ func (s *Service) ListTracks(ctx context.Context, f TrackFilter) (TrackPage, err
 }
 
 // GetTrack returns one track.
-func (s *Service) GetTrack(ctx context.Context, id int64) (Track, error) {
+func (s *Service) GetTrack(ctx context.Context, id uint64) (Track, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	return s.tracks.Get(ctx, id)
@@ -153,7 +153,7 @@ func (s *Service) CreateTrack(ctx context.Context, in TrackInput) (Track, error)
 	}
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	var id int64
+	var id uint64
 	err = s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		ts := s.tracks.WithTx(tx)
 		created, cerr := ts.Create(ctx, in)
@@ -170,7 +170,7 @@ func (s *Service) CreateTrack(ctx context.Context, in TrackInput) (Track, error)
 }
 
 // UpdateTrack replaces the metadata and the playlists of a track.
-func (s *Service) UpdateTrack(ctx context.Context, id int64, in TrackInput) (Track, error) {
+func (s *Service) UpdateTrack(ctx context.Context, id uint64, in TrackInput) (Track, error) {
 	in, err := s.prepareTrack(ctx, in)
 	if err != nil {
 		return Track{}, err
@@ -192,7 +192,7 @@ func (s *Service) UpdateTrack(ctx context.Context, id int64, in TrackInput) (Tra
 
 // DeleteTrack deletes a track that has no play history, is not planned, and
 // is in no filler pool. The file is not touched.
-func (s *Service) DeleteTrack(ctx context.Context, id int64) error {
+func (s *Service) DeleteTrack(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	err := s.tracks.Delete(ctx, id)
@@ -214,7 +214,7 @@ type Audio struct {
 // TrackAudio opens the file of a track for the preview player. It returns
 // ErrTrackNotFound for an unknown track and media.ErrFileNotFound when the
 // file is missing. The preview never reaches the air or the play log.
-func (s *Service) TrackAudio(ctx context.Context, id int64) (Audio, error) {
+func (s *Service) TrackAudio(ctx context.Context, id uint64) (Audio, error) {
 	t, err := s.GetTrack(ctx, id)
 	if err != nil {
 		return Audio{}, err

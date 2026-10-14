@@ -23,7 +23,7 @@ type createPlaylistTypeInput struct {
 }
 
 type renamePlaylistTypeInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.RenamePlaylistType
 }
 

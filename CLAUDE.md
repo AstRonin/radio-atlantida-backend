@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6.
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -69,12 +69,20 @@ internal/
   library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete
   playrules/          play rules (window, weekdays, min interval, max per hour) and their track/playlist targets
   separation/         separation rules (edit only; capped at the play log retention)
+  clocks/             clock templates: Arrange/LayoutOf (segments, shortfall, fixed replacement, filler holders), save flow, dry check warnings
+  grid/               grid slots (station local weekday/hour/dates), assign/unassign with trim/split/delete, Schedule, Hours, ClockHours
+  rotation/           track plan: Build (pure, seeded: selection, separation and play rules, crossing, filler, emergency), Service.Sync (missing/stale hours, plan_hours), filler reminders (answer, deadline), planner queue for clock_build
+  liquidsoap/         telnet control client (push, queue, var.set, ping), link state and connection generation
+  playout/            pusher (hour queues by parity, lookahead, pre-push, resync), callbacks → play log, now playing, music gain, emergency picks
   media/              MEDIA_ROOT: path rules, os.OpenInRoot (no escape, symlinks included), ffprobe, content types
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
     operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
     library/ separation/                           (GORM; library: one store per aggregate)
     playrules/                                     (pgx: time and smallint[] columns, array-parameter link sets)
-  clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)
+    clocks/ grid/                                  (GORM CRUD; clocks.CheckStore is pgx for the dry check reads)
+    rotation/                                      (pgx: library snapshot, history window, plan hours, CopyFrom of items, reminders)
+    playout/                                       (pgx: items to push, queued marks, move to play_log, ends, emergency tracks)
+  outage/ live/                                   (later phases)
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
 docker-compose.dev.yml  dev/test stack only (production compose is in radio-atlantida-deploy)
@@ -151,6 +159,7 @@ docs/                 requirements, design, phase plans
 ## Dev stack notes
 
 - Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
-- All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`request.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
-- Liquidsoap writes the journal to `.dev/journal/journal-YYYY-MM-DD.jsonl` (one JSON line per track `start`/`end`, UTC) and POSTs the same line to `BACKEND_CALLBACK_URL` (endpoint arrives in the Liquidsoap phase; 404 until then, harmless).
+- All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`hour_0.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
+- Liquidsoap has two hour queues, `hour_0` and `hour_1` (`hour_<p>.push <uri>`, `hour_<p>.queue`); a time switch plays the queue of the current station hour, using `hour_shift` set by the backend. Behind it, `request.dynamic` asks `BACKEND_EMERGENCY_URL` for emergency tracks, then a safety tone.
+- Liquidsoap writes the journal to `.dev/journal/journal-YYYY-MM-DD.jsonl` (one JSON line per track `start`/`end` and per Icecast `output` change, UTC) and POSTs the same line to `BACKEND_CALLBACK_URL` (`/api/playout/callback`).
 - Connection settings (Icecast/Liquidsoap hosts and ports, stream format) are admin settings (`internal/settings`) with code defaults equal to the compose service names and ports (`TestDefaultsMatchDevStack`). For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.

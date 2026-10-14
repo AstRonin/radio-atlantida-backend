@@ -5,28 +5,40 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/config"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
+	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
 	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
+	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
+	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	playoutrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playout"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
+	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
 	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
 	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
@@ -107,10 +119,17 @@ func serve(ctx context.Context) error {
 		mediaLib, prober, log)
 	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool))
 	separationSvc := separation.NewService(separationrepo.New(database), separationLimit(settingsSvc))
+	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
+	clocksSvc := clocks.NewService(database, clocksrepo.New(database), clocksrepo.NewCheck(database.Pool),
+		gridSvc, clockSettings(settingsSvc), time.Now)
+	rotationSvc := rotation.NewService(database, rotationrepo.New(database.Pool), clocksSvc, gridSvc,
+		rotationSettings(settingsSvc), tracker, hub, log, time.Now)
+	playoutSvc := newPlayout(database, settingsSvc, hub, log)
 
 	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
-	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log, jobs.Retention(cleanup.Run))
+	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log,
+		jobs.Retention(cleanup.Run), jobs.TrackPlan(rotationSvc.RunJob))
 
 	// Request contexts are not cancelled by the shutdown signal itself:
 	// in-flight requests may finish during the drain. They are cancelled when
@@ -128,6 +147,10 @@ func serve(ctx context.Context) error {
 		Library:    librarySvc,
 		PlayRules:  playRulesSvc,
 		Separation: separationSvc,
+		Clocks:     clocksSvc,
+		Grid:       gridSvc,
+		Rotation:   rotationSvc,
+		Playout:    playoutSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -140,6 +163,10 @@ func serve(ctx context.Context) error {
 		return nil
 	})
 	g.Go(func() error { return scheduler.Run(gctx) })
+	// The planner runs the clock_build operations started by requests.
+	g.Go(func() error { return rotationSvc.Run(gctx) })
+	// The pusher keeps Liquidsoap's hour queues filled (§8.1).
+	g.Go(func() error { return playoutSvc.Run(gctx) })
 	g.Go(func() error {
 		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -173,6 +200,89 @@ func serve(ctx context.Context) error {
 	}
 	apiLog.Info("stopped")
 	return nil
+}
+
+// newPlayout wires the Liquidsoap control client and playout. The control
+// address is read on every connect; a change of it drops the connection, so
+// the next command connects to the new address (apply mode reconnect).
+func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, log *slog.Logger) *playout.Service {
+	lsLog := logging.For(log, logging.ComponentLiquidsoap)
+	ctl := liquidsoap.New(controlAddr(svc), time.Now, func(st liquidsoap.State) {
+		if st.Connected {
+			lsLog.Info("liquidsoap control link up")
+		} else {
+			lsLog.Warn("liquidsoap control link down")
+		}
+		hub.Publish(ws.LiquidsoapStateEvent{
+			Type: ws.EventLiquidsoapState, Time: st.Since, Data: ws.LiquidsoapStateData{Connected: st.Connected},
+		})
+	})
+	settings.OnChange(svc, settings.LiquidsoapControlHost, func(string) { ctl.Reset() })
+	settings.OnChange(svc, settings.LiquidsoapControlPort, func(int) { ctl.Reset() })
+
+	// Emergency picks need no reproducibility; the seed only varies them.
+	rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)) //nolint:gosec // G404: not for security; G115: positive
+	p := playout.NewService(database, playoutrepo.New(database.Pool), ctl, playoutSettings(svc), hub, log, time.Now, rnd)
+	settings.OnChange(svc, settings.LiquidsoapMusicGain, p.MusicGainSettingChanged)
+	return p
+}
+
+// controlAddr reads the Liquidsoap control address from the settings.
+func controlAddr(svc *settings.Service) liquidsoap.AddrFunc {
+	return func(ctx context.Context) (string, error) {
+		host, err := settings.Value(ctx, svc, settings.LiquidsoapControlHost)
+		if err != nil {
+			return "", err
+		}
+		port, err := settings.Value(ctx, svc, settings.LiquidsoapControlPort)
+		if err != nil {
+			return "", err
+		}
+		return net.JoinHostPort(host, strconv.Itoa(port)), nil
+	}
+}
+
+// playoutSettings reads the settings of playout on every pass, so a change
+// applies at once (§6.3).
+func playoutSettings(svc *settings.Service) playout.SettingsFunc {
+	return func(ctx context.Context) (playout.Settings, error) {
+		tz, err := settings.Value(ctx, svc, settings.StationTimezone)
+		if err != nil {
+			return playout.Settings{}, err
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return playout.Settings{}, fmt.Errorf("station timezone %q: %w", tz, err)
+		}
+		lookahead, err := settings.Value(ctx, svc, settings.RotationLookaheadItems)
+		if err != nil {
+			return playout.Settings{}, err
+		}
+		prepush, err := settings.Value(ctx, svc, settings.PlayoutPrepushMinutes)
+		if err != nil {
+			return playout.Settings{}, err
+		}
+		fade, err := settings.Value(ctx, svc, settings.LiquidsoapFadeOutMS)
+		if err != nil {
+			return playout.Settings{}, err
+		}
+		root, err := settings.Value(ctx, svc, settings.LiquidsoapMediaRoot)
+		if err != nil {
+			return playout.Settings{}, err
+		}
+		gain, err := settings.Value(ctx, svc, settings.LiquidsoapMusicGain)
+		if err != nil {
+			return playout.Settings{}, err
+		}
+		emergency, err := settings.Value(ctx, svc, settings.PlayoutEmergencyPlaylistID)
+		if err != nil {
+			return playout.Settings{}, err
+		}
+		return playout.Settings{
+			Location: loc, Lookahead: lookahead, Prepush: time.Duration(prepush) * time.Minute, FadeOutMS: fade,
+			MediaRoot: root, MusicGain: gain, EmergencyPlaylistID: emergency,
+		}, nil
+	}
 }
 
 // applyLogRetention keeps the log files for retention.log_days: the saved
@@ -237,5 +347,92 @@ func forwardAlerts(ctx context.Context, alerts <-chan logging.Alert, hub *ws.Hub
 		case a := <-alerts:
 			hub.Publish(ws.NewErrorAlert(a))
 		}
+	}
+}
+
+// gridSettings reads the station timezone and the grid horizon for each
+// grid request, so a change applies at once (§6.3).
+func gridSettings(svc *settings.Service) grid.SettingsFunc {
+	return func(ctx context.Context) (grid.Settings, error) {
+		tz, err := settings.Value(ctx, svc, settings.StationTimezone)
+		if err != nil {
+			return grid.Settings{}, err
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return grid.Settings{}, fmt.Errorf("station timezone %q: %w", tz, err)
+		}
+		days, err := settings.Value(ctx, svc, settings.RotationGridHorizonDays)
+		if err != nil {
+			return grid.Settings{}, err
+		}
+		return grid.Settings{Location: loc, HorizonDays: days}, nil
+	}
+}
+
+// clockSettings reads the tolerance defaults of new elements and the grid
+// horizon of the dry check.
+func clockSettings(svc *settings.Service) clocks.SettingsFunc {
+	return func(ctx context.Context) (clocks.Settings, error) {
+		dur, err := settings.Value(ctx, svc, settings.RotationDurationToleranceMS)
+		if err != nil {
+			return clocks.Settings{}, err
+		}
+		fixed, err := settings.Value(ctx, svc, settings.RotationFixedToleranceMS)
+		if err != nil {
+			return clocks.Settings{}, err
+		}
+		days, err := settings.Value(ctx, svc, settings.RotationGridHorizonDays)
+		if err != nil {
+			return clocks.Settings{}, err
+		}
+		return clocks.Settings{DurationToleranceMS: dur, FixedToleranceMS: fixed, GridHorizonDays: days}, nil
+	}
+}
+
+// rotationSettings reads the settings of the planner before each sync, so a
+// change applies on the next build (§6.3).
+func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
+	return func(ctx context.Context) (rotation.PlanSettings, error) {
+		tz, err := settings.Value(ctx, svc, settings.StationTimezone)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return rotation.PlanSettings{}, fmt.Errorf("station timezone %q: %w", tz, err)
+		}
+		horizon, err := settings.Value(ctx, svc, settings.RotationPlanHorizonHours)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		deadline, err := settings.Value(ctx, svc, settings.FillerReminderDeadlineMinutes)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		fallback, err := settings.Value(ctx, svc, settings.FillerFallbackKey)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		minGap, err := settings.Value(ctx, svc, settings.RotationMinFillerGapMS)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		relaxed, err := settings.Value(ctx, svc, settings.RotationMaxRelaxedToleranceMS)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		prepush, err := settings.Value(ctx, svc, settings.PlayoutPrepushMinutes)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		return rotation.PlanSettings{
+			Location:         loc,
+			PlanHorizonHours: horizon,
+			ReminderDeadline: time.Duration(deadline) * time.Minute,
+			Fallback:         clocks.Filler{Mode: clocks.FillerMode(fallback.Mode), SourceID: fallback.SourceID},
+			Freeze:           time.Duration(prepush) * time.Minute,
+			Build:            rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
+		}, nil
 	}
 }

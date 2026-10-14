@@ -65,6 +65,7 @@ services:
       HARBOR_PORT: "8005"
       JOURNAL_DIR: /journal
       BACKEND_CALLBACK_URL: ${BACKEND_CALLBACK_URL:-http://host.docker.internal:8080/api/playout/callback}
+      BACKEND_EMERGENCY_URL: ${BACKEND_EMERGENCY_URL:-http://host.docker.internal:8080/api/playout/emergency/next}
     # Published only so a backend running on the host can reach them in
     # development. In production they stay on the internal network (§8.9).
     ports:

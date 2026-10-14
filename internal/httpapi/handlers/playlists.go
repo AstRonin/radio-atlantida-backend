@@ -20,7 +20,7 @@ type playlistListOutput struct {
 }
 
 type listPlaylistsInput struct {
-	TypeID int64 `query:"type_id" minimum:"0" doc:"Only playlists of this type."`
+	TypeID uint64 `query:"type_id" minimum:"0" doc:"Only playlists of this type."`
 }
 
 type createPlaylistInput struct {
@@ -28,17 +28,17 @@ type createPlaylistInput struct {
 }
 
 type updatePlaylistInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.PlaylistBody
 }
 
 type setPlaylistTracksInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.SetPlaylistTracks
 }
 
 type setPlayRulesInput struct {
-	ID   int64 `path:"id" minimum:"1"`
+	ID   uint64 `path:"id" minimum:"1"`
 	Body dto.SetPlayRules
 }
 

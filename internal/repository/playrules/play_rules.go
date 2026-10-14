@@ -52,7 +52,7 @@ func writeError(op string, err error) error {
 }
 
 type ruleRow struct {
-	ID                 int64       `db:"id"`
+	ID                 uint64      `db:"id"`
 	Name               string      `db:"name"`
 	WindowFrom         pgtype.Time `db:"window_from"`
 	WindowTo           pgtype.Time `db:"window_to"`
@@ -61,8 +61,8 @@ type ruleRow struct {
 	MaxPerHour         *int32      `db:"max_per_hour"`
 	Notes              string      `db:"notes"`
 	CreatedAt          time.Time   `db:"created_at"`
-	TrackIDs           []int64     `db:"track_ids"`
-	PlaylistIDs        []int64     `db:"playlist_ids"`
+	TrackIDs           []uint64    `db:"track_ids"`
+	PlaylistIDs        []uint64    `db:"playlist_ids"`
 }
 
 func (r ruleRow) domain() playrules.Rule {
@@ -157,7 +157,7 @@ func (s *Store) List(ctx context.Context) ([]playrules.Rule, error) {
 }
 
 // Get returns one rule, or playrules.ErrNotFound.
-func (s *Store) Get(ctx context.Context, id int64) (playrules.Rule, error) {
+func (s *Store) Get(ctx context.Context, id uint64) (playrules.Rule, error) {
 	rows, err := s.q.Query(ctx, selectRules+` WHERE r.id = $1`, id)
 	if err != nil {
 		return playrules.Rule{}, fmt.Errorf("select play rule %d: %w", id, err)
@@ -177,8 +177,8 @@ func ruleArgs(in playrules.RuleInput) []any {
 }
 
 // Create adds a rule.
-func (s *Store) Create(ctx context.Context, in playrules.RuleInput) (int64, error) {
-	var id int64
+func (s *Store) Create(ctx context.Context, in playrules.RuleInput) (uint64, error) {
+	var id uint64
 	err := s.q.QueryRow(ctx, `
 INSERT INTO play_rules (name, window_from, window_to, weekdays, min_interval_minutes, max_per_hour, notes)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -190,7 +190,7 @@ RETURNING id`, ruleArgs(in)...).Scan(&id)
 }
 
 // Update changes a rule.
-func (s *Store) Update(ctx context.Context, id int64, in playrules.RuleInput) error {
+func (s *Store) Update(ctx context.Context, id uint64, in playrules.RuleInput) error {
 	tag, err := s.q.Exec(ctx, `
 UPDATE play_rules
 SET name = $2, window_from = $3, window_to = $4, weekdays = $5,
@@ -206,7 +206,7 @@ WHERE id = $1`, append([]any{id}, ruleArgs(in)...)...)
 }
 
 // Delete removes a rule. Its links refuse it (RESTRICT on rule_id).
-func (s *Store) Delete(ctx context.Context, id int64) error {
+func (s *Store) Delete(ctx context.Context, id uint64) error {
 	tag, err := s.q.Exec(ctx, `DELETE FROM play_rules WHERE id = $1`, id)
 	if err != nil {
 		if ce, ok := db.AsConstraintError(err); ok && ce.Kind == db.ForeignKey {
@@ -222,13 +222,13 @@ func (s *Store) Delete(ctx context.Context, id int64) error {
 
 type refRow struct {
 	Kind string `db:"kind"`
-	ID   int64  `db:"id"`
+	ID   uint64 `db:"id"`
 	Name string `db:"name"`
 }
 
 // Users returns the tracks and playlists the rule is applied to, at most
 // limit of each kind.
-func (s *Store) Users(ctx context.Context, id int64, limit int) ([]playrules.Ref, error) {
+func (s *Store) Users(ctx context.Context, id uint64, limit int) ([]playrules.Ref, error) {
 	rows, err := s.q.Query(ctx, `
 (SELECT 'track' AS kind, t.id, t.title AS name
  FROM track_play_rules tr JOIN tracks t ON t.id = tr.track_id
@@ -251,8 +251,8 @@ UNION ALL
 
 // lock runs a SELECT ... FOR KEY SHARE of one row, so the row cannot be
 // deleted before the transaction ends.
-func (s *Store) lock(ctx context.Context, sql string, id int64, notFound error) error {
-	var got int64
+func (s *Store) lock(ctx context.Context, sql string, id uint64, notFound error) error {
+	var got uint64
 	err := s.q.QueryRow(ctx, sql, id).Scan(&got)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return notFound
@@ -264,17 +264,17 @@ func (s *Store) lock(ctx context.Context, sql string, id int64, notFound error) 
 }
 
 // LockRule locks a rule. playrules.ErrNotFound.
-func (s *Store) LockRule(ctx context.Context, id int64) error {
+func (s *Store) LockRule(ctx context.Context, id uint64) error {
 	return s.lock(ctx, `SELECT id FROM play_rules WHERE id = $1 FOR KEY SHARE`, id, playrules.ErrNotFound)
 }
 
 // LockTrack locks a track. playrules.ErrTrackNotFound.
-func (s *Store) LockTrack(ctx context.Context, id int64) error {
+func (s *Store) LockTrack(ctx context.Context, id uint64) error {
 	return s.lock(ctx, `SELECT id FROM tracks WHERE id = $1 FOR KEY SHARE`, id, playrules.ErrTrackNotFound)
 }
 
 // LockPlaylist locks a playlist. playrules.ErrPlaylistNotFound.
-func (s *Store) LockPlaylist(ctx context.Context, id int64) error {
+func (s *Store) LockPlaylist(ctx context.Context, id uint64) error {
 	return s.lock(ctx, `SELECT id FROM playlists WHERE id = $1 FOR KEY SHARE`, id, playrules.ErrPlaylistNotFound)
 }
 
@@ -312,9 +312,9 @@ SELECT unnest($2::bigint[]), $1
 ON CONFLICT DO NOTHING`
 )
 
-func (s *Store) setLinks(ctx context.Context, op, sql string, id int64, ids []int64) error {
+func (s *Store) setLinks(ctx context.Context, op, sql string, id uint64, ids []uint64) error {
 	if ids == nil {
-		ids = []int64{}
+		ids = []uint64{}
 	}
 	if _, err := s.q.Exec(ctx, sql, id, ids); err != nil {
 		return writeError(fmt.Sprintf("%s %d", op, id), err)
@@ -324,7 +324,7 @@ func (s *Store) setLinks(ctx context.Context, op, sql string, id int64, ids []in
 
 // SetTargets makes trackIDs and playlistIDs the targets of the rule. Run it
 // in a transaction: two statements.
-func (s *Store) SetTargets(ctx context.Context, ruleID int64, trackIDs, playlistIDs []int64) error {
+func (s *Store) SetTargets(ctx context.Context, ruleID uint64, trackIDs, playlistIDs []uint64) error {
 	if err := s.setLinks(ctx, "set tracks of play rule", setRuleTracks, ruleID, trackIDs); err != nil {
 		return err
 	}
@@ -332,21 +332,21 @@ func (s *Store) SetTargets(ctx context.Context, ruleID int64, trackIDs, playlist
 }
 
 // SetTrackRules makes ruleIDs the rules of the track.
-func (s *Store) SetTrackRules(ctx context.Context, trackID int64, ruleIDs []int64) error {
+func (s *Store) SetTrackRules(ctx context.Context, trackID uint64, ruleIDs []uint64) error {
 	return s.setLinks(ctx, "set play rules of track", setTrackRules, trackID, ruleIDs)
 }
 
 // SetPlaylistRules makes ruleIDs the rules of the playlist.
-func (s *Store) SetPlaylistRules(ctx context.Context, playlistID int64, ruleIDs []int64) error {
+func (s *Store) SetPlaylistRules(ctx context.Context, playlistID uint64, ruleIDs []uint64) error {
 	return s.setLinks(ctx, "set play rules of playlist", setPlaylistRules, playlistID, ruleIDs)
 }
 
-func (s *Store) ids(ctx context.Context, op, sql string, id int64) ([]int64, error) {
+func (s *Store) ids(ctx context.Context, op, sql string, id uint64) ([]uint64, error) {
 	rows, err := s.q.Query(ctx, sql, id)
 	if err != nil {
 		return nil, fmt.Errorf("%s %d: %w", op, id, err)
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[uint64])
 	if err != nil {
 		return nil, fmt.Errorf("%s %d: %w", op, id, err)
 	}
@@ -354,13 +354,13 @@ func (s *Store) ids(ctx context.Context, op, sql string, id int64) ([]int64, err
 }
 
 // TrackRules returns the rule IDs of a track (primary key lookup).
-func (s *Store) TrackRules(ctx context.Context, trackID int64) ([]int64, error) {
+func (s *Store) TrackRules(ctx context.Context, trackID uint64) ([]uint64, error) {
 	return s.ids(ctx, "select play rules of track",
 		`SELECT rule_id FROM track_play_rules WHERE track_id = $1 ORDER BY rule_id`, trackID)
 }
 
 // PlaylistRules returns the rule IDs of a playlist (primary key lookup).
-func (s *Store) PlaylistRules(ctx context.Context, playlistID int64) ([]int64, error) {
+func (s *Store) PlaylistRules(ctx context.Context, playlistID uint64) ([]uint64, error) {
 	return s.ids(ctx, "select play rules of playlist",
 		`SELECT rule_id FROM playlist_play_rules WHERE playlist_id = $1 ORDER BY rule_id`, playlistID)
 }

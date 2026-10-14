@@ -117,12 +117,15 @@ var (
 	LiquidsoapHarborPort  = Key[int]{"liquidsoap.harbor_port"}
 	LiquidsoapControlHost = Key[string]{"liquidsoap.control_host"}
 	LiquidsoapControlPort = Key[int]{"liquidsoap.control_port"}
+	LiquidsoapMediaRoot   = Key[string]{"liquidsoap.media_root"}
 
-	RotationGridHorizonDays     = Key[int]{"rotation.grid_horizon_days"}
-	RotationPlanHorizonHours    = Key[int]{"rotation.plan_horizon_hours"}
-	RotationLookaheadItems      = Key[int]{"rotation.lookahead_items"}
-	RotationDurationToleranceMS = Key[int]{"rotation.default_duration_tolerance_ms"}
-	RotationFixedToleranceMS    = Key[int]{"rotation.default_fixed_tolerance_ms"}
+	RotationGridHorizonDays       = Key[int]{"rotation.grid_horizon_days"}
+	RotationPlanHorizonHours      = Key[int]{"rotation.plan_horizon_hours"}
+	RotationLookaheadItems        = Key[int]{"rotation.lookahead_items"}
+	RotationDurationToleranceMS   = Key[int]{"rotation.default_duration_tolerance_ms"}
+	RotationFixedToleranceMS      = Key[int]{"rotation.default_fixed_tolerance_ms"}
+	RotationMinFillerGapMS        = Key[int]{"rotation.min_filler_gap_ms"}
+	RotationMaxRelaxedToleranceMS = Key[int]{"rotation.max_relaxed_tolerance_ms"}
 
 	FillerFallbackKey             = Key[FillerFallback]{"filler.fallback"}
 	FillerReminderDeadlineMinutes = Key[int]{"filler.reminder_deadline_minutes"}
@@ -134,7 +137,8 @@ var (
 	RetentionPlayLogDays = Key[int]{"retention.play_log_days"}
 	RetentionLogDays     = Key[int]{"retention.log_days"}
 
-	PlayoutEmergencyPlaylistID = Key[*int64]{"playout.emergency_playlist_id"}
+	PlayoutEmergencyPlaylistID = Key[*uint64]{"playout.emergency_playlist_id"}
+	PlayoutPrepushMinutes      = Key[int]{"playout.prepush_minutes"}
 )
 
 // Secret keys. They have no typed Key: their values are never read here.
@@ -158,7 +162,7 @@ type FillerFallback struct {
 	// Mode is random, playlist, or artist.
 	Mode string `json:"mode"`
 	// SourceID is the playlist (mode playlist) or artist (mode artist).
-	SourceID *int64 `json:"source_id,omitempty"`
+	SourceID *uint64 `json:"source_id,omitempty"`
 }
 
 // Filler fallback modes.
@@ -209,6 +213,8 @@ func NewRegistry() *Registry {
 	r.add(intDef(LiquidsoapHarborPort, "Harbor input port for live voice.", "", 8005, 1, 65535), ApplyReconnect, true)
 	r.add(stringDef(LiquidsoapControlHost, "Liquidsoap control host name or IP address.", "liquidsoap", 1, 253, validHost), ApplyReconnect, true)
 	r.add(intDef(LiquidsoapControlPort, "Liquidsoap control (telnet) port.", "", 1234, 1, 65535), ApplyReconnect, true)
+	r.add(stringDef(LiquidsoapMediaRoot, "The media directory as Liquidsoap sees it (its mount of MEDIA_ROOT); track paths are pushed under it.",
+		"/media", 1, 255, validMediaRoot), ApplyImmediate, true)
 	r.addSecret(SecretLiquidsoapControlUser, GroupLiquidsoap, "LIQUIDSOAP_CONTROL_USER", "Liquidsoap control user.")
 	r.addSecret(SecretLiquidsoapControlPassword, GroupLiquidsoap, "LIQUIDSOAP_CONTROL_PASSWORD", "Liquidsoap control password.")
 
@@ -218,6 +224,8 @@ func NewRegistry() *Registry {
 	r.add(intDef(RotationLookaheadItems, "Items pushed to Liquidsoap ahead of the current one.", "", 3, 2, 3), ApplyImmediate, true)
 	r.add(intDef(RotationDurationToleranceMS, "Default duration tolerance of a new clock element.", "ms", 30000, 0, 600000), ApplyImmediate, false)
 	r.add(intDef(RotationFixedToleranceMS, "Default start tolerance of a new fixed clock element.", "ms", 60000, 0, 600000), ApplyImmediate, false)
+	r.add(intDef(RotationMinFillerGapMS, "Shortest gap in a segment that gets filler; a smaller gap is left.", "ms", 10000, 0, 120000), ApplyImmediate, true)
+	r.add(intDef(RotationMaxRelaxedToleranceMS, "Emergency: how far the duration tolerance of an element may be relaxed when no track fits.", "ms", 120000, 0, 600000), ApplyImmediate, true)
 
 	// Filler (§7).
 	r.add(fillerFallbackDef(), ApplyImmediate, true)
@@ -235,6 +243,8 @@ func NewRegistry() *Registry {
 
 	// Playout (§8.6).
 	r.add(optionalIDDef(PlayoutEmergencyPlaylistID, "Playlist played when the pool and the plan are both empty. Null: none."), ApplyImmediate, true)
+	r.add(intDef(PlayoutPrepushMinutes, "How long before its start an hour's first items are pushed to Liquidsoap; from then on the hour is no longer rebuilt.",
+		"minutes", 5, 1, 15), ApplyImmediate, true)
 
 	return r
 }
@@ -399,13 +409,13 @@ func boolDef(k Key[bool], desc string, def bool) *Definition {
 }
 
 // optionalIDDef is a nullable reference to a row (an ID of 1 or more).
-func optionalIDDef(k Key[*int64], desc string) *Definition {
+func optionalIDDef(k Key[*uint64], desc string) *Definition {
 	return &Definition{
-		Key: k.name, Description: desc, Type: TypeInteger, Default: (*int64)(nil), Nullable: true,
+		Key: k.name, Description: desc, Type: TypeInteger, Default: (*uint64)(nil), Nullable: true,
 		Minimum: new(1.0),
 		parse: func(raw json.RawMessage) (any, error) {
 			if isNull(raw) {
-				return (*int64)(nil), nil
+				return (*uint64)(nil), nil
 			}
 			n, err := decodeInt(k.name, raw)
 			if err != nil {
@@ -414,7 +424,7 @@ func optionalIDDef(k Key[*int64], desc string) *Definition {
 			if n < 1 {
 				return nil, invalid(k.name, RuleRange, "must be 1 or more, or null")
 			}
-			return &n, nil
+			return new(uint64(n)), nil
 		},
 	}
 }
@@ -429,7 +439,7 @@ func fillerFallbackDef() *Definition {
 		parse: func(raw json.RawMessage) (any, error) {
 			var v struct {
 				Mode     *string `json:"mode"`
-				SourceID *int64  `json:"source_id"`
+				SourceID *uint64 `json:"source_id"`
 			}
 			if isNull(raw) || bytes.TrimSpace(raw)[0] != '{' {
 				return nil, invalid(k.name, RuleType, "must be an object")
@@ -547,6 +557,17 @@ func validHost(s string) error {
 		if !hostLabel.MatchString(label) {
 			return errors.New("must be a host name or an IP address")
 		}
+	}
+	return nil
+}
+
+var mediaRootPattern = regexp.MustCompile(`^/[^\x00-\x1f"]*$`)
+
+// validMediaRoot accepts an absolute path without control characters or
+// quotes: it becomes part of a Liquidsoap request URI.
+func validMediaRoot(s string) error {
+	if !mediaRootPattern.MatchString(s) {
+		return errors.New("must be an absolute path starting with /, without quotes or control characters")
 	}
 	return nil
 }

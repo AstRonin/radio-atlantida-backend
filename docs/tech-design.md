@@ -1,7 +1,7 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-10)
-Last updated: 2026-10-13
+Status: Draft (v7-12)
+Last updated: 2026-10-14
 
 ## 1. Overview
 
@@ -156,6 +156,8 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **scheduled_items**: id, grid_slot_id, clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, truncated (bool, default false), source (`clock`, `filler_pool`, `filler_random`, `filler_playlist`, `filler_artist`, `filler_answer`, `reschedule`), status (`planned`, `queued`, `aired`, `missed`, `replaced`), outage_id (nullable, FK to `broadcast_outages`), missed_at (timestamptz, nullable), reschedule_of_id (nullable, FK to `play_log`: the missed item this item replaces; set only when `source = reschedule`), created_at. The rolling track plan, covering 24 to 48 hours ahead.
   - `reschedule_of_id` points to `play_log`, not to `scheduled_items`, because a missed item is moved to `play_log` and removed from `scheduled_items` (§4.1).
   - `missed` means the item was planned but did not reach the air because of a broadcast outage (see §7.1).
+  - `clock_element_id` (nullable, FK to `clock_elements`, `ON DELETE SET NULL`): the element the item was planned for; null for filler. `filler_pool_id` (nullable, FK to `clock_filler_pool`, `ON DELETE SET NULL`): the pool row a `filler_pool` item took; a rebuild of the hour sets that row's `used_at` back to null (v7-11).
+- **plan_hours**: hour_start_utc (primary key), clock_id (FK, `ON DELETE CASCADE`), clock_updated_at, grid_slot_id (nullable, `ON DELETE SET NULL`), seed, built_at, filler_request_id (nullable, `ON DELETE SET NULL`). One row per built hour of the track plan (v7-11, `docs/phase-8-plan.md` §2). An hour is stale when the grid now assigns another clock or none, or the clock's `updated_at` changed; the seed makes a rebuild after a reminder answer reproducible.
 - **broadcast_outages**: id, started_at (timestamptz, UTC), ended_at (timestamptz, UTC, nullable while the outage is open), detected_by (`icecast`, `liquidsoap_callback`, `liquidsoap_control`, `backend`), component (`icecast`, `liquidsoap`, `backend`, `network`), reason (short text, nullable), reconciled_at (timestamptz, nullable). One row per interruption. An open outage has `ended_at` null.
 - **play_rules**: id, name, window_from (time, nullable), window_to (time, nullable), weekdays (array of 1 to 7, nullable; null means every day), min_interval_minutes (int, nullable), max_per_hour (int, nullable), notes, created_at. A reusable, named rule (see §7.3). Times are station local time (§10.2).
   - Every constraint is optional, but at least one must be set. `window_from` and `window_to` are set together or not at all. A window may cross midnight (for example, 22:00 to 02:00); the weekday then refers to the day on which the window starts.
@@ -165,6 +167,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
   - These tables replace the old `daypart_rules` table. A time window is one kind of play rule.
 - **separation_rules**: id, scope (track or artist), min_interval_hours (default 72), notes. The values are copied from the reference software and entered into this table. Rotation reads all separation values from here; none are hard-coded.
 - **play_log**: id, track_id, artist_id, status (`aired`, `truncated`, `missed`), planned_start_utc, started_at (nullable for missed items), planned_out_ms, actual_duration_ms (nullable for missed items), truncated (bool, default false), source (`auto`, `live`, or `emergency`; see §8.6), clock_id, grid_slot_id, scheduled_item_id (nullable), outage_id (nullable, set for missed items), resolution (`open`, `rescheduled`, `dismissed`, nullable; used only for missed items), resolved_at (timestamptz, nullable), resolved_item_id (nullable, set when rescheduled). Records what aired and what did not.
+  - `ended_at` (timestamptz, nullable): set when the end of the track is recorded; null while it plays and for missed items. The first recorded end wins, because Liquidsoap may report the end of a track twice (v7-12, `docs/phase-9-plan.md` §2). A unique partial index on `scheduled_item_id` makes a repeated start a no-op.
   - `scheduled_item_id` and `resolved_item_id` are trace ids of `scheduled_items` rows, without a foreign key: those rows are deleted once they air or are missed (§4.1), so a foreign key would point at nothing. Aired rows are kept for 10 days (see §4.1). Missed rows are kept until resolved.
 - **settings**: key, value (JSONB), updated_at (timestamptz, UTC). Holds all backend settings edited in the admin panel, including the audio output profile (see §6.3 and §8.8), `fade_out_ms` (default 2500, allowed 2000 to 3000), and outage detection thresholds (see §6.3).
 - **Deletion and history.** A track, artist, or clock that is referenced by `play_log` or `scheduled_items` cannot be deleted (`ON DELETE RESTRICT`). The API refuses the request and says why. This keeps the played-tracks list and open missed items complete. A grid slot can be deleted; the history rows keep their other references and lose only `grid_slot_id`.
@@ -237,11 +240,13 @@ Saving a clock is a two-step exchange, so the operator cannot miss a shortfall.
 1. `POST /api/clocks` or `PUT /api/clocks/{id}` runs the dry check and returns:
    - `shortfall_ms` (0 if the clock is full);
    - `warnings` (for example, a playlist with too few tracks for the separation window, or an hour of the day in which no track passes the play rules, see §7.3);
-   - `requires_filler_choice: true` when `shortfall_ms > 0`.
+   - `requires_filler_choice: true` when a segment is short and its holder element has no filler mode yet (a choice already stored with the clock is not asked again); `short_segments` lists those segments.
+
+   The dry check and the save are synchronous. Shortfall is measured on the elements' nominal durations (decisions of 2026-10-14, `docs/phase-7-plan.md` §2). The response also carries `build_operation_id`: the `clock_build` operation that rebuilds the clock's planned hours (§6.5). Grid assignments return it too.
 
    The request body lists the elements, and each element carries `playlist_ids` (one or more). The clock itself may carry `default_filler_mode` with its `default_filler_playlist_id` or `default_filler_artist_id`.
 2. If `requires_filler_choice` is true, the panel opens a blocking dialog. The operator chooses a mode and then calls one of:
-   - `POST /api/clocks/{id}/save-with-filler`: body includes `filler_mode`, `filler_source_id` (if needed), and optionally `pool_track_ids` (ordered list, for `pool` mode). The clock is saved with `status = complete`.
+   - `POST /api/clocks/{id}/save-with-filler`: body includes `segments`, one choice per short segment (`segment`, `filler_mode`, `filler_source_id` if needed), and optionally `pool_track_ids` (ordered list, for `pool` mode). Each choice is stored on the segment's holder element (§7.2). The clock is saved with `status = complete`.
    - `POST /api/clocks/{id}/save-incomplete`: the clock is saved with `status = incomplete`. The backend creates reminders (see §7).
 3. Closing the dialog without a choice is treated the same as `save-incomplete`.
 
@@ -308,8 +313,9 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Station**: timezone (default `Asia/Yerevan`), station name.
 - **Playlist types**: the list of types (system and custom). The manager can add a type, rename it, and delete a custom type that is not in use. System types can be renamed but not deleted (§4).
 - **Stream output (Icecast)**: host, port, mount point, codec, bitrate, sample rate, channels, loudness target, stream metadata, HLS on or off.
-- **Liquidsoap**: default music gain, fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port.
-- **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults. The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
+- **Liquidsoap**: default music gain, fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
+- **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and its reminders cannot be answered.
+- **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults, the shortest gap that gets filler (`rotation.min_filler_gap_ms`, default 10 s), and the limit of the emergency tolerance relaxation (`rotation.max_relaxed_tolerance_ms`, default 120 s). The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
 - **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
 - **Retention**: play log days (default 10), application log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1).
@@ -369,6 +375,24 @@ The backend is the single source of truth for the API. There is no separate fron
 
 Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead of a single category, and accept the clock's `default_filler_mode` with its source.
 
+**Endpoints added in v7-11 (track plan and filler reminders, `docs/phase-8-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/track-plan?from=&to=` | Built hours (at most 7 days) with their items |
+| `POST /api/track-plan/rebuild` | Body: `from`, `to`. Rebuilds the future hours of the range; returns `accepted` with an operation ID (`clock_build`) |
+| `GET /api/filler-requests?status=` | Filler reminders (default `pending`) |
+| `POST /api/filler-requests/{id}/answer` | Body: `track_id`. Fills the waiting segments of the hour; refused per field when the track breaks separation or a play rule. Synchronous |
+
+**Endpoints added in v7-12 (playout, `docs/phase-9-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /api/playout/callback` | Called by Liquidsoap: track `start` and `end`, and the Icecast output state (§8.3). A started plan item moves to `play_log`; repeated events change nothing |
+| `GET /api/playout/emergency/next` | Called by Liquidsoap: the next track of the emergency playlist as a request (`text/plain`), or 204 (§8.2, §8.6) |
+| `GET /api/playout/status` | Control link, Icecast output, now playing, items waiting in Liquidsoap's queues, music gain |
+| `PUT /api/playout/music-gain` | Body: `gain` (0 to 1). Sets the live music gain (§8.5); refused with `liquidsoap_unavailable` when the control link is down |
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -389,7 +413,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - The HTTP request that starts the operation returns at once with an operation ID and status `accepted`. It does not wait for the work to complete.
 - When the operation finishes, the backend sends exactly one terminal event over the WebSocket hub: either a success event or a failure event. The event carries the operation ID.
 - Long operations may also send progress events (for example, "12 of 40 files analysed"). Progress is optional. The terminal event is mandatory.
-- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure, for example `track_plan.built`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.marked`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`.
+- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.marked`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`.
 - A failure event contains a short error message, the component that failed (§10.1), and the UTC time. The same error is written to the log file (§10.1) and shown in the panel as an error popup (§6, §10.1).
 - A success event contains the operation ID, a short result summary, and the UTC time, so the panel can refresh the affected view.
 - The event schemas are part of the OpenAPI contract (§6.4). Each event type is a named schema, so the TypeScript client has typed handlers for every event.
@@ -409,7 +433,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 **Examples**
 
 - The operator saves a clock. The save returns `accepted` with an operation ID. When the clock's hours are recalculated, the backend sends `clock_build.completed`. If a track fails the rules and no candidate is found, it sends `clock_build.failed` with the reason.
-- The rotation engine extends the track plan for the next hour. On success it sends `track_plan.built`. On failure it sends `track_plan.failed` and creates a filler request or emergency warning as described in §7.
+- The rotation engine extends the track plan for the next hour. On success it sends `track_plan.completed`. On failure it sends `track_plan.failed` and creates a filler request or emergency warning as described in §7.
 - Icecast drops. The outage detector opens an outage and sends `broadcast_outage.started`. When Icecast reconnects, the outage closes, the missed items are marked, and the backend sends `missed_items.marked` with the count.
 
 **Scope**
@@ -473,6 +497,8 @@ The number of iterations at each step is bounded.
 The order of resolution is: tolerance selection, then filler for shortfall, then truncation for overflow, then emergency. Stretching audio is not used at any point.
 
 The engine is deterministic for a given input and seed, which makes it testable.
+
+**Implementation decisions (v7-11).** `docs/phase-8-plan.md` §2 records how the rules above are applied with real tracks: random choice with equal weights for ordinary elements and best fit for the last element of a segment; the crossing rule at a fixed element's window (an item past the latest start is cut at the target minute); filler only for gaps of at least `rotation.min_filler_gap_ms`; reminders per hour for short segments whose holder is `none` or `ask`, resolved by an answer (`filler_answer`) or by the deadline; the emergency steps (tolerance doubled up to `rotation.max_relaxed_tolerance_ms`, then the whole library, then the element is skipped for the emergency playlist); and hours that have started are never rebuilt. Besides the operation events, the planner sends `track_plan.warning` (the warnings of one built hour) and `filler_request.created`.
 
 ### 7.1 Broadcast Outages and Missed Items
 
@@ -604,13 +630,15 @@ For each item, Go sends:
 
 Liquidsoap performs the fade itself, so control-path latency does not affect it.
 
+**Implementation (v7-12, `docs/phase-9-plan.md` §2).** Liquidsoap has two request queues, `hour_0` and `hour_1`; each station hour is pushed into the queue of its parity, and a time switch in the script plays the queue of the current hour (§8.10). Each request is annotated with its `item_id` and, for a truncated item, `liq_cue_out` and `liq_fade_out`. The backend keeps `rotation.lookahead_items` items waiting in the queue of the hour on air, pushes the first items of the next hour `playout.prepush_minutes` before it starts, marks pushed items `queued`, and never pushes an item that is already more than 30 seconds late (no catch-up, §7.1).
+
 ### 8.2 Emergency mode: request.dynamic
 
 `request.dynamic` is used only for emergencies, for example when the Go plan is empty or the backend is unavailable and Liquidsoap must ask for the next item itself. It is not the normal path because it makes Go's response time critical.
 
 ### 8.3 Feedback and playout journal
 
-- Liquidsoap reports actual playback events to Go (an HTTP callback on track start and end). Go writes them to `play_log`, including `truncated` and the actual duration. The log reflects what aired, not what was planned.
+- Liquidsoap reports actual playback events to Go (an HTTP callback on track start and end). Go writes them to `play_log`, including `truncated` and the actual duration. The log reflects what aired, not what was planned. A plan item moves from `scheduled_items` to `play_log` when it starts (the `aired` status of `scheduled_items` is not used); its end sets the actual duration, and an item that played more than one second less than planned is `truncated` (v7-12).
 - Liquidsoap also reports its Icecast output state (connected or not) in the same callbacks, so the outage detector knows whether listeners could receive the stream (§7.1).
 - Liquidsoap writes every track start and end to a local playout journal in `PLAYOUT_JOURNAL_ROOT`, independently of the callbacks (§7.1). If a callback cannot be delivered, the journal still holds the event, and reconciliation uses it after the backend recovers.
 
@@ -670,6 +698,7 @@ The Docker Icecast service is a test server. Its connection is entered in the ad
 
 - `request.push` does not guarantee a start at a specific second. Clock starts are therefore tied to the hour grid: Liquidsoap switches sources by time, aligned to UTC hour boundaries adjusted for the station timezone (§10.2).
 - Each clock start is a scheduled switch. Items from the new clock are pushed before the boundary, so the switch is a source change, not a late push.
+- The script switches between its two hour queues at `floor((t − hour_shift) / 3600)` parity, where `hour_shift` (set by the backend) is the station UTC offset modulo one hour. The queue an hour leaves is flushed, and a track cut by the switch reports its end at once (v7-12). Measured on the dev stack: the clock started 18 ms after the boundary.
 - The start and end accuracy are verified on the test stand before the first air date. Acceptance target: a clock starts within one second of the scheduled time.
 - If the station timezone ever becomes DST-dependent, the switch logic must handle 23- and 25-hour days (§10.2).
 

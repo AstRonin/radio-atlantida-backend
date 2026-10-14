@@ -40,7 +40,7 @@ func TestUpCreatesSchemaAndSeeds(t *testing.T) {
 	require.NoError(t, rows.Close())
 	require.Equal(t, []string{
 		"artists", "broadcast_outages", "clock_element_playlists", "clock_elements",
-		"clock_filler_pool", "clocks", "filler_requests", "grid_slots", "operations",
+		"clock_filler_pool", "clocks", "filler_requests", "grid_slots", "operations", "plan_hours",
 		"play_log", "play_rules", "playlist_play_rules", "playlist_types", "playlists",
 		"scheduled_items", "separation_rules", "settings", "track_play_rules",
 		"track_playlists", "tracks",

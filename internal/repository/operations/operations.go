@@ -27,7 +27,7 @@ func New(q db.Querier) *Store { return &Store{q: q} }
 func (s *Store) WithTx(tx db.Tx) *Store { return &Store{q: tx.Pgx()} }
 
 type row struct {
-	ID            int64      `db:"id"`
+	ID            uint64     `db:"id"`
 	Kind          string     `db:"kind"`
 	Status        string     `db:"status"`
 	StartedAt     time.Time  `db:"started_at"`
@@ -51,8 +51,8 @@ func (r row) operation() operations.Operation {
 const selectColumns = `SELECT id, kind, status, started_at, finished_at, error_message, result_summary FROM operations`
 
 // Insert stores a running operation and returns its ID.
-func (s *Store) Insert(ctx context.Context, kind operations.Kind, startedAt time.Time) (int64, error) {
-	var id int64
+func (s *Store) Insert(ctx context.Context, kind operations.Kind, startedAt time.Time) (uint64, error) {
+	var id uint64
 	err := s.q.QueryRow(ctx,
 		`INSERT INTO operations (kind, status, started_at) VALUES ($1, 'running', $2) RETURNING id`,
 		string(kind), startedAt.UTC(),
@@ -100,7 +100,7 @@ func (s *Store) FailRunning(ctx context.Context, at time.Time, message string) (
 }
 
 // Get returns one operation, or operations.ErrNotFound.
-func (s *Store) Get(ctx context.Context, id int64) (operations.Operation, error) {
+func (s *Store) Get(ctx context.Context, id uint64) (operations.Operation, error) {
 	rows, err := s.q.Query(ctx, selectColumns+` WHERE id = $1`, id)
 	if err != nil {
 		return operations.Operation{}, fmt.Errorf("select operation %d: %w", id, err)

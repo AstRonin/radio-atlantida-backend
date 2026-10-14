@@ -131,6 +131,29 @@ func TestWithTx(t *testing.T) {
 		require.Equal(t, []int{1, 2}, values())
 	})
 
+	t.Run("a cancelled context rolls back without racing pgx", func(t *testing.T) {
+		// database/sql must not roll back from its own goroutine while pgx
+		// runs on the connection (run with -race).
+		for range 20 {
+			cctx, cancel := context.WithCancel(ctx)
+			err := d.WithTx(cctx, func(ctx context.Context, tx db.Tx) error {
+				if _, err := tx.Pgx().Exec(ctx, `INSERT INTO t VALUES (8)`); err != nil {
+					return err
+				}
+				cancel()
+				for range 5 {
+					if _, err := tx.Pgx().Exec(ctx, `SELECT pg_sleep(0.001)`); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			require.ErrorIs(t, err, context.Canceled)
+			cancel()
+		}
+		require.Equal(t, []int{1, 2}, values())
+	})
+
 	t.Run("connections go back to the pool idle", func(t *testing.T) {
 		require.Zero(t, d.Pool.Stat().AcquiredConns())
 		var open int
