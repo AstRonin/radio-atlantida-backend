@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6.
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -69,12 +69,15 @@ internal/
   library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete
   playrules/          play rules (window, weekdays, min interval, max per hour) and their track/playlist targets
   separation/         separation rules (edit only; capped at the play log retention)
+  clocks/             clock templates: Arrange/LayoutOf (segments, shortfall, fixed replacement, filler holders), save flow, dry check warnings
+  grid/               grid slots (station local weekday/hour/dates), assign/unassign with trim/split/delete, Schedule and ClockHours
   media/              MEDIA_ROOT: path rules, os.OpenInRoot (no escape, symlinks included), ffprobe, content types
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
     operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
     library/ separation/                           (GORM; library: one store per aggregate)
     playrules/                                     (pgx: time and smallint[] columns, array-parameter link sets)
-  clocks/ grid/ rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)
+    clocks/ grid/                                  (GORM CRUD; clocks.CheckStore is pgx for the dry check reads)
+  rotation/ filler/ playout/ liquidsoap/ outage/ live/       (later phases)
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
 docker-compose.dev.yml  dev/test stack only (production compose is in radio-atlantida-deploy)

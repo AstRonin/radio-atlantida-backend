@@ -38,6 +38,8 @@ type Deps struct {
 	Library    Library
 	PlayRules  PlayRules
 	Separation Separation
+	Clocks     Clocks
+	Grid       Grid
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -55,6 +57,8 @@ func Register(api huma.API, d Deps) {
 	registerTracks(api, log, d.Library, d.PlayRules)
 	registerPlayRules(api, log, d.PlayRules)
 	registerSeparationRules(api, log, d.Separation)
+	registerClocks(api, log, d.Clocks)
+	registerGrid(api, log, d.Grid)
 }
 
 // Streaming is the operation metadata key of routes that stream a response

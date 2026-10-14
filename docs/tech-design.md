@@ -237,11 +237,13 @@ Saving a clock is a two-step exchange, so the operator cannot miss a shortfall.
 1. `POST /api/clocks` or `PUT /api/clocks/{id}` runs the dry check and returns:
    - `shortfall_ms` (0 if the clock is full);
    - `warnings` (for example, a playlist with too few tracks for the separation window, or an hour of the day in which no track passes the play rules, see §7.3);
-   - `requires_filler_choice: true` when `shortfall_ms > 0`.
+   - `requires_filler_choice: true` when a segment is short and its holder element has no filler mode yet (a choice already stored with the clock is not asked again); `short_segments` lists those segments.
+
+   The dry check and the save are synchronous. Shortfall is measured on the elements' nominal durations (decisions of 2026-10-14, `docs/phase-7-plan.md` §2).
 
    The request body lists the elements, and each element carries `playlist_ids` (one or more). The clock itself may carry `default_filler_mode` with its `default_filler_playlist_id` or `default_filler_artist_id`.
 2. If `requires_filler_choice` is true, the panel opens a blocking dialog. The operator chooses a mode and then calls one of:
-   - `POST /api/clocks/{id}/save-with-filler`: body includes `filler_mode`, `filler_source_id` (if needed), and optionally `pool_track_ids` (ordered list, for `pool` mode). The clock is saved with `status = complete`.
+   - `POST /api/clocks/{id}/save-with-filler`: body includes `segments`, one choice per short segment (`segment`, `filler_mode`, `filler_source_id` if needed), and optionally `pool_track_ids` (ordered list, for `pool` mode). Each choice is stored on the segment's holder element (§7.2). The clock is saved with `status = complete`.
    - `POST /api/clocks/{id}/save-incomplete`: the clock is saved with `status = incomplete`. The backend creates reminders (see §7).
 3. Closing the dialog without a choice is treated the same as `save-incomplete`.
 

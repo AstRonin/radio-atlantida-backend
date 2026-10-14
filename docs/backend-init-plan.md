@@ -371,7 +371,7 @@ The v7-7 and v7-8 migration notes in §9.2 of the design (copying from `categori
 3. **Clock default filler mode.** §7 and §7.2 refer to "the clock's default mode", but `clocks` has no such column. Proposal: add `clocks.default_filler_mode` (nullable; falls back to the global setting).
 4. **`play_log.source`** is "auto or live" in §4, but §8.6 logs `source = emergency`. Proposal: `auto`, `live`, `emergency`.
 5. **Playout journal access.** Reconciliation (§7.1) reads the Liquidsoap journal, but §9 mounts the journal only into `liquidsoap`. Proposal: mount the same host directory read-only into `backend`; path via env `PLAYOUT_JOURNAL_ROOT` (another host path, like `MEDIA_ROOT`).
-6. **Clock save: sync or async.** §6.0 returns the dry check in the save response, while the example in §6.5 says the save returns `accepted` with an operation ID. Proposal: the dry check and the template save are synchronous; recalculating the planned hours afterwards is an async operation (`clock_build.completed/failed`), and its ID is included in the save response.
+6. **Clock save: sync or async** — **DECIDED** (2026-10-14, `docs/phase-7-plan.md` §2): the dry check and the save are synchronous; the async rebuild of planned hours arrives with rotation (Phase 8). Its operation ID (`clock_build.completed/failed`) is then added to the save response.
 7. **Missed marking scans `aired` items in `scheduled_items`**, but aired items are moved to `play_log` (§4.1). Proposal: marking scans `planned` and `queued` only; aired items are already confirmed.
 8. **§9.2 step 8** says "does not start the new `api`"; the service is named `backend`. Fix in the design.
 

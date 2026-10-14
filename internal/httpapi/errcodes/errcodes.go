@@ -81,6 +81,18 @@ const (
 	PlayRuleInUse Problem = "play_rule_in_use"
 	// SeparationRuleNotFound: no separation rule has the requested ID.
 	SeparationRuleNotFound Problem = "separation_rule_not_found"
+	// ClockNotFound: no clock has the requested ID.
+	ClockNotFound Problem = "clock_not_found"
+	// ClockInUse: grid slots assign the clock; see used_by.
+	ClockInUse Problem = "clock_in_use"
+	// ClockHasHistory: the play log or the track plan refers to the clock,
+	// so it is kept.
+	ClockHasHistory Problem = "clock_has_history"
+	// GridSlotNotFound: no grid slot has the requested ID.
+	GridSlotNotFound Problem = "grid_slot_not_found"
+	// GridConflict: another change of the same grid hours was saved at the
+	// same time; reload the grid and try again.
+	GridConflict Problem = "grid_conflict"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -96,6 +108,8 @@ func Problems() []Problem {
 		TrackNotFound, TrackInUse, TrackHasHistory, TrackFileNotFound,
 		PlayRuleNotFound, PlayRuleInUse,
 		SeparationRuleNotFound,
+		ClockNotFound, ClockInUse, ClockHasHistory,
+		GridSlotNotFound, GridConflict,
 	}
 }
 
@@ -128,11 +142,20 @@ const (
 	Taken Field = "taken"
 	// UnknownID: the field refers to an entity that does not exist.
 	UnknownID Field = "unknown_id"
+	// Overlap: the value collides with another one (two fixed clock
+	// elements whose start windows overlap).
+	Overlap Field = "overlap"
+	// DoesNotFit: the content does not fit into its time (material before
+	// a fixed clock element, a fixed element past the end of the hour).
+	DoesNotFit Field = "does_not_fit"
+	// Order: the items are out of order (fixed clock elements not in
+	// minute order).
+	Order Field = "order"
 )
 
 // Fields lists every field error code, in declaration order.
 func Fields() []Field {
-	return []Field{Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID}
+	return []Field{Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit, Order}
 }
 
 const schemaPrefix = "#/components/schemas/"

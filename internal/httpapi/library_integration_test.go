@@ -17,8 +17,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/dbtest"
+	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
@@ -26,6 +28,8 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
+	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
@@ -50,6 +54,13 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	svc := library.NewService(d,
 		libraryrepo.NewTypes(d), libraryrepo.NewPlaylists(d), libraryrepo.NewArtists(d), libraryrepo.NewTracks(d),
 		lib, media.NewProber(lib), log)
+	gridSvc := grid.NewService(d, gridrepo.New(d), func(context.Context) (grid.Settings, error) {
+		return grid.Settings{Location: stationTZ(t), HorizonDays: 30}, nil // setting defaults
+	}, time.Now)
+	clocksSvc := clocks.NewService(d, clocksrepo.New(d), clocksrepo.NewCheck(d.Pool), gridSvc,
+		func(context.Context) (clocks.Settings, error) {
+			return clocks.Settings{DurationToleranceMS: 30000, FixedToleranceMS: 60000, GridHorizonDays: 30}, nil
+		}, time.Now)
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Log: log, DB: d.Pool, Logs: logging.NewFileReader(t.TempDir()),
 		Library:   svc,
@@ -57,7 +68,9 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		Separation: separation.NewService(separationrepo.New(d), func(context.Context) (int, error) {
 			return 10 * 24, nil // retention.play_log_days default
 		}),
-		Now: time.Now,
+		Clocks: clocksSvc,
+		Grid:   gridSvc,
+		Now:    time.Now,
 	}))
 	t.Cleanup(srv.Close)
 	return &libraryAPI{t: t, url: srv.URL, db: d, mediaRoot: root}

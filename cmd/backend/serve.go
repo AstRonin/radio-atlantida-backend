@@ -10,8 +10,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/config"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
+	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi"
 	"github.com/AstRonin/radio-atlantida-backend/internal/jobs"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
@@ -19,6 +21,8 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
+	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	jobsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/jobs"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
@@ -107,6 +111,9 @@ func serve(ctx context.Context) error {
 		mediaLib, prober, log)
 	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool))
 	separationSvc := separation.NewService(separationrepo.New(database), separationLimit(settingsSvc))
+	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
+	clocksSvc := clocks.NewService(database, clocksrepo.New(database), clocksrepo.NewCheck(database.Pool),
+		gridSvc, clockSettings(settingsSvc), time.Now)
 
 	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
@@ -128,6 +135,8 @@ func serve(ctx context.Context) error {
 		Library:    librarySvc,
 		PlayRules:  playRulesSvc,
 		Separation: separationSvc,
+		Clocks:     clocksSvc,
+		Grid:       gridSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -237,5 +246,45 @@ func forwardAlerts(ctx context.Context, alerts <-chan logging.Alert, hub *ws.Hub
 		case a := <-alerts:
 			hub.Publish(ws.NewErrorAlert(a))
 		}
+	}
+}
+
+// gridSettings reads the station timezone and the grid horizon for each
+// grid request, so a change applies at once (§6.3).
+func gridSettings(svc *settings.Service) grid.SettingsFunc {
+	return func(ctx context.Context) (grid.Settings, error) {
+		tz, err := settings.Value(ctx, svc, settings.StationTimezone)
+		if err != nil {
+			return grid.Settings{}, err
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return grid.Settings{}, fmt.Errorf("station timezone %q: %w", tz, err)
+		}
+		days, err := settings.Value(ctx, svc, settings.RotationGridHorizonDays)
+		if err != nil {
+			return grid.Settings{}, err
+		}
+		return grid.Settings{Location: loc, HorizonDays: days}, nil
+	}
+}
+
+// clockSettings reads the tolerance defaults of new elements and the grid
+// horizon of the dry check.
+func clockSettings(svc *settings.Service) clocks.SettingsFunc {
+	return func(ctx context.Context) (clocks.Settings, error) {
+		dur, err := settings.Value(ctx, svc, settings.RotationDurationToleranceMS)
+		if err != nil {
+			return clocks.Settings{}, err
+		}
+		fixed, err := settings.Value(ctx, svc, settings.RotationFixedToleranceMS)
+		if err != nil {
+			return clocks.Settings{}, err
+		}
+		days, err := settings.Value(ctx, svc, settings.RotationGridHorizonDays)
+		if err != nil {
+			return clocks.Settings{}, err
+		}
+		return clocks.Settings{DurationToleranceMS: dur, FixedToleranceMS: fixed, GridHorizonDays: days}, nil
 	}
 }

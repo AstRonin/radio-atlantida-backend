@@ -26,6 +26,15 @@ const (
 	UnknownID Rule = "unknown_id"
 	// Invalid: any other problem with the value.
 	Invalid Rule = "invalid"
+	// Overlap: the value collides with another one (two fixed clock
+	// elements whose start windows overlap).
+	Overlap Rule = "overlap"
+	// DoesNotFit: the content does not fit into its time (material before
+	// a fixed clock element, a fixed element past the end of the hour).
+	DoesNotFit Rule = "does_not_fit"
+	// Order: the items are out of the required order (fixed clock elements
+	// not in minute order).
+	Order Rule = "order"
 )
 
 // FieldError is the error of one request field.
