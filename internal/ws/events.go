@@ -86,3 +86,52 @@ type OperationProgressData struct {
 	Total   int    `json:"total" doc:"Units of work in total; 0 if unknown."`
 	Message string `json:"message,omitempty" doc:"For example: 12 of 40 files analysed."`
 }
+
+// EventTrackPlanWarning is the type of [TrackPlanWarningEvent].
+const EventTrackPlanWarning = "track_plan.warning"
+
+// TrackPlanWarningEvent reports the warnings of one built hour of the track
+// plan: skipped elements, emergency picks, filler problems (§7, §7.3).
+type TrackPlanWarningEvent struct {
+	Type string               `json:"type" doc:"Always track_plan.warning."`
+	Time time.Time            `json:"time" doc:"UTC time of the build."`
+	Data TrackPlanWarningData `json:"data"`
+}
+
+// TrackPlanWarningData is the payload of [TrackPlanWarningEvent].
+type TrackPlanWarningData struct {
+	HourStartUTC time.Time          `json:"hour_start_utc"`
+	ClockID      uint64             `json:"clock_id"`
+	ClockName    string             `json:"clock_name"`
+	Warnings     []TrackPlanWarning `json:"warnings" nullable:"false"`
+}
+
+// TrackPlanWarning is one warning of a build. The panel translates by code.
+type TrackPlanWarning struct {
+	Code         string  `json:"code" enum:"element_blocked_by_play_rules,element_tolerance_relaxed,element_general_pool,element_emergency,pool_track_refused,pool_empty,filler_waiting,gap_unfilled"`
+	Message      string  `json:"message" doc:"English message for developers."`
+	ElementIndex *int    `json:"element_index,omitempty" doc:"Index into the clock's elements."`
+	SegmentIndex *int    `json:"segment_index,omitempty"`
+	TrackID      *uint64 `json:"track_id,omitempty"`
+}
+
+// EventFillerRequestCreated is the type of [FillerRequestCreatedEvent].
+const EventFillerRequestCreated = "filler_request.created"
+
+// FillerRequestCreatedEvent reports a new filler reminder: a short hour that
+// waits for the operator, or an empty filler pool (§7).
+type FillerRequestCreatedEvent struct {
+	Type string                   `json:"type" doc:"Always filler_request.created."`
+	Time time.Time                `json:"time"`
+	Data FillerRequestCreatedData `json:"data"`
+}
+
+// FillerRequestCreatedData is the payload of [FillerRequestCreatedEvent].
+type FillerRequestCreatedData struct {
+	ID           uint64    `json:"id"`
+	ClockID      uint64    `json:"clock_id"`
+	ClockName    string    `json:"clock_name"`
+	HourStartUTC time.Time `json:"hour_start_utc"`
+	Reason       string    `json:"reason" enum:"short_clock,pool_empty"`
+	DeadlineAt   time.Time `json:"deadline_at" doc:"Without an answer by then, the clock's default filler mode applies."`
+}

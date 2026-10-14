@@ -52,7 +52,7 @@ type gridScheduleOutput struct {
 	Body dto.GridSchedule
 }
 
-func registerGrid(api huma.API, log *slog.Logger, svc Grid) {
+func registerGrid(api huma.API, log *slog.Logger, svc Grid, rot Rotation) {
 	tags := []string{"Grid"}
 
 	register(api, log, huma.Operation{
@@ -96,7 +96,9 @@ func registerGrid(api huma.API, log *slog.Logger, svc Grid) {
 		if err != nil {
 			return nil, err
 		}
-		return &gridAssignOutput{Body: assignResultDTO(r)}, nil
+		out := assignResultDTO(r)
+		out.BuildOperationID = startRebuild(ctx, log, rot)
+		return &gridAssignOutput{Body: out}, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -116,7 +118,9 @@ func registerGrid(api huma.API, log *slog.Logger, svc Grid) {
 		if err != nil {
 			return nil, err
 		}
-		return &gridAssignOutput{Body: assignResultDTO(r)}, nil
+		out := assignResultDTO(r)
+		out.BuildOperationID = startRebuild(ctx, log, rot)
+		return &gridAssignOutput{Body: out}, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -124,11 +128,17 @@ func registerGrid(api huma.API, log *slog.Logger, svc Grid) {
 		Method:      http.MethodDelete,
 		Path:        "/api/grid/slots/{id}",
 		Summary:     "Delete a grid slot",
-		Description: "The play history of the slot keeps its clock and loses only the slot.",
+		Description: "The play history of the slot keeps its clock and loses only the slot. Its planned hours are cleared by a clock_build operation.",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *idInput) (*struct{}, error) {
-		return nil, svc.DeleteSlot(ctx, in.ID)
+		if err := svc.DeleteSlot(ctx, in.ID); err != nil {
+			return nil, err
+		}
+		// No body to carry the operation ID; the panel sees
+		// clock_build.completed.
+		startRebuild(ctx, log, rot)
+		return nil, nil
 	})
 
 	register(api, log, huma.Operation{

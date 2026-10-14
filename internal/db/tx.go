@@ -58,7 +58,14 @@ func (d *DB) WithTx(ctx context.Context, fn func(ctx context.Context, tx Tx) err
 	if err != nil {
 		return fmt.Errorf("tx: %w", err)
 	}
-	sqlTx, err := conn.BeginTx(ctx, nil)
+	// database/sql rolls a transaction back from a goroutine of its own when
+	// the context of BeginTx ends, which would run on the connection while
+	// pgx is using it (a data race, and a double close inside pgconn). The
+	// transaction therefore begins on a context that is never cancelled.
+	// It does not outlive ctx: every statement runs on ctx, so a cancelled
+	// ctx fails the statement and fn, and WithTx rolls back below. The
+	// rollback is short and bounded by idle_in_transaction_session_timeout.
+	sqlTx, err := conn.BeginTx(context.WithoutCancel(ctx), nil)
 	if err != nil {
 		return fmt.Errorf("tx: begin: %w", err)
 	}
@@ -88,7 +95,8 @@ func (d *DB) WithTx(ctx context.Context, fn func(ctx context.Context, tx Tx) err
 //
 // database/sql asks that the driver connection is used only inside Raw. It is
 // used after Raw here because WithTx holds conn exclusively until the
-// transaction ends, and a transaction runs its statements one at a time, so
+// transaction ends, a transaction runs its statements one at a time, and its
+// BeginTx context is never cancelled (no rollback from another goroutine), so
 // database/sql never touches the connection concurrently with pgx. The
 // handle is dropped before conn is released.
 func pgxConn(conn *sql.Conn) (*pgx.Conn, error) {

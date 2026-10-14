@@ -6,7 +6,8 @@
 // cross midnight) with weekdays, a minimum interval between starts of the
 // same track, and a maximum number of starts per clock hour. At least one
 // part is set. A rule only limits; how often a slot appears is set by the
-// clock. Rotation checks the rules and never relaxes them (later phase).
+// clock. Rotation (internal/rotation) checks the rules and never relaxes
+// them.
 //
 // Persistence goes through internal/repository/playrules.
 package playrules

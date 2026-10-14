@@ -53,6 +53,9 @@ type GridReplacedSlot struct {
 type GridAssignResult struct {
 	Created  []GridSlot         `json:"created" nullable:"false"`
 	Replaced []GridReplacedSlot `json:"replaced" nullable:"false"`
+	// BuildOperationID is absent only when the rebuild could not be
+	// started; the plan job catches up within minutes.
+	BuildOperationID *uint64 `json:"build_operation_id,omitempty" doc:"The clock_build operation that rebuilds the changed planned hours."`
 }
 
 // GridHour is one assigned hour of the grid.

@@ -6,9 +6,11 @@ import (
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
+	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 )
 
 // Clocks manages clock templates (*clocks.Service).
@@ -59,7 +61,7 @@ type setFillerPoolInput struct {
 	Body dto.SetFillerPool
 }
 
-func registerClocks(api huma.API, log *slog.Logger, svc Clocks) {
+func registerClocks(api huma.API, log *slog.Logger, svc Clocks, rot Rotation) {
 	tags := []string{"Clocks"}
 	saveErrors := errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity)
 
@@ -115,7 +117,7 @@ func registerClocks(api huma.API, log *slog.Logger, svc Clocks) {
 		if err != nil {
 			return nil, err
 		}
-		return &clockSaveOutput{Body: saveResultDTO(r)}, nil
+		return &clockSaveOutput{Body: saveResultDTO(r, startRebuild(ctx, log, rot))}, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -131,7 +133,7 @@ func registerClocks(api huma.API, log *slog.Logger, svc Clocks) {
 		if err != nil {
 			return nil, err
 		}
-		return &clockSaveOutput{Body: saveResultDTO(r)}, nil
+		return &clockSaveOutput{Body: saveResultDTO(r, startRebuild(ctx, log, rot))}, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -154,7 +156,10 @@ func registerClocks(api huma.API, log *slog.Logger, svc Clocks) {
 		if err != nil {
 			return nil, err
 		}
-		return &clockSaveOutput{Body: saveResultDTO(r)}, nil
+		if choice.PoolTrackIDs != nil {
+			poolRefilled(ctx, log, rot, in.ID)
+		}
+		return &clockSaveOutput{Body: saveResultDTO(r, startRebuild(ctx, log, rot))}, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -162,7 +167,7 @@ func registerClocks(api huma.API, log *slog.Logger, svc Clocks) {
 		Method:      http.MethodPost,
 		Path:        "/api/clocks/{id}/save-incomplete",
 		Summary:     "Keep a short clock incomplete",
-		Description: "Closes the filler dialog without a choice: the clock stays incomplete and shows its warning. Reminders for its hours are created by the planner.",
+		Description: "Closes the filler dialog without a choice: the clock stays incomplete and shows its warning. Reminders for its short hours in the plan horizon are created by the rebuild.",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *idInput) (*clockSaveOutput, error) {
@@ -170,7 +175,7 @@ func registerClocks(api huma.API, log *slog.Logger, svc Clocks) {
 		if err != nil {
 			return nil, err
 		}
-		return &clockSaveOutput{Body: saveResultDTO(r)}, nil
+		return &clockSaveOutput{Body: saveResultDTO(r, startRebuild(ctx, log, rot))}, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -214,6 +219,7 @@ func registerClocks(api huma.API, log *slog.Logger, svc Clocks) {
 		if err != nil {
 			return nil, err
 		}
+		poolRefilled(ctx, log, rot, in.ID)
 		return &fillerPoolOutput{Body: poolDTO(p)}, nil
 	})
 }
@@ -279,7 +285,17 @@ func clockDTO(c clocks.Clock, l clocks.Layout) dto.Clock {
 	return out
 }
 
-func saveResultDTO(r clocks.Result) dto.ClockSaveResult {
+// poolRefilled closes the pool_empty reminders of a clock whose pool was
+// just set. The pool is saved already, so a failure is logged, not
+// returned: the reminders then close at their deadline.
+func poolRefilled(ctx context.Context, log *slog.Logger, rot Rotation, clockID uint64) {
+	if err := rot.PoolRefilled(ctx, clockID); err != nil {
+		log.ErrorContext(ctx, "close pool reminders failed", "clock_id", clockID,
+			logging.KeyRequestID, middleware.GetReqID(ctx), logging.KeyError, err)
+	}
+}
+
+func saveResultDTO(r clocks.Result, buildOp *uint64) dto.ClockSaveResult {
 	check := dto.ClockCheck{
 		ShortfallMS:      r.Layout.ShortfallMS,
 		ShortSegments:    []int{},
@@ -300,7 +316,7 @@ func saveResultDTO(r clocks.Result) dto.ClockSaveResult {
 	for i, e := range r.Replaced {
 		check.ReplacedElements[i] = elementDTO(e)
 	}
-	return dto.ClockSaveResult{Clock: clockDTO(r.Clock, r.Layout), Check: check}
+	return dto.ClockSaveResult{Clock: clockDTO(r.Clock, r.Layout), Check: check, BuildOperationID: buildOp}
 }
 
 func poolDTO(p []clocks.PoolEntry) dto.FillerPool {

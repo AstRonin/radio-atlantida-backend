@@ -28,9 +28,11 @@ import (
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
+	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
 	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
 	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
@@ -114,10 +116,13 @@ func serve(ctx context.Context) error {
 	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
 	clocksSvc := clocks.NewService(database, clocksrepo.New(database), clocksrepo.NewCheck(database.Pool),
 		gridSvc, clockSettings(settingsSvc), time.Now)
+	rotationSvc := rotation.NewService(database, rotationrepo.New(database.Pool), clocksSvc, gridSvc,
+		rotationSettings(settingsSvc), tracker, hub, log, time.Now)
 
 	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
-	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log, jobs.Retention(cleanup.Run))
+	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log,
+		jobs.Retention(cleanup.Run), jobs.TrackPlan(rotationSvc.RunJob))
 
 	// Request contexts are not cancelled by the shutdown signal itself:
 	// in-flight requests may finish during the drain. They are cancelled when
@@ -137,6 +142,7 @@ func serve(ctx context.Context) error {
 		Separation: separationSvc,
 		Clocks:     clocksSvc,
 		Grid:       gridSvc,
+		Rotation:   rotationSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -149,6 +155,8 @@ func serve(ctx context.Context) error {
 		return nil
 	})
 	g.Go(func() error { return scheduler.Run(gctx) })
+	// The planner runs the clock_build operations started by requests.
+	g.Go(func() error { return rotationSvc.Run(gctx) })
 	g.Go(func() error {
 		apiLog.Info("http server listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -286,5 +294,47 @@ func clockSettings(svc *settings.Service) clocks.SettingsFunc {
 			return clocks.Settings{}, err
 		}
 		return clocks.Settings{DurationToleranceMS: dur, FixedToleranceMS: fixed, GridHorizonDays: days}, nil
+	}
+}
+
+// rotationSettings reads the settings of the planner before each sync, so a
+// change applies on the next build (§6.3).
+func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
+	return func(ctx context.Context) (rotation.PlanSettings, error) {
+		tz, err := settings.Value(ctx, svc, settings.StationTimezone)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return rotation.PlanSettings{}, fmt.Errorf("station timezone %q: %w", tz, err)
+		}
+		horizon, err := settings.Value(ctx, svc, settings.RotationPlanHorizonHours)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		deadline, err := settings.Value(ctx, svc, settings.FillerReminderDeadlineMinutes)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		fallback, err := settings.Value(ctx, svc, settings.FillerFallbackKey)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		minGap, err := settings.Value(ctx, svc, settings.RotationMinFillerGapMS)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		relaxed, err := settings.Value(ctx, svc, settings.RotationMaxRelaxedToleranceMS)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		return rotation.PlanSettings{
+			Location:         loc,
+			PlanHorizonHours: horizon,
+			ReminderDeadline: time.Duration(deadline) * time.Minute,
+			Fallback:         clocks.Filler{Mode: clocks.FillerMode(fallback.Mode), SourceID: fallback.SourceID},
+			Build:            rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
+		}, nil
 	}
 }

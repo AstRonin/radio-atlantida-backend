@@ -52,8 +52,6 @@ func (s *Service) Update(ctx context.Context, id uint64, in Input) (Result, erro
 	if err != nil {
 		return Result{}, asFieldError(err)
 	}
-	// Phase 8: recalculate the planned items of the clock's hours and expire
-	// their pending filler requests (§7, "Grid and clock changes").
 	return s.result(ctx, id, replaced)
 }
 
@@ -148,7 +146,7 @@ func (s *Service) SaveWithFiller(ctx context.Context, id uint64, choice FillerCh
 
 // SaveIncomplete acknowledges a short clock without a filler choice: the
 // clock stays incomplete and shows its warning. Reminders for its hours in
-// the planning window are created by rotation (Phase 8, §7).
+// the planning window are created by rotation (internal/rotation, §7).
 func (s *Service) SaveIncomplete(ctx context.Context, id uint64) (Result, error) {
 	return s.result(ctx, id, nil)
 }

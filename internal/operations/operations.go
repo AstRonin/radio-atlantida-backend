@@ -32,10 +32,16 @@ const (
 	// KindRetention is the nightly cleanup of the play log and of old
 	// operations.
 	KindRetention Kind = "retention"
+	// KindTrackPlan is the plan job: due filler reminders, then the track
+	// plan extended to its horizon (§7).
+	KindTrackPlan Kind = "track_plan"
+	// KindClockBuild rebuilds the planned hours after a clock or grid
+	// change (§6.5, §7).
+	KindClockBuild Kind = "clock_build"
 )
 
 // Kinds lists every operation kind (for the OpenAPI event type enums).
-func Kinds() []Kind { return []Kind{KindRetention} }
+func Kinds() []Kind { return []Kind{KindRetention, KindTrackPlan, KindClockBuild} }
 
 // CompletedEvent is the type of the success event.
 func (k Kind) CompletedEvent() string { return string(k) + ".completed" }
@@ -256,6 +262,14 @@ func (t *Tracker) Do(ctx context.Context, kind Kind, component logging.Component
 
 // Wait blocks until every operation started by Run has finished.
 func (t *Tracker) Wait() { t.wg.Wait() }
+
+// Execute runs fn for an operation already stored by Start, in the calling
+// goroutine, and stores, logs, and publishes its outcome. It serves workers
+// that own their queue (the rotation planner). The returned error reports
+// only a failure to store the outcome.
+func (t *Tracker) Execute(ctx context.Context, id uint64, component logging.Component, fn Func) error {
+	return t.execute(ctx, id, component, fn)
+}
 
 func (t *Tracker) execute(ctx context.Context, id uint64, component logging.Component, fn Func) error {
 	summary, err := call(ctx, fn)

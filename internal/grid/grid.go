@@ -9,7 +9,8 @@
 //
 // The grid is read, not computed: Schedule and ClockHours resolve the slots
 // to hours with their UTC start. Rebuilding the planned hours after a change
-// belongs to rotation (Phase 8).
+// belongs to rotation (internal/rotation): the API starts a rebuild after
+// every change.
 //
 // Persistence goes through internal/repository/grid.
 package grid
@@ -211,7 +212,6 @@ func (s *Service) ListSlots(ctx context.Context, f Filter) ([]Slot, error) {
 func (s *Service) DeleteSlot(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	// Phase 8: recalculate the planned items of the slot's hours (§7).
 	return s.store.Delete(ctx, id)
 }
 
@@ -236,7 +236,6 @@ func (s *Service) Assign(ctx context.Context, in AssignInput) (AssignResult, err
 	if err != nil {
 		return AssignResult{}, err
 	}
-	// Phase 8: recalculate the planned items of the changed hours (§7).
 	return out, nil
 }
 
@@ -433,6 +432,29 @@ func (s *Service) ClockHours(ctx context.Context, clockID uint64, from, to time.
 			continue
 		}
 		out = append(out, clocks.Hour{StartUTC: h.StartUTC, Weekday: h.Weekday, Hour: h.Hour})
+	}
+	return out, nil
+}
+
+// Hours returns the assigned hours that start in [from, to), in time order.
+// Rotation plans them (§7).
+func (s *Service) Hours(ctx context.Context, from, to time.Time) ([]ScheduledHour, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	set, err := s.settings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read grid settings: %w", err)
+	}
+	fromDate, toDate := Date(from.In(set.Location)), Date(to.In(set.Location))
+	slots, err := s.store.List(ctx, Filter{From: &fromDate, To: &toDate})
+	if err != nil {
+		return nil, fmt.Errorf("list grid slots: %w", err)
+	}
+	var out []ScheduledHour
+	for _, h := range resolve(slots, fromDate, toDate, set.Location) {
+		if !h.StartUTC.Before(from) && h.StartUTC.Before(to) {
+			out = append(out, h)
+		}
 	}
 	return out, nil
 }

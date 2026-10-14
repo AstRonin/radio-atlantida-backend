@@ -93,6 +93,16 @@ const (
 	// GridConflict: another change of the same grid hours was saved at the
 	// same time; reload the grid and try again.
 	GridConflict Problem = "grid_conflict"
+	// FillerRequestNotFound: no filler reminder has the requested ID.
+	FillerRequestNotFound Problem = "filler_request_not_found"
+	// FillerRequestClosed: the reminder was already answered, defaulted, or
+	// expired.
+	FillerRequestClosed Problem = "filler_request_closed"
+	// FillerRequestNotAnswerable: a pool_empty reminder is closed by
+	// refilling the clock's filler pool, not by a track.
+	FillerRequestNotAnswerable Problem = "filler_request_not_answerable"
+	// HourStarted: the hour is on air or over; its plan is not changed.
+	HourStarted Problem = "hour_started"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -110,6 +120,7 @@ func Problems() []Problem {
 		SeparationRuleNotFound,
 		ClockNotFound, ClockInUse, ClockHasHistory,
 		GridSlotNotFound, GridConflict,
+		FillerRequestNotFound, FillerRequestClosed, FillerRequestNotAnswerable, HourStarted,
 	}
 }
 
@@ -151,11 +162,14 @@ const (
 	// Order: the items are out of order (fixed clock elements not in
 	// minute order).
 	Order Field = "order"
+	// Blocked: the track breaks separation or a play rule at the time it
+	// would play.
+	Blocked Field = "blocked"
 )
 
 // Fields lists every field error code, in declaration order.
 func Fields() []Field {
-	return []Field{Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit, Order}
+	return []Field{Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit, Order, Blocked}
 }
 
 const schemaPrefix = "#/components/schemas/"

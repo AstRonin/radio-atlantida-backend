@@ -116,6 +116,9 @@ type ClockCheck struct {
 type ClockSaveResult struct {
 	Clock Clock      `json:"clock"`
 	Check ClockCheck `json:"check"`
+	// BuildOperationID is absent only when the rebuild could not be
+	// started; the plan job catches up within minutes.
+	BuildOperationID *uint64 `json:"build_operation_id,omitempty" doc:"The clock_build operation that rebuilds the clock's planned hours (clock_build.completed or .failed)."`
 }
 
 // SegmentFillerChoice is the filler chosen for one segment.

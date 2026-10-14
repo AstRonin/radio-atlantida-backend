@@ -20,6 +20,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
@@ -124,6 +125,10 @@ var refusals = []refusal{
 	{clocks.ErrHasHistory, http.StatusConflict, errcodes.ClockHasHistory},
 	{grid.ErrNotFound, http.StatusNotFound, errcodes.GridSlotNotFound},
 	{grid.ErrConflict, http.StatusConflict, errcodes.GridConflict},
+	{rotation.ErrRequestNotFound, http.StatusNotFound, errcodes.FillerRequestNotFound},
+	{rotation.ErrRequestClosed, http.StatusConflict, errcodes.FillerRequestClosed},
+	{rotation.ErrNotAnswerable, http.StatusConflict, errcodes.FillerRequestNotAnswerable},
+	{rotation.ErrHourStarted, http.StatusConflict, errcodes.HourStarted},
 }
 
 func refusalFor(err error) *refusal {
@@ -155,6 +160,7 @@ var validationRuleCodes = map[validation.Rule]errcodes.Field{
 	validation.Overlap:    errcodes.Overlap,
 	validation.DoesNotFit: errcodes.DoesNotFit,
 	validation.Order:      errcodes.Order,
+	validation.Blocked:    errcodes.Blocked,
 }
 
 // settingRuleCodes maps the rules of a refused setting value to field codes.

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,13 +28,19 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
+	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
+	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
+	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
 	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
+	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
 // libraryAPI is the API over a migrated database and a media root, wired as
@@ -43,6 +50,28 @@ type libraryAPI struct {
 	url       string
 	db        *db.DB
 	mediaRoot string
+	rotation  *rotation.Service
+	clock     *testClock
+}
+
+// testClock is the clock of the rotation service: the real time, moved by
+// the test.
+type testClock struct {
+	mu     sync.Mutex
+	offset time.Duration
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.offset)
+}
+
+// set moves the clock to at.
+func (c *testClock) set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.offset = time.Until(at)
 }
 
 func newLibraryAPI(t *testing.T) *libraryAPI {
@@ -61,8 +90,33 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		func(context.Context) (clocks.Settings, error) {
 			return clocks.Settings{DurationToleranceMS: 30000, FixedToleranceMS: 60000, GridHorizonDays: 30}, nil
 		}, time.Now)
+	hub := ws.NewHub(log)
+	pool := workerpool.New(1, 4)
+	tracker := operations.NewTracker(operationsrepo.New(d.Pool), hub, pool, log, time.Now)
+	clock := &testClock{}
+	rotationSvc := rotation.NewService(d, rotationrepo.New(d.Pool), clocksSvc, gridSvc,
+		func(context.Context) (rotation.PlanSettings, error) {
+			return rotation.PlanSettings{ // setting defaults
+				Location: stationTZ(t), PlanHorizonHours: 48, ReminderDeadline: 2 * time.Hour,
+				Fallback: clocks.Filler{Mode: clocks.FillerRandom},
+				Build:    rotation.Settings{MinFillerGapMS: 10000, MaxRelaxedToleranceMS: 120000},
+			}, nil
+		}, tracker, hub, log, clock.now)
+	planner := make(chan struct{})
+	go func() {
+		defer close(planner)
+		_ = rotationSvc.Run(t.Context())
+	}()
+	// t.Context ends before the cleanups; this one runs before the database
+	// closes (last-in first-out).
+	t.Cleanup(func() {
+		<-planner
+		pool.Close()
+		hub.Close()
+	})
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
-		Log: log, DB: d.Pool, Logs: logging.NewFileReader(t.TempDir()),
+		Log: log, DB: d.Pool, Logs: logging.NewFileReader(t.TempDir()), Operations: tracker,
+		Rotation:  rotationSvc,
 		Library:   svc,
 		PlayRules: playrules.NewService(d, playrulesrepo.New(d.Pool)),
 		Separation: separation.NewService(separationrepo.New(d), func(context.Context) (int, error) {
@@ -73,7 +127,7 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		Now:    time.Now,
 	}))
 	t.Cleanup(srv.Close)
-	return &libraryAPI{t: t, url: srv.URL, db: d, mediaRoot: root}
+	return &libraryAPI{t: t, url: srv.URL, db: d, mediaRoot: root, rotation: rotationSvc, clock: clock}
 }
 
 // reply is a read response.

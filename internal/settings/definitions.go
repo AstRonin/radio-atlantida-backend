@@ -118,11 +118,13 @@ var (
 	LiquidsoapControlHost = Key[string]{"liquidsoap.control_host"}
 	LiquidsoapControlPort = Key[int]{"liquidsoap.control_port"}
 
-	RotationGridHorizonDays     = Key[int]{"rotation.grid_horizon_days"}
-	RotationPlanHorizonHours    = Key[int]{"rotation.plan_horizon_hours"}
-	RotationLookaheadItems      = Key[int]{"rotation.lookahead_items"}
-	RotationDurationToleranceMS = Key[int]{"rotation.default_duration_tolerance_ms"}
-	RotationFixedToleranceMS    = Key[int]{"rotation.default_fixed_tolerance_ms"}
+	RotationGridHorizonDays       = Key[int]{"rotation.grid_horizon_days"}
+	RotationPlanHorizonHours      = Key[int]{"rotation.plan_horizon_hours"}
+	RotationLookaheadItems        = Key[int]{"rotation.lookahead_items"}
+	RotationDurationToleranceMS   = Key[int]{"rotation.default_duration_tolerance_ms"}
+	RotationFixedToleranceMS      = Key[int]{"rotation.default_fixed_tolerance_ms"}
+	RotationMinFillerGapMS        = Key[int]{"rotation.min_filler_gap_ms"}
+	RotationMaxRelaxedToleranceMS = Key[int]{"rotation.max_relaxed_tolerance_ms"}
 
 	FillerFallbackKey             = Key[FillerFallback]{"filler.fallback"}
 	FillerReminderDeadlineMinutes = Key[int]{"filler.reminder_deadline_minutes"}
@@ -218,6 +220,8 @@ func NewRegistry() *Registry {
 	r.add(intDef(RotationLookaheadItems, "Items pushed to Liquidsoap ahead of the current one.", "", 3, 2, 3), ApplyImmediate, true)
 	r.add(intDef(RotationDurationToleranceMS, "Default duration tolerance of a new clock element.", "ms", 30000, 0, 600000), ApplyImmediate, false)
 	r.add(intDef(RotationFixedToleranceMS, "Default start tolerance of a new fixed clock element.", "ms", 60000, 0, 600000), ApplyImmediate, false)
+	r.add(intDef(RotationMinFillerGapMS, "Shortest gap in a segment that gets filler; a smaller gap is left.", "ms", 10000, 0, 120000), ApplyImmediate, true)
+	r.add(intDef(RotationMaxRelaxedToleranceMS, "Emergency: how far the duration tolerance of an element may be relaxed when no track fits.", "ms", 120000, 0, 600000), ApplyImmediate, true)
 
 	// Filler (§7).
 	r.add(fillerFallbackDef(), ApplyImmediate, true)

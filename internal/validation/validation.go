@@ -35,6 +35,9 @@ const (
 	// Order: the items are out of the required order (fixed clock elements
 	// not in minute order).
 	Order Rule = "order"
+	// Blocked: the track breaks separation or a play rule at the time it
+	// would play.
+	Blocked Rule = "blocked"
 )
 
 // FieldError is the error of one request field.

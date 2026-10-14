@@ -11,7 +11,8 @@
 // choice (save-with-filler or save-incomplete).
 //
 // Rebuilding planned hours after a change and reminders for incomplete
-// clocks belong to rotation (Phase 8).
+// clocks belong to rotation (internal/rotation): the API starts a rebuild
+// after every save, and the planner sees the new updated_at.
 //
 // Persistence goes through internal/repository/clocks.
 package clocks
