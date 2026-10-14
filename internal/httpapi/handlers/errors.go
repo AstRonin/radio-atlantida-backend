@@ -19,6 +19,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
@@ -129,6 +130,7 @@ var refusals = []refusal{
 	{rotation.ErrRequestClosed, http.StatusConflict, errcodes.FillerRequestClosed},
 	{rotation.ErrNotAnswerable, http.StatusConflict, errcodes.FillerRequestNotAnswerable},
 	{rotation.ErrHourStarted, http.StatusConflict, errcodes.HourStarted},
+	{playout.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiquidsoapUnavailable},
 }
 
 func refusalFor(err error) *refusal {

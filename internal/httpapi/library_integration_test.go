@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,14 +27,17 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
+	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
+	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	libraryrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/library"
 	operationsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/operations"
+	playoutrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playout"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
 	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
@@ -51,7 +55,30 @@ type libraryAPI struct {
 	db        *db.DB
 	mediaRoot string
 	rotation  *rotation.Service
-	clock     *testClock
+	playout   *playout.Service
+	// liquidsoap is the fake control interface playout talks to.
+	liquidsoap *fakeLiquidsoap
+	clock      *testClock
+	// emergency is the setting playout.emergency_playlist_id.
+	emergency atomicID
+}
+
+// atomicID is a setting value the test changes while services read it.
+type atomicID struct {
+	mu sync.Mutex
+	id *uint64
+}
+
+func (a *atomicID) get() *uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.id
+}
+
+func (a *atomicID) set(id uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.id = &id
 }
 
 // testClock is the clock of the rotation service: the real time, moved by
@@ -100,8 +127,18 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 				Location: stationTZ(t), PlanHorizonHours: 48, ReminderDeadline: 2 * time.Hour,
 				Fallback: clocks.Filler{Mode: clocks.FillerRandom},
 				Build:    rotation.Settings{MinFillerGapMS: 10000, MaxRelaxedToleranceMS: 120000},
+				Freeze:   5 * time.Minute,
 			}, nil
 		}, tracker, hub, log, clock.now)
+	fakeLS := newFakeLiquidsoap(t)
+	ctl := liquidsoap.New(func(context.Context) (string, error) { return fakeLS.addr(), nil }, time.Now, nil)
+	a := &libraryAPI{t: t, db: d, mediaRoot: root, rotation: rotationSvc, clock: clock, liquidsoap: fakeLS}
+	a.playout = playout.NewService(d, playoutrepo.New(d.Pool), ctl, func(context.Context) (playout.Settings, error) {
+		return playout.Settings{ // setting defaults
+			Location: stationTZ(t), Lookahead: 3, Prepush: 5 * time.Minute, FadeOutMS: 2500, MediaRoot: "/media",
+			MusicGain: 1, EmergencyPlaylistID: a.emergency.get(),
+		}, nil
+	}, hub, log, clock.now, rand.New(rand.NewPCG(1, 1))) //nolint:gosec // G404: emergency picks, not security
 	planner := make(chan struct{})
 	go func() {
 		defer close(planner)
@@ -122,12 +159,14 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		Separation: separation.NewService(separationrepo.New(d), func(context.Context) (int, error) {
 			return 10 * 24, nil // retention.play_log_days default
 		}),
-		Clocks: clocksSvc,
-		Grid:   gridSvc,
-		Now:    time.Now,
+		Clocks:  clocksSvc,
+		Grid:    gridSvc,
+		Playout: a.playout,
+		Now:     time.Now,
 	}))
 	t.Cleanup(srv.Close)
-	return &libraryAPI{t: t, url: srv.URL, db: d, mediaRoot: root, rotation: rotationSvc, clock: clock}
+	a.url = srv.URL
+	return a
 }
 
 // reply is a read response.

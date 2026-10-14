@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-11)
+Status: Draft (v7-12)
 Last updated: 2026-10-14
 
 ## 1. Overview
@@ -167,6 +167,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
   - These tables replace the old `daypart_rules` table. A time window is one kind of play rule.
 - **separation_rules**: id, scope (track or artist), min_interval_hours (default 72), notes. The values are copied from the reference software and entered into this table. Rotation reads all separation values from here; none are hard-coded.
 - **play_log**: id, track_id, artist_id, status (`aired`, `truncated`, `missed`), planned_start_utc, started_at (nullable for missed items), planned_out_ms, actual_duration_ms (nullable for missed items), truncated (bool, default false), source (`auto`, `live`, or `emergency`; see §8.6), clock_id, grid_slot_id, scheduled_item_id (nullable), outage_id (nullable, set for missed items), resolution (`open`, `rescheduled`, `dismissed`, nullable; used only for missed items), resolved_at (timestamptz, nullable), resolved_item_id (nullable, set when rescheduled). Records what aired and what did not.
+  - `ended_at` (timestamptz, nullable): set when the end of the track is recorded; null while it plays and for missed items. The first recorded end wins, because Liquidsoap may report the end of a track twice (v7-12, `docs/phase-9-plan.md` §2). A unique partial index on `scheduled_item_id` makes a repeated start a no-op.
   - `scheduled_item_id` and `resolved_item_id` are trace ids of `scheduled_items` rows, without a foreign key: those rows are deleted once they air or are missed (§4.1), so a foreign key would point at nothing. Aired rows are kept for 10 days (see §4.1). Missed rows are kept until resolved.
 - **settings**: key, value (JSONB), updated_at (timestamptz, UTC). Holds all backend settings edited in the admin panel, including the audio output profile (see §6.3 and §8.8), `fade_out_ms` (default 2500, allowed 2000 to 3000), and outage detection thresholds (see §6.3).
 - **Deletion and history.** A track, artist, or clock that is referenced by `play_log` or `scheduled_items` cannot be deleted (`ON DELETE RESTRICT`). The API refuses the request and says why. This keeps the played-tracks list and open missed items complete. A grid slot can be deleted; the history rows keep their other references and lose only `grid_slot_id`.
@@ -312,7 +313,8 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Station**: timezone (default `Asia/Yerevan`), station name.
 - **Playlist types**: the list of types (system and custom). The manager can add a type, rename it, and delete a custom type that is not in use. System types can be renamed but not deleted (§4).
 - **Stream output (Icecast)**: host, port, mount point, codec, bitrate, sample rate, channels, loudness target, stream metadata, HLS on or off.
-- **Liquidsoap**: default music gain, fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port.
+- **Liquidsoap**: default music gain, fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
+- **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and its reminders cannot be answered.
 - **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults, the shortest gap that gets filler (`rotation.min_filler_gap_ms`, default 10 s), and the limit of the emergency tolerance relaxation (`rotation.max_relaxed_tolerance_ms`, default 120 s). The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
 - **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
@@ -381,6 +383,15 @@ Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead o
 | `POST /api/track-plan/rebuild` | Body: `from`, `to`. Rebuilds the future hours of the range; returns `accepted` with an operation ID (`clock_build`) |
 | `GET /api/filler-requests?status=` | Filler reminders (default `pending`) |
 | `POST /api/filler-requests/{id}/answer` | Body: `track_id`. Fills the waiting segments of the hour; refused per field when the track breaks separation or a play rule. Synchronous |
+
+**Endpoints added in v7-12 (playout, `docs/phase-9-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /api/playout/callback` | Called by Liquidsoap: track `start` and `end`, and the Icecast output state (§8.3). A started plan item moves to `play_log`; repeated events change nothing |
+| `GET /api/playout/emergency/next` | Called by Liquidsoap: the next track of the emergency playlist as a request (`text/plain`), or 204 (§8.2, §8.6) |
+| `GET /api/playout/status` | Control link, Icecast output, now playing, items waiting in Liquidsoap's queues, music gain |
+| `PUT /api/playout/music-gain` | Body: `gain` (0 to 1). Sets the live music gain (§8.5); refused with `liquidsoap_unavailable` when the control link is down |
 
 **Endpoints added in v7-8 (play rules and track preview)**
 
@@ -619,13 +630,15 @@ For each item, Go sends:
 
 Liquidsoap performs the fade itself, so control-path latency does not affect it.
 
+**Implementation (v7-12, `docs/phase-9-plan.md` §2).** Liquidsoap has two request queues, `hour_0` and `hour_1`; each station hour is pushed into the queue of its parity, and a time switch in the script plays the queue of the current hour (§8.10). Each request is annotated with its `item_id` and, for a truncated item, `liq_cue_out` and `liq_fade_out`. The backend keeps `rotation.lookahead_items` items waiting in the queue of the hour on air, pushes the first items of the next hour `playout.prepush_minutes` before it starts, marks pushed items `queued`, and never pushes an item that is already more than 30 seconds late (no catch-up, §7.1).
+
 ### 8.2 Emergency mode: request.dynamic
 
 `request.dynamic` is used only for emergencies, for example when the Go plan is empty or the backend is unavailable and Liquidsoap must ask for the next item itself. It is not the normal path because it makes Go's response time critical.
 
 ### 8.3 Feedback and playout journal
 
-- Liquidsoap reports actual playback events to Go (an HTTP callback on track start and end). Go writes them to `play_log`, including `truncated` and the actual duration. The log reflects what aired, not what was planned.
+- Liquidsoap reports actual playback events to Go (an HTTP callback on track start and end). Go writes them to `play_log`, including `truncated` and the actual duration. The log reflects what aired, not what was planned. A plan item moves from `scheduled_items` to `play_log` when it starts (the `aired` status of `scheduled_items` is not used); its end sets the actual duration, and an item that played more than one second less than planned is `truncated` (v7-12).
 - Liquidsoap also reports its Icecast output state (connected or not) in the same callbacks, so the outage detector knows whether listeners could receive the stream (§7.1).
 - Liquidsoap writes every track start and end to a local playout journal in `PLAYOUT_JOURNAL_ROOT`, independently of the callbacks (§7.1). If a callback cannot be delivered, the journal still holds the event, and reconciliation uses it after the backend recovers.
 
@@ -685,6 +698,7 @@ The Docker Icecast service is a test server. Its connection is entered in the ad
 
 - `request.push` does not guarantee a start at a specific second. Clock starts are therefore tied to the hour grid: Liquidsoap switches sources by time, aligned to UTC hour boundaries adjusted for the station timezone (§10.2).
 - Each clock start is a scheduled switch. Items from the new clock are pushed before the boundary, so the switch is a source change, not a late push.
+- The script switches between its two hour queues at `floor((t − hour_shift) / 3600)` parity, where `hour_shift` (set by the backend) is the station UTC offset modulo one hour. The queue an hour leaves is flushed, and a track cut by the switch reports its end at once (v7-12). Measured on the dev stack: the clock started 18 ms after the boundary.
 - The start and end accuracy are verified on the test stand before the first air date. Acceptance target: a clock starts within one second of the scheduled time.
 - If the station timezone ever becomes DST-dependent, the switch logic must handle 23- and 25-hour days (§10.2).
 

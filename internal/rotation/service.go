@@ -26,7 +26,8 @@ var (
 	// ErrNotAnswerable: a pool_empty reminder is closed by refilling the
 	// pool, not by a track.
 	ErrNotAnswerable = errors.New("filler request is closed by refilling the pool")
-	// ErrHourStarted: the hour of the reminder is on air or over.
+	// ErrHourStarted: the hour of the reminder is on air, over, or frozen
+	// for playout (PlanSettings.Freeze).
 	ErrHourStarted = errors.New("the hour has started")
 )
 
@@ -197,7 +198,17 @@ type PlanSettings struct {
 	ReminderDeadline time.Duration
 	// Fallback is the global fallback filler mode (filler.fallback).
 	Fallback clocks.Filler
-	Build    Settings
+	// Freeze is how long before its start an hour is frozen: playout may
+	// have pushed its first items to Liquidsoap (playout.prepush_minutes),
+	// so a built hour is no longer rebuilt, cleared, or answered.
+	Freeze time.Duration
+	Build  Settings
+}
+
+// frozen reports whether the hour that starts at start is on air, over, or
+// so close to its start that playout may have pushed its items.
+func (p PlanSettings) frozen(start, now time.Time) bool {
+	return !start.After(now.Add(p.Freeze))
 }
 
 // SettingsFunc reads the settings.
@@ -269,8 +280,9 @@ func (r SyncResult) String() string {
 
 // Sync brings the plan in step with the grid for the hours that start after
 // now and within the plan horizon: it builds missing and stale hours and
-// those in force, and clears built hours the grid no longer assigns. An hour
-// that has started is never rebuilt. A failed hour does not stop the
+// those in force, and clears built hours the grid no longer assigns. A
+// built hour that is frozen (PlanSettings.Freeze) is never rebuilt or
+// cleared; a missing one is still built. A failed hour does not stop the
 // others; the errors are returned together.
 func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
 	var res SyncResult
@@ -331,7 +343,7 @@ func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
 		}
 	}
 	for _, h := range built {
-		if assigned[h.Start.Unix()] {
+		if assigned[h.Start.Unix()] || set.frozen(h.Start, now) {
 			continue
 		}
 		if err := s.clear(ctx, h.Start); err != nil {
@@ -422,8 +434,14 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	if err != nil {
 		return hourOutcome{}, err
 	}
+	now := s.now().UTC()
 	c := j.view.Clock
 	switch {
+	case found && set.frozen(j.start, now) && j.kind == buildAnswer:
+		return hourOutcome{}, ErrHourStarted
+	case found && set.frozen(j.start, now):
+		// Its items may be in Liquidsoap's queue already.
+		return hourOutcome{skipped: true}, nil
 	case j.kind == buildFresh && !j.force && found && ph.current(c):
 		return hourOutcome{skipped: true}, nil
 	case j.kind != buildFresh && (!found || !ph.current(c) || ph.FillerRequestID == nil || *ph.FillerRequestID != j.request.ID):
@@ -446,7 +464,6 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 		return hourOutcome{}, err
 	}
 
-	now := s.now().UTC()
 	deadline := j.start.Add(-set.ReminderDeadline)
 	in := HourInput{
 		Start: j.start, Location: set.Location, Clock: c, Layout: j.view.Layout,
@@ -650,7 +667,7 @@ func (s *Service) closeDue(ctx context.Context, r FillerRequest, view *clocks.Vi
 		if err = st.SetRequestStatus(ctx, req.ID, RequestDefaulted, nil); err != nil {
 			return err
 		}
-		if req.Reason != ReasonShortClock || view == nil || !req.HourStart.After(s.now()) {
+		if req.Reason != ReasonShortClock || view == nil || set.frozen(req.HourStart, s.now()) {
 			return nil
 		}
 		out, err = s.buildTx(ctx, st, hourJob{start: req.HourStart, view: *view, kind: buildDefault, request: req}, lib, set)
@@ -713,7 +730,7 @@ func (s *Service) Answer(ctx context.Context, id, trackID uint64) (FillerRequest
 			return ErrRequestClosed
 		case req.Reason != ReasonShortClock:
 			return ErrNotAnswerable
-		case !req.HourStart.After(s.now()):
+		case set.frozen(req.HourStart, s.now()):
 			return ErrHourStarted
 		}
 		if txErr = st.SetRequestStatus(ctx, id, RequestAnswered, &trackID); txErr != nil {

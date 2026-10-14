@@ -117,6 +117,7 @@ var (
 	LiquidsoapHarborPort  = Key[int]{"liquidsoap.harbor_port"}
 	LiquidsoapControlHost = Key[string]{"liquidsoap.control_host"}
 	LiquidsoapControlPort = Key[int]{"liquidsoap.control_port"}
+	LiquidsoapMediaRoot   = Key[string]{"liquidsoap.media_root"}
 
 	RotationGridHorizonDays       = Key[int]{"rotation.grid_horizon_days"}
 	RotationPlanHorizonHours      = Key[int]{"rotation.plan_horizon_hours"}
@@ -137,6 +138,7 @@ var (
 	RetentionLogDays     = Key[int]{"retention.log_days"}
 
 	PlayoutEmergencyPlaylistID = Key[*uint64]{"playout.emergency_playlist_id"}
+	PlayoutPrepushMinutes      = Key[int]{"playout.prepush_minutes"}
 )
 
 // Secret keys. They have no typed Key: their values are never read here.
@@ -211,6 +213,8 @@ func NewRegistry() *Registry {
 	r.add(intDef(LiquidsoapHarborPort, "Harbor input port for live voice.", "", 8005, 1, 65535), ApplyReconnect, true)
 	r.add(stringDef(LiquidsoapControlHost, "Liquidsoap control host name or IP address.", "liquidsoap", 1, 253, validHost), ApplyReconnect, true)
 	r.add(intDef(LiquidsoapControlPort, "Liquidsoap control (telnet) port.", "", 1234, 1, 65535), ApplyReconnect, true)
+	r.add(stringDef(LiquidsoapMediaRoot, "The media directory as Liquidsoap sees it (its mount of MEDIA_ROOT); track paths are pushed under it.",
+		"/media", 1, 255, validMediaRoot), ApplyImmediate, true)
 	r.addSecret(SecretLiquidsoapControlUser, GroupLiquidsoap, "LIQUIDSOAP_CONTROL_USER", "Liquidsoap control user.")
 	r.addSecret(SecretLiquidsoapControlPassword, GroupLiquidsoap, "LIQUIDSOAP_CONTROL_PASSWORD", "Liquidsoap control password.")
 
@@ -239,6 +243,8 @@ func NewRegistry() *Registry {
 
 	// Playout (§8.6).
 	r.add(optionalIDDef(PlayoutEmergencyPlaylistID, "Playlist played when the pool and the plan are both empty. Null: none."), ApplyImmediate, true)
+	r.add(intDef(PlayoutPrepushMinutes, "How long before its start an hour's first items are pushed to Liquidsoap; from then on the hour is no longer rebuilt.",
+		"minutes", 5, 1, 15), ApplyImmediate, true)
 
 	return r
 }
@@ -551,6 +557,17 @@ func validHost(s string) error {
 		if !hostLabel.MatchString(label) {
 			return errors.New("must be a host name or an IP address")
 		}
+	}
+	return nil
+}
+
+var mediaRootPattern = regexp.MustCompile(`^/[^\x00-\x1f"]*$`)
+
+// validMediaRoot accepts an absolute path without control characters or
+// quotes: it becomes part of a Liquidsoap request URI.
+func validMediaRoot(s string) error {
+	if !mediaRootPattern.MatchString(s) {
+		return errors.New("must be an absolute path starting with /, without quotes or control characters")
 	}
 	return nil
 }

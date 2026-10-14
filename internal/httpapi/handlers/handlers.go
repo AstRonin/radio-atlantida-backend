@@ -41,6 +41,7 @@ type Deps struct {
 	Clocks     Clocks
 	Grid       Grid
 	Rotation   Rotation
+	Playout    Playout
 	// Now is the clock of the live status.
 	Now func() time.Time
 }
@@ -61,6 +62,7 @@ func Register(api huma.API, d Deps) {
 	registerClocks(api, log, d.Clocks, d.Rotation)
 	registerGrid(api, log, d.Grid, d.Rotation)
 	registerRotation(api, log, d.Rotation)
+	registerPlayout(api, log, d.Playout)
 }
 
 // Streaming is the operation metadata key of routes that stream a response

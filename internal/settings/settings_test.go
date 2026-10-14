@@ -98,6 +98,7 @@ func TestDefaultsMatchDevStack(t *testing.T) {
 		"liquidsoap.control_host": "liquidsoap",   // service liquidsoap
 		"liquidsoap.control_port": 1234,           // liquidsoap TELNET_PORT
 		"liquidsoap.harbor_port":  8005,           // liquidsoap HARBOR_PORT
+		"liquidsoap.media_root":   "/media",       // liquidsoap volume MEDIA_ROOT:/media
 		"station.timezone":        "Asia/Yerevan", // §10.2
 		"liquidsoap.fade_out_ms":  2500,           // §6.3
 	}

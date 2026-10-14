@@ -101,8 +101,12 @@ const (
 	// FillerRequestNotAnswerable: a pool_empty reminder is closed by
 	// refilling the clock's filler pool, not by a track.
 	FillerRequestNotAnswerable Problem = "filler_request_not_answerable"
-	// HourStarted: the hour is on air or over; its plan is not changed.
+	// HourStarted: the hour is on air, over, or about to start (its items
+	// may be in Liquidsoap's queue); its plan is not changed.
 	HourStarted Problem = "hour_started"
+	// LiquidsoapUnavailable: the backend cannot reach Liquidsoap's control
+	// interface; the command was not applied.
+	LiquidsoapUnavailable Problem = "liquidsoap_unavailable"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -121,6 +125,7 @@ func Problems() []Problem {
 		ClockNotFound, ClockInUse, ClockHasHistory,
 		GridSlotNotFound, GridConflict,
 		FillerRequestNotFound, FillerRequestClosed, FillerRequestNotAnswerable, HourStarted,
+		LiquidsoapUnavailable,
 	}
 }
 

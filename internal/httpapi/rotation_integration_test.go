@@ -185,6 +185,12 @@ func TestFillerReminders(t *testing.T) {
 	require.NotEqual(t, r.ID, reqs.Items[0].ID)
 	require.Len(t, f.plan().Items[0].Items, 3)
 
+	// Within playout.prepush_minutes of its start the hour is frozen: its
+	// items may be in Liquidsoap's queue.
+	f.clock.set(start.Add(-2 * time.Minute))
+	f.problem(http.StatusConflict, errcodes.HourStarted, http.MethodPost,
+		fmt.Sprintf("/api/filler-requests/%d/answer", reqs.Items[0].ID), map[string]any{"track_id": filler})
+
 	f.clock.set(start.Add(-time.Hour))
 	summary, err := f.rotation.RunJob(t.Context())
 	require.NoError(t, err)

@@ -296,6 +296,7 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/tracks", "/api/tracks/{id}", "/api/tracks/{id}/play-rules", "/api/tracks/{id}/audio",
 		"/api/play-rules", "/api/play-rules/{id}", "/api/play-rules/{id}/targets",
 		"/api/separation-rules", "/api/separation-rules/{id}",
+		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/music-gain",
 	} {
 		require.Contains(t, doc.Paths, p)
 	}
@@ -303,10 +304,13 @@ func TestOpenAPIDocument(t *testing.T) {
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 6)
+	require.Len(t, schemas["Event"].OneOf, 9)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackPlanWarning}, schemas["TrackPlanWarningEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventFillerRequestCreated}, schemas["FillerRequestCreatedEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventNowPlaying}, schemas["NowPlayingEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventLiquidsoapState}, schemas["LiquidsoapStateEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventIcecastState}, schemas["IcecastStateEvent"].Properties["type"].Enum)
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindClockBuild.CompletedEvent())
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindRetention.CompletedEvent())
 	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindRetention.FailedEvent())

@@ -135,3 +135,64 @@ type FillerRequestCreatedData struct {
 	Reason       string    `json:"reason" enum:"short_clock,pool_empty"`
 	DeadlineAt   time.Time `json:"deadline_at" doc:"Without an answer by then, the clock's default filler mode applies."`
 }
+
+// EventNowPlaying is the type of [NowPlayingEvent].
+const EventNowPlaying = "playout.now_playing"
+
+// NowPlayingEvent reports the track that has just started on air (§6). The
+// panel computes the progress from started_at itself.
+type NowPlayingEvent struct {
+	Type string         `json:"type" doc:"Always playout.now_playing."`
+	Time time.Time      `json:"time"`
+	Data NowPlayingData `json:"data"`
+}
+
+// NowPlayingData is the payload of [NowPlayingEvent].
+type NowPlayingData struct {
+	ItemID     *uint64   `json:"item_id,omitempty" doc:"Plan item; absent for an emergency track."`
+	TrackID    uint64    `json:"track_id"`
+	Title      string    `json:"title"`
+	ArtistName *string   `json:"artist_name,omitempty"`
+	Source     string    `json:"source" enum:"plan,emergency"`
+	StartedAt  time.Time `json:"started_at"`
+	OutMS      *int      `json:"out_ms,omitempty" doc:"Planned out point (plan items) or duration (emergency tracks), in ms."`
+	Truncated  bool      `json:"truncated" doc:"The plan cuts the track at out_ms with a fade-out."`
+}
+
+// EventLiquidsoapState is the type of [LiquidsoapStateEvent].
+const EventLiquidsoapState = "liquidsoap.state"
+
+// LiquidsoapStateEvent reports a change of the Liquidsoap control link
+// (§6, §7.1).
+type LiquidsoapStateEvent struct {
+	Type string              `json:"type" doc:"Always liquidsoap.state."`
+	Time time.Time           `json:"time"`
+	Data LiquidsoapStateData `json:"data"`
+}
+
+// LiquidsoapStateData is the payload of [LiquidsoapStateEvent].
+type LiquidsoapStateData struct {
+	Connected bool `json:"connected" doc:"The backend reaches Liquidsoap's control interface."`
+}
+
+// EventIcecastState is the type of [IcecastStateEvent].
+const EventIcecastState = "icecast.state"
+
+// Icecast output states (§6.5).
+const (
+	IcecastConnected    = "connected"
+	IcecastDisconnected = "disconnected"
+)
+
+// IcecastStateEvent reports the connection state of the Icecast output, as
+// Liquidsoap reports it (§6.5, §8.3).
+type IcecastStateEvent struct {
+	Type string           `json:"type" doc:"Always icecast.state."`
+	Time time.Time        `json:"time"`
+	Data IcecastStateData `json:"data"`
+}
+
+// IcecastStateData is the payload of [IcecastStateEvent].
+type IcecastStateData struct {
+	State string `json:"state" enum:"connected,disconnected"`
+}
