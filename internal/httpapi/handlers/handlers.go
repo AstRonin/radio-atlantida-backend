@@ -46,6 +46,7 @@ type Deps struct {
 	Ingest     Ingest
 	Live       Live
 	Broadcast  Broadcast
+	AirWindow  AirWindow
 	// Now is the clock of the live and broadcast status.
 	Now func() time.Time
 }
@@ -68,6 +69,7 @@ func Register(api huma.API, d Deps) {
 	registerGrid(api, log, d.Grid, d.Rotation)
 	registerRotation(api, log, d.Rotation)
 	registerPlayout(api, log, d.Playout)
+	registerAirWindow(api, log, d.AirWindow)
 	registerOutages(api, log, d.Outages, d.Rotation)
 	registerIngest(api, log, d.Ingest)
 	registerLive(api, log, d.Live)

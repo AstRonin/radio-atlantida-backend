@@ -19,8 +19,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/airwindow"
 	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
 	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
+	"github.com/AstRonin/radio-atlantida-backend/internal/config"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/dbtest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
@@ -36,6 +38,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	airwindowrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/airwindow"
 	broadcastrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/broadcast"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
@@ -47,8 +50,10 @@ import (
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
 	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
+	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
+	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
@@ -165,6 +170,18 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 			MusicGain: 1, EmergencyPlaylistID: a.emergency.get(),
 		}, nil
 	}, hub, broadcastState, log, clock.now, rand.New(rand.NewPCG(1, 1))) //nolint:gosec // G404: emergency picks, not security
+	settingsSvc, err := settings.NewService(settings.NewRegistry(), settingsrepo.New(d), config.Secrets{}.IsSet(), log, time.Now)
+	require.NoError(t, err)
+	// The counts are read on every request, as in serve.
+	airWindowSvc := airwindow.NewService(airwindowrepo.New(d.Pool), a.playout,
+		func(ctx context.Context) (airwindow.Settings, error) {
+			played, err := settings.Value(ctx, settingsSvc, settings.AirPlayedCount)
+			if err != nil {
+				return airwindow.Settings{}, err
+			}
+			queued, err := settings.Value(ctx, settingsSvc, settings.AirQueuedCount)
+			return airwindow.Settings{PlayedCount: played, QueuedCount: queued}, err
+		}, clock.now)
 	planner := make(chan struct{})
 	go func() {
 		defer close(planner)
@@ -197,6 +214,8 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		Outages:   outage.NewService(outagerepo.New(d.Pool), time.Now),
 		Ingest:    ingestSvc,
 		Broadcast: broadcastState,
+		AirWindow: airWindowSvc,
+		Settings:  settingsSvc,
 		Now:       time.Now,
 	}))
 	t.Cleanup(srv.Close)

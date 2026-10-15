@@ -131,7 +131,10 @@ func (f *fakeStore) Logged(_ context.Context, id uint64) (NowPlaying, bool, erro
 	if !ok {
 		return NowPlaying{}, false, nil
 	}
-	return NowPlaying{ItemID: new(id), TrackID: r.item.TrackID, Title: "T", Source: SourcePlan, StartedAt: r.started}, true, nil
+	return NowPlaying{
+		ItemID: new(id), TrackID: r.item.TrackID, Title: "T", Source: SourcePlan, StartedAt: r.started,
+		Truncated: r.truncated,
+	}, true, nil
 }
 
 func (f *fakeStore) Track(_ context.Context, id uint64) (Track, bool, error) {
@@ -479,6 +482,14 @@ func TestCallbacks(t *testing.T) {
 	require.NoError(t, h.svc.Callback(ctx, end(1, h10.Add(time.Hour), 3000)), "a late duplicate end")
 	require.Equal(t, 179900, h.store.logged[1].actual)
 	require.False(t, h.store.logged[1].truncated)
+	require.Len(t, h.pub.events, 2, "one track_ended for the first end only")
+	require.Equal(t, ws.TrackEndedEvent{
+		Type: ws.EventTrackEnded, Time: h.pub.events[1].(ws.TrackEndedEvent).Time,
+		Data: ws.TrackEndedData{
+			ItemID: new(uint64(1)), TrackID: 1, Source: SourcePlan, Status: "aired", StartedAt: h10,
+			EndedAt: h10.Add(3 * time.Minute), ActualDurationMS: 179900,
+		},
+	}, h.pub.events[1])
 	st, err := h.svc.Status(ctx)
 	require.NoError(t, err)
 	require.Nil(t, st.NowPlaying, "the item ended")
@@ -488,16 +499,29 @@ func TestCallbacks(t *testing.T) {
 	require.NoError(t, h.svc.Callback(ctx, end(2, h10.Add(4*time.Minute), 60000)))
 	require.Equal(t, h10.Add(3*time.Minute), h.store.logged[2].started)
 	require.True(t, h.store.logged[2].truncated)
+	ended := h.pub.events[2].(ws.TrackEndedEvent).Data
+	require.Equal(t, "truncated", ended.Status, "the status after the end")
+	require.Equal(t, h10.Add(3*time.Minute), ended.StartedAt)
 
 	// Cut by the hour switch.
 	require.NoError(t, h.svc.Callback(ctx, start(3, h10.Add(4*time.Minute))))
 	require.NoError(t, h.svc.Callback(ctx, end(3, h10.Add(5*time.Minute), 60000)))
 	require.True(t, h.store.logged[3].truncated)
+	require.Equal(t, "truncated", h.pub.events[4].(ws.TrackEndedEvent).Data.Status, "cut by the hour switch")
+	require.Len(t, h.pub.events, 5)
 
 	// Unknown items and events without one are ignored.
 	require.NoError(t, h.svc.Callback(ctx, start(99, h10)))
 	require.NoError(t, h.svc.Callback(ctx, end(99, h10, 1000)))
 	require.NoError(t, h.svc.Callback(ctx, Event{Kind: EventStart, Source: SourcePlan, Time: h10}))
+	require.Len(t, h.pub.events, 5, "nothing sent for unknown items")
+
+	// A replayed journal end records the item but sends nothing: it is not
+	// live.
+	h2 := newHarness(t, item(4, 0))
+	require.NoError(t, h2.svc.Replay(ctx, end(4, h10.Add(3*time.Minute), 180000)))
+	require.True(t, h2.store.logged[4].ended)
+	require.Empty(t, h2.pub.events)
 }
 
 func TestOutputCallback(t *testing.T) {
@@ -551,4 +575,8 @@ func TestEmergency(t *testing.T) {
 	require.Len(t, h.store.emerg, 1)
 	require.Equal(t, h10, h.store.emerg[0].started)
 	require.Equal(t, 5000, h.store.emerg[0].actual)
+	require.Equal(t, ws.TrackEndedData{
+		TrackID: 1, Source: SourceEmergency, Status: "aired", StartedAt: h10, EndedAt: h10.Add(5 * time.Second),
+		ActualDurationMS: 5000,
+	}, h.pub.events[1].(ws.TrackEndedEvent).Data)
 }

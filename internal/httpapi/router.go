@@ -60,6 +60,7 @@ type Deps struct {
 	Ingest     handlers.Ingest
 	Live       handlers.Live
 	Broadcast  handlers.Broadcast
+	AirWindow  handlers.AirWindow
 	// Now is the clock of the live and broadcast status.
 	Now func() time.Time
 }
@@ -100,7 +101,7 @@ func NewRouter(d Deps) http.Handler {
 		Log: d.Log, Operations: d.Operations, Logs: d.Logs, Settings: d.Settings,
 		Library: d.Library, PlayRules: d.PlayRules, Separation: d.Separation,
 		Clocks: d.Clocks, Grid: d.Grid, Rotation: d.Rotation, Playout: d.Playout, Outages: d.Outages, Ingest: d.Ingest, Live: d.Live,
-		Broadcast: d.Broadcast, Now: d.Now,
+		Broadcast: d.Broadcast, AirWindow: d.AirWindow, Now: d.Now,
 	})
 
 	return r

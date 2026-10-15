@@ -116,7 +116,8 @@ func TestRegistryDefinitions(t *testing.T) {
 	keyPattern := regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`) // ck_settings_key
 	groups := []settings.Group{
 		settings.GroupStation, settings.GroupStream, settings.GroupLiquidsoap, settings.GroupRotation,
-		settings.GroupFiller, settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout, settings.GroupImport,
+		settings.GroupFiller, settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout, settings.GroupAir,
+		settings.GroupImport,
 	}
 	reg := settings.NewRegistry()
 	for _, d := range append(reg.Settings(), reg.Secrets()...) {
@@ -176,6 +177,13 @@ func TestUnsavedKeyReadsDefault(t *testing.T) {
 	id, err := settings.Value(t.Context(), svc, settings.PlayoutEmergencyPlaylistID)
 	require.NoError(t, err)
 	require.Nil(t, id)
+
+	played, err := settings.Value(t.Context(), svc, settings.AirPlayedCount)
+	require.NoError(t, err)
+	require.Equal(t, 10, played)
+	queued, err := settings.Value(t.Context(), svc, settings.AirQueuedCount)
+	require.NoError(t, err)
+	require.Equal(t, 9, queued)
 
 	all, err := svc.List(t.Context())
 	require.NoError(t, err)
@@ -257,6 +265,11 @@ func TestSetRefusals(t *testing.T) {
 		{"retention.play_log_days", `2`, settings.RuleRange},
 		{"playout.emergency_playlist_id", `0`, settings.RuleRange},
 		{"playout.emergency_playlist_id", `"3"`, settings.RuleType},
+		{"air.played_count", `0`, settings.RuleRange},
+		{"air.played_count", `51`, settings.RuleRange},
+		{"air.queued_count", `-1`, settings.RuleRange},
+		{"air.queued_count", `51`, settings.RuleRange},
+		{"air.queued_count", `2.5`, settings.RuleType},
 		{"filler.fallback", `"random"`, settings.RuleType},
 		{"filler.fallback", `null`, settings.RuleType},
 		{"filler.fallback", `{}`, settings.RuleRequired},
@@ -301,6 +314,10 @@ func TestSetAccepts(t *testing.T) {
 		{"stream.loudness_target_lufs", `-23`, -23.0},
 		{"playout.emergency_playlist_id", `7`, new(uint64(7))},
 		{"playout.emergency_playlist_id", `null`, (*uint64)(nil)},
+		{"air.played_count", `1`, 1},
+		{"air.played_count", `50`, 50},
+		{"air.queued_count", `0`, 0},
+		{"air.queued_count", `50`, 50},
 		{"filler.fallback", `{"mode":"random"}`, settings.FillerFallback{Mode: "random"}},
 		{"filler.fallback", `{"mode":"artist","source_id":4}`, settings.FillerFallback{Mode: "artist", SourceID: new(uint64(4))}},
 	}

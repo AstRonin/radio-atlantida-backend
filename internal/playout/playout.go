@@ -280,6 +280,17 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	return st, nil
 }
 
+// NowPlaying returns the track on air; nil between tracks, or before
+// Liquidsoap reported one.
+func (s *Service) NowPlaying() *NowPlaying {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nowPlaying == nil {
+		return nil
+	}
+	return new(*s.nowPlaying)
+}
+
 // Link returns the state of the Liquidsoap control link.
 func (s *Service) Link() liquidsoap.State { return s.ctl.State() }
 

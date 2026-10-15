@@ -319,6 +319,7 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Stream output (Icecast)**: host, port, mount point, codec, bitrate, sample rate, channels, loudness target, stream metadata, HLS on or off.
 - **Liquidsoap**: default music gain, the music level under live voice (`liquidsoap.duck_gain`, default 0.2; v7-15), fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
 - **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and its reminders cannot be answered.
+- **Air window** (v7-17): how many played items (`air.played_count`, default 10, allowed 1 to 50) and queued items (`air.queued_count`, default 9, allowed 0 to 50) `GET /api/air-window` returns around the item on air. A change applies to the next request.
 - **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults, the shortest gap that gets filler (`rotation.min_filler_gap_ms`, default 10 s), and the limit of the emergency tolerance relaxation (`rotation.max_relaxed_tolerance_ms`, default 120 s). The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
 - **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
@@ -427,6 +428,12 @@ Track responses carry the analysis columns, `quality_issues`, and `fixes` (the t
 |-----------------|---------|
 | `GET /api/broadcast/status` | The derived broadcast state (`connected`, `reconnecting`, `unreachable`, `unknown`), `since` (null while unknown), `reason` and `outage_id` (unreachable only), `mount_ok` and `last_check_at` (the last Icecast mount check), and the server `time`. The panel reads it when its event connection opens; each change is sent as the `broadcast.state` event (§6.5, §7.1) |
 
+**Endpoints added in v7-17 (air window, `docs/phase-17-plan.md` §2)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/air-window` | The air in air order: the last `air.played_count` play log rows that were due (aired, truncated, missed, by `COALESCE(started_at, planned_start_utc)`), the item on air (from the playout state; absent between tracks and while the control link is down), and the next `air.queued_count` plan items that start at or after the item on air (or now). One row shape for every kind (`kind`, `status`, `item_id`, `track_id`, `title`, `artist_name`, `source`, `start_utc`, `end_utc`, `truncated`, `resolution`, `outage_id`, `in_liquidsoap`), plus `generated_at` and `control_link_connected`. Read only; 200 with the control link down. The panel reloads it on existing events |
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -459,6 +466,11 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - `icecast.state`: connection state of the Icecast output (`connected`, `disconnected`): the raw report of Liquidsoap. The panel does not show it.
 - `broadcast.state`: the derived broadcast state (§7.1): `state` (`connected`, `reconnecting`, `unreachable`, `unknown`), `since`, `reason`, `outage_id`, `mount_ok`, `last_check_at`. Sent only when the state changes (v7-16).
 - `live.state`: state of the live voice input (`off`, `connecting`, `on_air`, `reconnecting`), with the reason when a session ends (v7-15).
+
+**Playout events (from Liquidsoap's track callbacks; not sent for journal replay)**
+
+- `playout.now_playing`: a track has started on air: the plan item (absent for an emergency track), the track, `started_at`, `out_ms`, `truncated`.
+- `playout.track_ended`: a track has left the air and its end is in the play log: the plan item (absent for an emergency track), the track, `source`, the final `status` (`aired` or `truncated`), `started_at`, `ended_at`, `actual_duration_ms`. Sent after the write, once per item (a repeated end sends nothing). The panel clears its now playing unless a newer track has started, and reloads the air window (v7-17).
 
 **Operation tracking**
 

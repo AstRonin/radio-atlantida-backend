@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/airwindow"
 	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
 	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/config"
@@ -30,6 +31,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	airwindowrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/airwindow"
 	broadcastrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/broadcast"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
@@ -139,6 +141,7 @@ func serve(ctx context.Context) error {
 	// the outage detector's checks and outages.
 	broadcastState := broadcast.NewTracker(database, broadcastrepo.New(database.Pool), hub, log, time.Now)
 	playoutSvc := newPlayout(database, settingsSvc, hub, broadcastState, log)
+	airWindowSvc := airwindow.NewService(airwindowrepo.New(database.Pool), playoutSvc, airWindowSettings(settingsSvc), time.Now)
 	ingestSvc := ingest.NewService(database, ingestrepo.New(database.Pool), mediaLib, prober, ff, tracker,
 		ingestSettings(settingsSvc), log, time.Now)
 	outageStore := outagerepo.New(database.Pool)
@@ -179,6 +182,7 @@ func serve(ctx context.Context) error {
 		Ingest:     ingestSvc,
 		Live:       bridge,
 		Broadcast:  broadcastState,
+		AirWindow:  airWindowSvc,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -504,6 +508,22 @@ func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
 			DefaultFixedToleranceMS: fixedTol,
 			Build:                   rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
 		}, nil
+	}
+}
+
+// airWindowSettings reads the counts of the air window on every request,
+// so a change applies to the next one (docs/phase-17-plan.md §3).
+func airWindowSettings(svc *settings.Service) airwindow.SettingsFunc {
+	return func(ctx context.Context) (airwindow.Settings, error) {
+		played, err := settings.Value(ctx, svc, settings.AirPlayedCount)
+		if err != nil {
+			return airwindow.Settings{}, err
+		}
+		queued, err := settings.Value(ctx, svc, settings.AirQueuedCount)
+		if err != nil {
+			return airwindow.Settings{}, err
+		}
+		return airwindow.Settings{PlayedCount: played, QueuedCount: queued}, nil
 	}
 }
 

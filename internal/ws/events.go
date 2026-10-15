@@ -159,6 +159,31 @@ type NowPlayingData struct {
 	Truncated  bool      `json:"truncated" doc:"The plan cuts the track at out_ms with a fade-out."`
 }
 
+// EventTrackEnded is the type of [TrackEndedEvent].
+const EventTrackEnded = "playout.track_ended"
+
+// TrackEndedEvent reports that a track has left the air and its end is in
+// the play log (docs/phase-17-plan.md §9). It is sent after the write, so
+// status is final; a repeated end of the same item sends nothing. The panel
+// clears its now playing unless a newer track has started, and reloads the
+// air window.
+type TrackEndedEvent struct {
+	Type string         `json:"type" doc:"Always playout.track_ended."`
+	Time time.Time      `json:"time"`
+	Data TrackEndedData `json:"data"`
+}
+
+// TrackEndedData is the payload of [TrackEndedEvent].
+type TrackEndedData struct {
+	ItemID           *uint64   `json:"item_id,omitempty" doc:"Plan item; absent for an emergency track."`
+	TrackID          uint64    `json:"track_id"`
+	Source           string    `json:"source" enum:"plan,emergency"`
+	Status           string    `json:"status" enum:"aired,truncated" doc:"The play log status: truncated when it played less than planned (cut by the plan, the hour switch, or a skip)."`
+	StartedAt        time.Time `json:"started_at"`
+	EndedAt          time.Time `json:"ended_at" doc:"When Liquidsoap reported the end."`
+	ActualDurationMS int       `json:"actual_duration_ms" doc:"How long it played."`
+}
+
 // EventLiquidsoapState is the type of [LiquidsoapStateEvent].
 const EventLiquidsoapState = "liquidsoap.state"
 

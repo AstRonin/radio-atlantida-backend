@@ -134,10 +134,12 @@ func (s *Service) started(ctx context.Context, itemID uint64, at time.Time, live
 func (s *Service) ended(ctx context.Context, itemID uint64, e Event, live bool) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
+	var recorded bool
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		st := s.store.WithTx(tx)
 		ok, err := st.End(ctx, itemID, e.ElapsedMS, cutMarginMS)
 		if err != nil || ok {
+			recorded = ok
 			return err
 		}
 		started := e.Time.Add(-time.Duration(e.ElapsedMS) * time.Millisecond)
@@ -146,7 +148,7 @@ func (s *Service) ended(ctx context.Context, itemID uint64, e Event, live bool) 
 			return err // already ended, or not a plan item
 		}
 		s.log.Warn("liquidsoap start callback of an item was lost; logged from its end", "item_id", itemID)
-		_, err = st.End(ctx, itemID, e.ElapsedMS, cutMarginMS)
+		recorded, err = st.End(ctx, itemID, e.ElapsedMS, cutMarginMS)
 		return err
 	})
 	if err != nil {
@@ -160,7 +162,33 @@ func (s *Service) ended(ctx context.Context, itemID uint64, e Event, live bool) 
 		s.nowPlaying = nil
 	}
 	s.mu.Unlock()
+	if !recorded {
+		return nil // a repeated end: the first one was reported
+	}
+	// The status is the play log's after the end: truncated when it was cut.
+	np, logged, err := s.store.Logged(ctx, itemID)
+	if err != nil {
+		return fmt.Errorf("read ended item %d: %w", itemID, err)
+	}
+	if logged {
+		s.trackEnded(ws.TrackEndedData{
+			ItemID: new(itemID), TrackID: np.TrackID, Source: SourcePlan, Status: endStatus(np.Truncated),
+			StartedAt: np.StartedAt.UTC(), EndedAt: e.Time.UTC(), ActualDurationMS: e.ElapsedMS,
+		})
+	}
 	return nil
+}
+
+// endStatus is the play log status of an ended track.
+func endStatus(truncated bool) string {
+	if truncated {
+		return "truncated"
+	}
+	return "aired"
+}
+
+func (s *Service) trackEnded(data ws.TrackEndedData) {
+	s.pub.Publish(ws.TrackEndedEvent{Type: ws.EventTrackEnded, Time: s.now().UTC(), Data: data})
 }
 
 func (s *Service) emergencyStarted(ctx context.Context, trackID uint64, at time.Time) error {
@@ -198,6 +226,11 @@ func (s *Service) emergencyEnded(ctx context.Context, trackID uint64, e Event, l
 		s.nowPlaying = nil
 	}
 	s.mu.Unlock()
+	// Emergency tracks are logged aired, with the time they played.
+	s.trackEnded(ws.TrackEndedData{
+		TrackID: trackID, Source: SourceEmergency, Status: endStatus(false),
+		StartedAt: started.UTC(), EndedAt: e.Time.UTC(), ActualDurationMS: e.ElapsedMS,
+	})
 	return nil
 }
 

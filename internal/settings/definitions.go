@@ -56,6 +56,7 @@ const (
 	GroupOutage     Group = "outage"
 	GroupRetention  Group = "retention"
 	GroupPlayout    Group = "playout"
+	GroupAir        Group = "air"
 	GroupImport     Group = "import"
 )
 
@@ -143,6 +144,9 @@ var (
 
 	PlayoutEmergencyPlaylistID = Key[*uint64]{"playout.emergency_playlist_id"}
 	PlayoutPrepushMinutes      = Key[int]{"playout.prepush_minutes"}
+
+	AirPlayedCount = Key[int]{"air.played_count"}
+	AirQueuedCount = Key[int]{"air.queued_count"}
 
 	ImportInboxDir            = Key[string]{"import.inbox_dir"}
 	ImportLibraryDir          = Key[string]{"import.library_dir"}
@@ -261,6 +265,13 @@ func NewRegistry() *Registry {
 	r.add(optionalIDDef(PlayoutEmergencyPlaylistID, "Playlist played when the pool and the plan are both empty. Null: none."), ApplyImmediate, true)
 	r.add(intDef(PlayoutPrepushMinutes, "How long before its start an hour's first items are pushed to Liquidsoap; from then on the hour is no longer rebuilt.",
 		"minutes", 5, 1, 15), ApplyImmediate, true)
+
+	// Air window (docs/phase-17-plan.md §3): how many rows it shows around
+	// the item on air.
+	r.add(intDef(AirPlayedCount, "Played items shown in the air window: the last items that were due (aired, truncated, missed).",
+		"", 10, 1, 50), ApplyImmediate, false)
+	r.add(intDef(AirQueuedCount, "Queued items shown in the air window: the next planned items after the one on air.", "", 9, 0, 50),
+		ApplyImmediate, false)
 
 	// Import and the broadcast standard of track files (docs/phase-11-plan.md
 	// §2). The loudness target is stream.loudness_target_lufs.
