@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline).
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
