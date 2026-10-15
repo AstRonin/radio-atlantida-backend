@@ -27,7 +27,9 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | Command | What it does |
 |---------|--------------|
 | `make stack-up` | Start `db`, `icecast`, `liquidsoap` and wait until healthy (creates `.env` from `.env.example` if missing) |
-| `make stack-down` / `make stack-logs` | Stop / follow the dev stack |
+| `make stack-down` / `make stack-logs` | Stop / follow the dev stack (monitoring included) |
+| `make monitoring-up` | Start Grafana (profile `monitoring`, live database view) at `http://127.0.0.1:3000`; starts `db` if needed |
+| `make monitoring-down` / `make monitoring-reset` | Stop Grafana only / remove its state volume so `GRAFANA_ADMIN_PASSWORD` applies again |
 | `make media` | Generate ~10 test MP3s into `.dev/media` (ffmpeg in a container) |
 | `make inbox` | Generate inbox files with known quality issues into `.dev/media/incoming` (ffmpeg in a container) |
 | `make live-check` | Go live through a running backend with a test tone over WebRTC, no browser (`dev/livecheck`) |
@@ -99,6 +101,7 @@ dev/liquidsoap/radio.liq  minimal dev playout script (keep in step with deploy's
 dev/scripts/gen-media.sh  test audio generator
 dev/scripts/gen-inbox.sh  inbox files with known quality issues (make inbox)
 dev/scripts/gen-live.sh   Ogg/Opus test tone for make live-check
+dev/grafana/          monitoring (copied to deploy's config/grafana/): role.sql (role grafana_ro), provisioning (data source radio-db, dashboard provider), dashboards/*.json; grafana_test.go runs role.sql and every dashboard query against PostgreSQL
 dev/livecheck/        dev tool: a WebRTC client that goes live through the backend (make live-check)
 .dev/                 generated media, playout journal, logs (git-ignored)
 docs/                 requirements, design, phase plans
@@ -170,11 +173,12 @@ docs/                 requirements, design, phase plans
 
 ## Dev stack notes
 
-- Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
+- Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `grafana/grafana:13.2.3` (the OSS edition; `grafana/grafana-oss` is no longer published), `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
 - All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`hour_0.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
 - Liquidsoap has two hour queues, `hour_0` and `hour_1` (`hour_<p>.push <uri>`, `hour_<p>.queue`); a time switch plays the queue of the current station hour, using `hour_shift` set by the backend. Behind it, `request.dynamic` asks `BACKEND_EMERGENCY_URL` for emergency tracks, then a safety tone.
 - Liquidsoap writes the journal to `$PLAYOUT_JOURNAL_ROOT/journal-YYYY-MM-DD.jsonl` (`.dev/journal` in dev; one JSON line per track `start`/`end` and per Icecast `output` change, UTC; files older than 10 days deleted by the script) and POSTs the same line to `BACKEND_CALLBACK_URL` (`/api/playout/callback`). It also POSTs a `heartbeat` every 5 s (not journaled); without it the outage detector opens a `liquidsoap_callback` outage.
 - Live voice: the browser's WebRTC reaches the backend on one UDP port, `LIVE_UDP_ADDR` (default `127.0.0.1:8189`; the backend container listens on `0.0.0.0:8189`, published on `127.0.0.1:8189/udp`), and the answer offers `LIVE_PUBLIC_IPS` (the container sets `127.0.0.1`). The bridge sends to the harbor at `liquidsoap.control_host:liquidsoap.harbor_port`, mount `live`. The script ducks automation to `duck_gain` (setting `liquidsoap.duck_gain`) while the harbor has a source; its buffer is 0.3 s. Browsers allow the microphone only on `localhost` or HTTPS.
 - `PLAYOUT_JOURNAL_ROOT` is a required env var (host path, read-only for the backend), like `MEDIA_ROOT` and `LOG_ROOT`.
 - The backend mounts `MEDIA_ROOT` read-write (import moves files, transcodes write them); Liquidsoap read-only. Import, analysis, and transcoding need ffmpeg: the backend image has it; on a host without it (`make run` on macOS) they are refused with `media_tools_unavailable`, so use `docker compose -f docker-compose.dev.yml --profile app up --build` to try them. ffmpeg integration tests skip without it (CI installs it).
+- Grafana (profile `monitoring`; `make stack-up` never starts it): login `admin` / `GRAFANA_ADMIN_PASSWORD` (applied only when the `grafana-data` volume is created). It reads the database as `grafana_ro` (`pg_monitor`, read-only, `statement_timeout` 5 s, connection limit 3), which the one-shot `grafana-role` service creates or updates from `dev/grafana/role.sql` with `GRAFANA_DB_PASSWORD` on every `make monitoring-up`. Dev passwords have defaults in the compose file. Provisioned dashboards cannot be saved from the UI: export the JSON into `dev/grafana/dashboards/`, keep the queries plain SQL (no Grafana macros, the test runs them), and copy the change to the deploy repository.
 - Connection settings (Icecast/Liquidsoap hosts and ports, stream format) are admin settings (`internal/settings`) with code defaults equal to the compose service names and ports (`TestDefaultsMatchDevStack`). For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.

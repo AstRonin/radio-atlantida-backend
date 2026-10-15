@@ -4,6 +4,8 @@
 #   make stack-up                      db, icecast, liquidsoap (backend runs on the host: make run)
 #   docker compose -f docker-compose.dev.yml --profile app up --build
 #                                      the same plus the backend container
+#   make monitoring-up                 Grafana (profile monitoring) with the live
+#                                      database view, http://127.0.0.1:3000
 #
 # Startup configuration of every service is set here through `environment:`
 # (values from .env). The connection values the backend uses to reach Icecast
@@ -140,5 +142,65 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Creates or updates the read-only role grafana_ro (dev/grafana/role.sql)
+  # with GRAFANA_DB_PASSWORD and exits; grafana starts only after it
+  # succeeds (docs/tech-design.md §10.3). POSTGRES_USER is a superuser in
+  # the official image.
+  grafana-role:
+    profiles: ["monitoring"]
+    image: postgres:17.11
+    command: ["psql", "-v", "ON_ERROR_STOP=1", "-q", "-f", "/role.sql"]
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:?set in .env}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      PGDATABASE: ${POSTGRES_DB:?set in .env}
+      PGOPTIONS: -c radio.grafana_password=${GRAFANA_DB_PASSWORD:-dev-grafana-db-pass}
+    volumes:
+      - ./dev/grafana/role.sql:/role.sql:ro
+    # The image health check is for a server; this job only runs psql.
+    healthcheck:
+      disable: true
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Live view of PostgreSQL for the operator (docs/phase-14-plan.md). Login
+  # required; the admin password applies only when grafana-data is created
+  # (make monitoring-reset applies a new one).
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:13.2.3
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-dev-grafana-pass}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # The station machine may be offline.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Read by the data source file (provisioning/datasources/postgres.yaml).
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-dev-grafana-db-pass}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./dev/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dev/grafana/dashboards:/etc/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      grafana-role:
+        condition: service_completed_successfully
+
 volumes:
   pgdata:
+  grafana-data:

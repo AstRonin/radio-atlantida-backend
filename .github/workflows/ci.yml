@@ -43,6 +43,9 @@ jobs:
           fi
           dups=$(git ls-files | tr '[:upper:]' '[:lower:]' | sort | uniq -d)
           if [ -n "$dups" ]; then echo "case-insensitive duplicates: $dups"; exit 1; fi
+      - name: dev compose file renders
+        # Every profile, with the development values of .env.example.
+        run: docker compose -f docker-compose.dev.yml --env-file .env.example --profile app --profile monitoring config -q
 
   test:
     runs-on: ubuntu-latest

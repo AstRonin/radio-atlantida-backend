@@ -1,6 +1,6 @@
 # Phase 14 Plan — Database Monitoring (Grafana)
 
-Status: Planned
+Status: Done (2026-10-15)
 Based on: `tech-design.md` (§9, §9.2, §10, §10.3, decision 29), deploy plan (`radio-atlantida-deploy/docs/deploy-init-plan.md`: D1, D2 item 8, D4 steps 1, 9, 10a, D5, decision 8.12)
 Last updated: 2026-10-15
 
@@ -70,12 +70,14 @@ adds the production services (deploy plan D2, D4).
 9. **Offline machine.** `GF_ANALYTICS_REPORTING_ENABLED`,
    `GF_ANALYTICS_CHECK_FOR_UPDATES`, `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES`,
    `GF_NEWS_NEWS_FEED_ENABLED` are `false`. No plugins are installed.
-10. **Image.** Grafana OSS (`grafana/grafana-oss`), an exact tag chosen at
-    implementation: the current stable release, at least two weeks old.
-    It is recorded in CLAUDE.md with the other pinned images; the deploy
-    repository uses the same tag. The health check uses a tool the image
-    contains (`wget` or `curl`, checked on that tag) against
-    `/api/health`.
+10. **Image.** Grafana OSS, an exact tag chosen at implementation: the
+    current stable release, at least two weeks old. It is recorded in
+    CLAUDE.md with the other pinned images; the deploy repository uses the
+    same tag. The health check uses a tool the image contains (`wget` or
+    `curl`, checked on that tag) against `/api/health`.
+    *Chosen:* `grafana/grafana:13.2.3` (released 2026-09-29; has `wget` and
+    `curl`). The OSS edition is published as `grafana/grafana`;
+    `grafana/grafana-oss` received no release after 13.0.2 (June 2026).
 11. **`pg_stat_statements` is out of scope.** It needs
     `shared_preload_libraries` and a restart of `db` (§10.3).
 
