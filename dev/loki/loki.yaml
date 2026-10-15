@@ -1,0 +1,64 @@
+# Loki for log search in Grafana (docs/tech-design.md §10.4,
+# docs/phase-15-plan.md decisions 3 and 5). One process (-target=all, the
+# default), filesystem storage in the volume loki-data. The production copy
+# lives in radio-atlantida-deploy (config/loki/); keep both in step.
+#
+# Only values that differ from Loki's defaults are set; each says why.
+
+# Only Grafana and Alloy reach Loki, on the compose network: no tenants.
+auth_enabled: false
+
+common:
+  # Everything Loki writes (chunks, index, compactor, WAL) under the volume.
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  # One instance: nothing to replicate to, and no memberlist to join.
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    # No default exists. TSDB index on the filesystem, the current schema.
+    - from: "2026-10-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # 10 days, like the log and journal files on the host (§10.1, §7.1).
+  # Applied by the compactor (retention_enabled below). Default: keep forever.
+  retention_period: 240h
+  # Accept lines up to 10 days old (default 1 week), so a first start or a
+  # long stop of Alloy loads every file still on disk.
+  reject_old_samples_max_age: 240h
+  # Default: derive a service_name label from component/job. The labels are
+  # exactly those Alloy sets (decision 7).
+  discover_service_name: []
+  # Default: add detected_level metadata. level is already a label.
+  discover_log_levels: false
+
+ingester:
+  # Default with -target=all: about 2.5 h (max_chunk_age + 30 min), and the
+  # querier then asks the ingester only about that window. A line older than
+  # that (yesterday's file read on a first start) would stay invisible until
+  # its chunk is flushed, 30 min to 2 h later. -1: the ingester answers for
+  # any time, reading flushed chunks itself (filesystem store only).
+  query_store_max_look_back_period: -1
+
+compactor:
+  # Default false: without it retention_period deletes nothing.
+  retention_enabled: true
+  # Required with retention; the same filesystem as the chunks.
+  delete_request_store: filesystem
+
+# The station machine may be offline (as for Grafana, §10.3).
+analytics:
+  reporting_enabled: false

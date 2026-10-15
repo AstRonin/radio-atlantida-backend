@@ -34,7 +34,7 @@ type Config struct {
 	PlayoutJournalRoot string `env:"PLAYOUT_JOURNAL_ROOT,required,notEmpty"`
 	// HTTPAddr is the listen address of the API. It must stay on localhost or
 	// a private network, because the API has no authentication (§10).
-	HTTPAddr string `env:"HTTP_ADDR" envDefault:"127.0.0.1:8080"`
+	HTTPAddr string `env:"HTTP_ADDR" envDefault:"127.0.0.1:8090"`
 	// LiveUDPAddr is the one UDP socket of the live voice bridge (WebRTC,
 	// docs/phase-12-plan.md §2 decision 4). Like HTTPAddr, it is a listen
 	// address tied to the compose port mapping and stays on localhost or a

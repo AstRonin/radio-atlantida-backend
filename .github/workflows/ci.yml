@@ -46,6 +46,18 @@ jobs:
       - name: dev compose file renders
         # Every profile, with the development values of .env.example.
         run: docker compose -f docker-compose.dev.yml --env-file .env.example --profile app --profile monitoring config -q
+      - name: Loki and Alloy configuration
+        # In the images pinned in docker-compose.dev.yml (docs/phase-15-plan.md).
+        # The files are copied to radio-atlantida-deploy.
+        run: |
+          images=$(docker compose -f docker-compose.dev.yml --env-file .env.example --profile monitoring config --format json)
+          loki=$(echo "$images" | jq -r .services.loki.image)
+          alloy=$(echo "$images" | jq -r .services.alloy.image)
+          docker run --rm -v "$PWD/dev/loki/loki.yaml:/etc/loki/loki.yaml:ro" "$loki" \
+            -config.file=/etc/loki/loki.yaml -verify-config
+          docker run --rm -v "$PWD/dev/alloy:/cfg:ro" "$alloy" validate /cfg/config.alloy
+          # alloy fmt prints the formatted file; it must equal the committed one.
+          docker run --rm -v "$PWD/dev/alloy:/cfg:ro" "$alloy" fmt /cfg/config.alloy | diff -u dev/alloy/config.alloy -
 
   test:
     runs-on: ubuntu-latest

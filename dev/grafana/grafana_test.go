@@ -2,8 +2,11 @@
 
 // Package grafana_test checks the monitoring files of the dev stack against
 // a real PostgreSQL: the role script role.sql and the queries of the
-// provisioned dashboards (docs/phase-14-plan.md §5). The files are copied
-// to radio-atlantida-deploy, so this test guards both.
+// provisioned dashboards (docs/phase-14-plan.md §5). Every panel must use a
+// provisioned data source; SQL panels run their query, Loki panels
+// (logs.json, docs/phase-15-plan.md) are only checked for it, since their
+// pipeline is tested in dev/alloy. The files are copied to
+// radio-atlantida-deploy, so this test guards both.
 package grafana_test
 
 import (
@@ -108,32 +111,36 @@ func TestDashboardQueries(t *testing.T) {
 	require.NoError(t, runScript(t, dsn, readFile(t, "role.sql"), "dashboard-pass"))
 	ro := connect(t, roleURL(t, dsn, "dashboard-pass"), nil)
 
-	var provisioning struct {
-		Datasources []struct {
-			UID  string `yaml:"uid"`
-			Type string `yaml:"type"`
-		} `yaml:"datasources"`
-	}
-	require.NoError(t, yaml.Unmarshal(readFile(t, "provisioning/datasources/postgres.yaml"), &provisioning))
-	require.Len(t, provisioning.Datasources, 1)
-	ds := provisioning.Datasources[0]
+	sources := provisionedSources(t)
+	require.Equal(t, map[string]string{"radio-db": postgresType, "radio-logs": lokiType}, sources)
 
 	files, err := filepath.Glob(filepath.Join("dashboards", "*.json"))
 	require.NoError(t, err)
-	require.NotEmpty(t, files)
+	require.ElementsMatch(t, []string{"database.json", "logs.json"}, baseNames(files))
 
 	for _, file := range files {
 		var dash dashboard
 		require.NoError(t, json.Unmarshal(readFile(t, file), &dash), file)
 		require.NotEmpty(t, dash.Panels, file)
 
+		for _, v := range dash.Templating.List {
+			if v.Datasource.UID != "" { // a text box has none
+				require.Contains(t, sources, v.Datasource.UID, "%s: variable %s", file, v.Name)
+				require.Equal(t, sources[v.Datasource.UID], v.Datasource.Type, "%s: variable %s", file, v.Name)
+			}
+		}
+
 		for _, p := range dash.allPanels() {
 			t.Run(filepath.Base(file)+"/"+p.Title, func(t *testing.T) {
 				require.NotEmpty(t, p.Targets)
-				require.Equal(t, ds.UID, p.Datasource.UID)
+				require.Contains(t, sources, p.Datasource.UID, "panel data source")
+				require.Equal(t, sources[p.Datasource.UID], p.Datasource.Type, "panel data source")
 				for _, target := range p.Targets {
-					require.Equal(t, ds.UID, target.Datasource.UID)
-					require.Equal(t, ds.Type, target.Datasource.Type)
+					require.Equal(t, p.Datasource, target.Datasource)
+					if target.Datasource.Type == lokiType {
+						require.NotEmpty(t, target.Expr)
+						continue
+					}
 					require.NotEmpty(t, target.RawSQL)
 
 					ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -149,9 +156,52 @@ func TestDashboardQueries(t *testing.T) {
 	}
 }
 
+// Data source types of the provisioning files.
+const (
+	postgresType = "grafana-postgresql-datasource"
+	lokiType     = "loki"
+)
+
+// provisionedSources maps the uid of every provisioned data source to its
+// type.
+func provisionedSources(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("provisioning", "datasources", "*.yaml"))
+	require.NoError(t, err)
+	out := map[string]string{}
+	for _, file := range files {
+		var provisioning struct {
+			Datasources []struct {
+				UID  string `yaml:"uid"`
+				Type string `yaml:"type"`
+			} `yaml:"datasources"`
+		}
+		require.NoError(t, yaml.Unmarshal(readFile(t, file), &provisioning), file)
+		for _, ds := range provisioning.Datasources {
+			require.NotContains(t, out, ds.UID, "uid used twice")
+			out[ds.UID] = ds.Type
+		}
+	}
+	return out
+}
+
+func baseNames(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = filepath.Base(p)
+	}
+	return out
+}
+
 // dashboard holds the parts of a Grafana dashboard JSON the test reads.
 type dashboard struct {
-	Panels []panel `json:"panels"`
+	Panels     []panel `json:"panels"`
+	Templating struct {
+		List []struct {
+			Name       string     `json:"name"`
+			Datasource datasource `json:"datasource"`
+		} `json:"list"`
+	} `json:"templating"`
 }
 
 type panel struct {
@@ -161,6 +211,7 @@ type panel struct {
 	Targets    []struct {
 		Datasource datasource `json:"datasource"`
 		RawSQL     string     `json:"rawSql"`
+		Expr       string     `json:"expr"` // LogQL
 	} `json:"targets"`
 	Panels []panel `json:"panels"` // inside a collapsed row
 }

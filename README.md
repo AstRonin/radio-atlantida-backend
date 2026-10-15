@@ -16,8 +16,8 @@ Design documents are in [`docs/`](docs/): requirements (`base.md`), technical de
 make stack-up        # creates .env from .env.example, starts db + icecast + liquidsoap
 make media           # generates test MP3s into .dev/media
 make migrate         # applies the database migrations (backend migrate up)
-make run             # starts the backend on 127.0.0.1:8080
-curl localhost:8080/readyz
+make run             # starts the backend on 127.0.0.1:8090
+curl localhost:8090/readyz
 ```
 
 Listen to the stream at <http://127.0.0.1:8000/radio> (a quiet 440 Hz safety tone until tracks are queued). Queue a test track by hand:
@@ -59,7 +59,7 @@ Only these come from the environment (or `.env`, which never overrides variables
 | `DATABASE_URL` | yes | PostgreSQL connection string |
 | `MEDIA_ROOT` | yes | Directory with the audio files |
 | `LOG_ROOT` | yes | Directory for daily logs `app-YYYY-MM-DD.log` (UTC; kept for the `retention.log_days` setting, default 10) |
-| `HTTP_ADDR` | no | Listen address, default `127.0.0.1:8080` |
+| `HTTP_ADDR` | no | Listen address, default `127.0.0.1:8090` |
 | `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD` | later phases | Secrets; never logged or returned by the API (`GET /api/settings/secrets` reports only whether each is set) |
 
 ### Admin settings
@@ -67,8 +67,8 @@ Only these come from the environment (or `.env`, which never overrides variables
 Every other setting (station timezone, stream output, Liquidsoap, rotation, filler, outage detection, retention, emergency playlist) is defined in code in `internal/settings` with a typed default, limits, and an apply mode (`immediate` or `reconnect`). Only values the manager saves are stored (table `settings`); an unsaved key reads as its default.
 
 ```sh
-curl localhost:8080/api/settings                       # every key: value, default, is_default, limits, apply
-curl -X PUT localhost:8080/api/settings/liquidsoap.fade_out_ms \
+curl localhost:8090/api/settings                       # every key: value, default, is_default, limits, apply
+curl -X PUT localhost:8090/api/settings/liquidsoap.fade_out_ms \
      -H 'Content-Type: application/json' -d '{"value": 2700}'
 ```
 
@@ -79,12 +79,12 @@ A refused value returns `422` with a field error on `value`. Every saved change 
 Playlist types, playlists, artists, tracks, play rules, and separation rules are edited through the API (`make openapi` writes the full contract to `api/openapi.json`):
 
 ```sh
-curl localhost:8080/api/playlist-types                       # music, jingle, news, segment + custom types
-curl -X POST localhost:8080/api/playlists -H 'Content-Type: application/json' \
+curl localhost:8090/api/playlist-types                       # music, jingle, news, segment + custom types
+curl -X POST localhost:8090/api/playlists -H 'Content-Type: application/json' \
      -d '{"name": "Pop", "type_id": 1}'
-curl -X POST localhost:8080/api/tracks -H 'Content-Type: application/json' \
+curl -X POST localhost:8090/api/tracks -H 'Content-Type: application/json' \
      -d '{"title": "Test", "file_path": "music-3m-a.mp3", "type_id": 1, "playlist_ids": [1]}'
-curl -o /dev/null -w '%{http_code}\n' -H 'Range: bytes=0-99' localhost:8080/api/tracks/1/audio   # 206
+curl -o /dev/null -w '%{http_code}\n' -H 'Range: bytes=0-99' localhost:8090/api/tracks/1/audio   # 206
 ```
 
 - A track is registered by its path relative to `MEDIA_ROOT` (forward slashes, no `..`, no absolute paths). If the file exists and `ffprobe` is on `PATH`, duration, format, bitrate, and sample rate that were left out are read from it. The runtime image has ffprobe; on a development host without it the backend logs one warning at startup and stores the metadata as entered.

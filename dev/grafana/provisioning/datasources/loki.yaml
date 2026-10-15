@@ -1,0 +1,16 @@
+# The backend's logs and the playout journal, stored in Loki and collected
+# by Alloy (docs/tech-design.md §10.4). Loki has no tenants and no password;
+# only Grafana and Alloy reach it on the compose network. The uid is
+# referenced by every panel of the Logs dashboard.
+apiVersion: 1
+
+datasources:
+  - name: Radio logs
+    uid: radio-logs
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      # Lines per logs panel query (Grafana's default is 1000).
+      maxLines: 1000

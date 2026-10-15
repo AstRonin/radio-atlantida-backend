@@ -28,8 +28,8 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 |---------|--------------|
 | `make stack-up` | Start `db`, `icecast`, `liquidsoap` and wait until healthy (creates `.env` from `.env.example` if missing) |
 | `make stack-down` / `make stack-logs` | Stop / follow the dev stack (monitoring included) |
-| `make monitoring-up` | Start Grafana (profile `monitoring`, live database view) at `http://127.0.0.1:3000`; starts `db` if needed |
-| `make monitoring-down` / `make monitoring-reset` | Stop Grafana only / remove its state volume so `GRAFANA_ADMIN_PASSWORD` applies again |
+| `make monitoring-up` | Start Grafana (profile `monitoring`: live database view, log search) at `http://127.0.0.1:3000` with Loki and Alloy; starts `db` if needed |
+| `make monitoring-down` / `make monitoring-reset` | Stop Grafana, Loki, and Alloy only / remove their volumes so `GRAFANA_ADMIN_PASSWORD` applies again and the log files are loaded again |
 | `make media` | Generate ~10 test MP3s into `.dev/media` (ffmpeg in a container) |
 | `make inbox` | Generate inbox files with known quality issues into `.dev/media/incoming` (ffmpeg in a container) |
 | `make live-check` | Go live through a running backend with a test tone over WebRTC, no browser (`dev/livecheck`) |
@@ -101,7 +101,9 @@ dev/liquidsoap/radio.liq  minimal dev playout script (keep in step with deploy's
 dev/scripts/gen-media.sh  test audio generator
 dev/scripts/gen-inbox.sh  inbox files with known quality issues (make inbox)
 dev/scripts/gen-live.sh   Ogg/Opus test tone for make live-check
-dev/grafana/          monitoring (copied to deploy's config/grafana/): role.sql (role grafana_ro), provisioning (data source radio-db, dashboard provider), dashboards/*.json; grafana_test.go runs role.sql and every dashboard query against PostgreSQL
+dev/grafana/          monitoring (copied to deploy's config/grafana/): role.sql (role grafana_ro), provisioning (data sources radio-db and radio-logs, dashboard provider), dashboards/*.json (Database, Logs); grafana_test.go runs role.sql and every SQL dashboard query against PostgreSQL, and checks every panel's data source
+dev/loki/loki.yaml    Loki for log search (copied to deploy's config/loki/): one process, filesystem storage, 10 days
+dev/alloy/            Alloy (copied to deploy's config/alloy/, without the test): config.alloy reads LOG_ROOT and PLAYOUT_JOURNAL_ROOT into Loki; pipeline_test.go runs both on the pinned images
 dev/livecheck/        dev tool: a WebRTC client that goes live through the backend (make live-check)
 .dev/                 generated media, playout journal, logs (git-ignored)
 docs/                 requirements, design, phase plans
@@ -173,7 +175,7 @@ docs/                 requirements, design, phase plans
 
 ## Dev stack notes
 
-- Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `grafana/grafana:13.2.3` (the OSS edition; `grafana/grafana-oss` is no longer published), `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
+- Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `grafana/grafana:13.2.3` (the OSS edition; `grafana/grafana-oss` is no longer published), `grafana/loki:3.7.8`, `grafana/alloy:v1.20.1`, `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
 - All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`hour_0.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
 - Liquidsoap has two hour queues, `hour_0` and `hour_1` (`hour_<p>.push <uri>`, `hour_<p>.queue`); a time switch plays the queue of the current station hour, using `hour_shift` set by the backend. Behind it, `request.dynamic` asks `BACKEND_EMERGENCY_URL` for emergency tracks, then a safety tone.
 - Liquidsoap writes the journal to `$PLAYOUT_JOURNAL_ROOT/journal-YYYY-MM-DD.jsonl` (`.dev/journal` in dev; one JSON line per track `start`/`end` and per Icecast `output` change, UTC; files older than 10 days deleted by the script) and POSTs the same line to `BACKEND_CALLBACK_URL` (`/api/playout/callback`). It also POSTs a `heartbeat` every 5 s (not journaled); without it the outage detector opens a `liquidsoap_callback` outage.
@@ -181,4 +183,5 @@ docs/                 requirements, design, phase plans
 - `PLAYOUT_JOURNAL_ROOT` is a required env var (host path, read-only for the backend), like `MEDIA_ROOT` and `LOG_ROOT`.
 - The backend mounts `MEDIA_ROOT` read-write (import moves files, transcodes write them); Liquidsoap read-only. Import, analysis, and transcoding need ffmpeg: the backend image has it; on a host without it (`make run` on macOS) they are refused with `media_tools_unavailable`, so use `docker compose -f docker-compose.dev.yml --profile app up --build` to try them. ffmpeg integration tests skip without it (CI installs it).
 - Grafana (profile `monitoring`; `make stack-up` never starts it): login `admin` / `GRAFANA_ADMIN_PASSWORD` (applied only when the `grafana-data` volume is created). It reads the database as `grafana_ro` (`pg_monitor`, read-only, `statement_timeout` 5 s, connection limit 3), which the one-shot `grafana-role` service creates or updates from `dev/grafana/role.sql` with `GRAFANA_DB_PASSWORD` on every `make monitoring-up`. Dev passwords have defaults in the compose file. Provisioned dashboards cannot be saved from the UI: export the JSON into `dev/grafana/dashboards/`, keep the queries plain SQL (no Grafana macros, the test runs them), and copy the change to the deploy repository.
+- Log search (profile `monitoring`, with Grafana): Alloy reads `LOG_ROOT/app-*.log` and `PLAYOUT_JOURNAL_ROOT/journal-*.jsonl` (read-only, by polling: file notifications do not cross WSL2) into Loki, 10 days like the files; positions in the volume `alloy-data`. Labels: `job`, `file` (the daily file; Loki refuses lines more than 1 h older than their stream's newest), backend `level` and `component`, journal `event` and `source`; every other field stays in the line (`| json`). Loki publishes no port (Grafana data source `radio-logs` at `http://loki:3100`) and has no health check (distroless image, no HTTP client); Alloy's UI is on `127.0.0.1:12345` (dev only). `config.alloy` is formatted by `alloy fmt` (tabs; CI diffs it). Container stdout is not collected.
 - Connection settings (Icecast/Liquidsoap hosts and ports, stream format) are admin settings (`internal/settings`) with code defaults equal to the compose service names and ports (`TestDefaultsMatchDevStack`). For `make run`, add `127.0.0.1 icecast liquidsoap` to `/etc/hosts`.

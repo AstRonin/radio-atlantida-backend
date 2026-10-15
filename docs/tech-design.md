@@ -752,7 +752,7 @@ Guidelines:
 - Each service has its own image; no secrets are baked into images.
 - Configuration comes from environment variables and `.env` files that are not committed, limited to the database connection, secrets, and host paths. All other settings are edited in the admin panel (see §6.3).
 - Media files are never inside a container image or a named volume (see §8.7).
-- Health checks are defined for `db`, `backend`, `liquidsoap`, `grafana`, `loki`, and `alloy`.
+- Health checks are defined for `db`, `backend`, `liquidsoap`, `grafana`, and `alloy`. `loki` has none: its image is distroless (only the `loki` binary, no shell or HTTP client) and `loki` has no health subcommand. Nothing waits for it to be healthy: Alloy retries its pushes, and Grafana's data source answers once Loki is ready.
 - The log directory (`LOG_ROOT`) is a host bind mount writable by `backend`. Logs are never kept only inside a container (see §10.1).
 - The playout journal directory (`PLAYOUT_JOURNAL_ROOT`) is on the host. `liquidsoap` writes to it read-write, and `backend` mounts the same directory read-only for reconciliation (§7.1). It survives container recreation and is included in the backup set (§10).
 - Services communicate over an internal Docker network. Only the panel port, the Icecast listener port, and the Grafana port are published to the host. The Grafana port is always bound to `127.0.0.1` (§10.3); `loki` and `alloy` are not published.
@@ -968,6 +968,7 @@ Steps, in order:
 
 - Application logs: the files `app-YYYY-MM-DD.log` in `LOG_ROOT`, not the container's stdout, so each entry is collected once and survives container recreation. Labels: `job="backend"`, `level`, `component`. `request_id`, `err`, and other fields stay in the line and are filtered in queries, not as labels, so the label set stays small.
 - Playout journal: the files `journal-YYYY-MM-DD.jsonl` in `PLAYOUT_JOURNAL_ROOT`. Labels: `job="playout-journal"`, `event` (`start`, `end`, `output`), `source`. The line time is the entry's `time` field, for both sources.
+- Both sources also carry `file`, the name of the daily file. Loki accepts a line at most about an hour older than the newest line of its stream; with one stream per file, an older file read after a newer one (a first start, a long stop of the collector) is still accepted. It has at most ten values per source.
 - Not collected: stdout of `liquidsoap`, `icecast`, `db`, and the other containers (Docker `json-file` logs, deploy plan D2). Collecting them needs access to the Docker socket and is a later step.
 - The files on the host stay the source of truth (§10.1, §7.1). Loki is a searchable copy.
 

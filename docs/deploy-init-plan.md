@@ -112,7 +112,7 @@ Tasks:
    - Network: `PANEL_BIND_ADDRESS` (default `127.0.0.1`, see 8.1), `PANEL_PORT` (default `8080`), `ICECAST_PUBLIC_PORT` (default `8000`).
    - Pinned infrastructure tags: `POSTGRES_IMAGE`, `ICECAST_IMAGE`, `LIQUIDSOAP_IMAGE`, `GRAFANA_IMAGE`, `LOKI_IMAGE`, `ALLOY_IMAGE`, so a change is an explicit commit.
    - Monitoring (8.12): `MONITORING_ENABLED` (`true` or `false`, default `true`), `GRAFANA_PORT` (default `3000`, always bound to `127.0.0.1`), `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_DB_PASSWORD`.
-   - Callback URL: `BACKEND_CALLBACK_URL` is fixed to `http://backend:8080/api/playout/callback` in the compose file, not in `.env` (it is a service-name fact, not a deployment choice).
+   - Callback URL: `BACKEND_CALLBACK_URL` is fixed to `http://backend:8090/api/playout/callback` in the compose file, not in `.env` (it is a service-name fact, not a deployment choice).
 5. `docs/`: the four context files copied from the Claude project (`base.md`, `tech-design.md`, `backend-init-plan.md`, `frontend-init-plan.md`) and this plan.
 6. `README.md`: a short placeholder that points to the runbook section to be written in D5.
 
@@ -146,7 +146,7 @@ Tasks:
    - `backend` healthy (`/healthz`) before `frontend` starts (`condition: service_healthy`).
    - `liquidsoap` depends on `icecast: condition: service_healthy`.
    - `grafana-role` depends on `db: condition: service_healthy`; `grafana` depends on `grafana-role: condition: service_completed_successfully` and `loki: condition: service_healthy`; `alloy` depends on `loki: condition: service_healthy`. No application service depends on a monitoring service.
-4. Environment values for every service are set in the compose file through `environment:` with values from `.env`, the same way the dev stack does it (backend plan §3, task 9). The Liquidsoap startup values match the dev script exactly: `ICECAST_HOST=icecast`, `ICECAST_PORT=8000`, `ICECAST_MOUNT=/radio`, `TELNET_PORT=1234`, `HARBOR_PORT=8005`, `JOURNAL_DIR=/journal`, `BACKEND_CALLBACK_URL=http://backend:8080/api/playout/callback`.
+4. Environment values for every service are set in the compose file through `environment:` with values from `.env`, the same way the dev stack does it (backend plan §3, task 9). The Liquidsoap startup values match the dev script exactly: `ICECAST_HOST=icecast`, `ICECAST_PORT=8000`, `ICECAST_MOUNT=/radio`, `TELNET_PORT=1234`, `HARBOR_PORT=8005`, `JOURNAL_DIR=/journal`, `BACKEND_CALLBACK_URL=http://backend:8090/api/playout/callback`.
 5. Health checks:
    - `db`: `pg_isready`.
    - `backend`: `/healthz` on port 8080 (from inside the container).

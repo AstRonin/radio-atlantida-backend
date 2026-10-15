@@ -35,11 +35,11 @@ harbor_user = env("LIQUIDSOAP_CONTROL_USER", "source")
 harbor_password = env("LIQUIDSOAP_CONTROL_PASSWORD", "hackme")
 journal_dir = env("JOURNAL_DIR", "/journal")
 callback_url =
-  env("BACKEND_CALLBACK_URL", "http://host.docker.internal:8080/api/playout/callback")
+  env("BACKEND_CALLBACK_URL", "http://host.docker.internal:8090/api/playout/callback")
 emergency_url =
   env(
     "BACKEND_EMERGENCY_URL",
-    "http://host.docker.internal:8080/api/playout/emergency/next"
+    "http://host.docker.internal:8090/api/playout/emergency/next"
   )
 
 settings.log.stdout := true

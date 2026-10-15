@@ -35,9 +35,9 @@ RUN apt-get update \
 COPY --from=build /out/backend /usr/local/bin/backend
 WORKDIR /app
 USER backend
-EXPOSE 8080
-# Assumes HTTP_ADDR listens on port 8080 (0.0.0.0:8080 in compose).
+EXPOSE 8090
+# Assumes HTTP_ADDR listens on port 8090 (0.0.0.0:8090 in compose).
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/healthz"]
+    CMD ["curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8090/healthz"]
 ENTRYPOINT ["backend"]
 CMD ["serve"]

@@ -1,6 +1,6 @@
 # Phase 15 Plan — Log Search (Loki)
 
-Status: Planned
+Status: Implemented (2026-10-15); the §6 checks with a running backend (stopping liquidsoap, media playing) are still to be done
 Based on: `tech-design.md` (§7.1 playout journal, §9, §10.1, §10.3, §10.4, decision 30), `docs/phase-14-plan.md` (Grafana, the `monitoring` profile), deploy plan (`radio-atlantida-deploy/docs/deploy-init-plan.md`: D1, D2, D4 step 10a, D5, decision 8.12)
 Last updated: 2026-10-15
 
@@ -48,6 +48,13 @@ Phase 14 must be done first: this phase adds two services to its
    `filename`) stays in the line and is filtered with `| json` in
    queries. A field is never made a label because it is useful to search
    by; only small closed sets are labels.
+   *Implementation (2026-10-15):* both sources also carry `file`, the
+   daily file's name (Alloy's own `filename` label, the full path, is
+   dropped). Loki refuses a line more than `max_chunk_age / 2` (1 h) older
+   than the newest line of its stream ("too far behind"), so without it
+   yesterday's file, read after today's on a first start, is lost;
+   `pipeline_test.go` shows this. Loki's `discover_service_name` and
+   `discover_log_levels` are off, so no other label or metadata is added.
 8. **Data source and dashboard.** Loki data source `uid: radio-logs`,
    provisioned next to `radio-db`. Dashboard "Logs" (§3), same provider
    (`allowUiUpdates: false`). Unlike the database dashboard, it uses
@@ -63,6 +70,13 @@ Phase 14 must be done first: this phase adds two services to its
     CLAUDE.md; the deploy repository uses the same tags. Health checks:
     Loki `/ready` (3100), Alloy `/-/ready` (12345), with a tool the image
     contains (checked on the chosen tags).
+    *Implementation (2026-10-15):* `grafana/loki:3.7.8` and
+    `grafana/alloy:v1.20.1`. The Loki image is distroless (only
+    `/usr/bin/loki`: no shell, wget, or curl; 3.4 and 3.5 have only `sh`)
+    and `loki` has no health subcommand, so `loki` has **no health check**
+    (decided with the owner); `alloy` and `grafana` depend on it
+    `service_started`. Alloy has bash but no wget/curl: its check sends
+    `GET /-/ready` over `/dev/tcp`.
 12. **Not collected:** stdout of the containers (`liquidsoap`, `icecast`,
     `db`, …). That needs the Docker socket; a later step (§10.4).
 
@@ -90,7 +104,7 @@ empty = no filter).
 | `dev/alloy/pipeline_test.go` | New: integration test (§5, task 3) |
 | `dev/grafana/provisioning/datasources/loki.yaml` | New: data source `radio-logs` |
 | `dev/grafana/dashboards/logs.json` | New: the dashboard of §3 |
-| `docker-compose.dev.yml` | Services `loki`, `alloy` (profile `monitoring`), volumes `loki-data`, `alloy-data`; `grafana` depends on `loki` healthy |
+| `docker-compose.dev.yml` | Services `loki`, `alloy` (profile `monitoring`), volumes `loki-data`, `alloy-data`; `grafana` depends on `loki` started (decision 11) |
 | `Makefile` | `monitoring-up` / `monitoring-down` include `loki` and `alloy`; `monitoring-reset` also removes `loki-data` and `alloy-data` |
 | `.github/workflows/ci.yml` | `loki -verify-config` and `alloy fmt` in the pinned images |
 | `CLAUDE.md` | Layout (`dev/loki/`, `dev/alloy/`), pinned images, dev stack note (Grafana at 3000, Alloy UI at 12345) |
@@ -99,7 +113,11 @@ empty = no filter).
 
 1. **Loki configuration** per decisions 3 and 5. Keep the defaults
    elsewhere; write a comment for every value that differs from the
-   default and why.
+   default and why. *Found in the test:* with `-target=all` the querier
+   asks the ingester only about the last ~2.5 h
+   (`ingester.query_store_max_look_back_period` defaults to
+   `max_chunk_age` + 30 min), so lines loaded with an older time stayed
+   invisible until their chunk was flushed; it is set to `-1`.
 2. **Alloy configuration** per decisions 6 and 7, one pipeline per
    source. Comments explain the polling and the label choice.
 3. **Integration test** (`//go:build integration`, testcontainers-go
@@ -131,7 +149,8 @@ empty = no filter).
    `${LOG_ROOT}:/logs:ro`, `${PLAYOUT_JOURNAL_ROOT}:/journal:ro`, volume
    `alloy-data`, port `127.0.0.1:12345:12345`, health check, depends on
    `loki` healthy. `grafana` gains `depends_on: loki` healthy. All in
-   profile `monitoring`.
+   profile `monitoring`. *Implemented without a Loki health check, so both
+   depend on `loki` started (decision 11).*
 6. **Makefile, CI, CLAUDE.md** as in §4.
 7. **Manual check on the dev stack** (§6).
 

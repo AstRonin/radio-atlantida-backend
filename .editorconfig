@@ -14,5 +14,9 @@ indent_style = tab
 [Makefile]
 indent_style = tab
 
+# `alloy fmt` indents with tabs (checked in CI).
+[*.alloy]
+indent_style = tab
+
 [*.md]
 trim_trailing_whitespace = false

@@ -72,7 +72,7 @@ func TestLoadDefaultsAndSecrets(t *testing.T) {
 	cfg, err := Load("")
 
 	require.NoError(t, err)
-	require.Equal(t, "127.0.0.1:8080", cfg.HTTPAddr)
+	require.Equal(t, "127.0.0.1:8090", cfg.HTTPAddr)
 	require.Equal(t, "127.0.0.1:8189", cfg.LiveUDPAddr)
 	require.Empty(t, cfg.LivePublicIPs)
 	require.Equal(t, "s3cret", cfg.Secrets.IcecastSourcePassword)

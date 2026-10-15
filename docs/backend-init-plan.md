@@ -180,7 +180,7 @@ Tasks:
 2. `internal/config`: config struct with `caarlos0/env/v11` tags; load `.env` with `godotenv` without overriding variables that are already set.
    - Required: `DATABASE_URL`, `MEDIA_ROOT`, `LOG_ROOT`.
    - Secrets (required later, optional in Phase 1): `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`.
-   - `HTTP_ADDR` (default `127.0.0.1:8080`) — see 10.4.
+   - `HTTP_ADDR` (default `127.0.0.1:8090`) — see 10.4.
    - Fail fast with a clear message listing every missing variable.
 3. `internal/logging`:
    - `log/slog` JSON handler. Fields: `time` (RFC 3339), `level`, `msg`, `component`, error fields; `request_id` for API logs.
@@ -200,7 +200,7 @@ Tasks:
    | `db` | `postgres:17` (pinned minor) | Database | `127.0.0.1:5432` | named volume `pgdata` |
    | `icecast` | `libretime/icecast:2.4.4-alpine` (see 10.5) | Stream server; the backend checks its mount (§7.1 of the design) | `127.0.0.1:8000` | none (configured by environment variables) |
    | `liquidsoap` | `savonet/liquidsoap` (pinned 2.x tag) | Playout: request queue, fades, fallback, harbor input, callbacks, playout journal | `127.0.0.1:1234` (telnet control), `127.0.0.1:8005` (harbor) | `${MEDIA_ROOT}` → `/media` (ro), `./.dev/journal` → `/journal` (rw), `dev/liquidsoap/radio.liq` (ro) |
-   | `backend` | built from `docker/Dockerfile` | The application in a container (profile `app`) | `127.0.0.1:8080` | `${MEDIA_ROOT}` (ro), `${LOG_ROOT}` (rw), `./.dev/journal` (ro) |
+   | `backend` | built from `docker/Dockerfile` | The application in a container (profile `app`) | `127.0.0.1:8090` | `${MEDIA_ROOT}` (ro), `${LOG_ROOT}` (rw), `./.dev/journal` (ro) |
 
    Details:
    - `db`: user, password, and database from `.env` (dev values in `.env.example`). Health check `pg_isready`.
@@ -211,7 +211,7 @@ Tasks:
      - a safety source (a sine tone or silence) through `fallback`, so the stream never stops;
      - a harbor input for live voice and an interactive `music_gain` variable;
      - `output.icecast` to the `icecast` service, mount `/radio`;
-     - on track start and end: append a UTC line to the journal in `/journal`, and send an HTTP callback to `BACKEND_CALLBACK_URL` (default `http://host.docker.internal:8080/api/playout/callback`, which reaches a backend running on the host with `make run`; `http://backend:8080/...` when the `app` profile is used). A failed callback is ignored by Liquidsoap and never stops playout. The callback endpoint itself is implemented in the Liquidsoap phase; until then the backend returns 404 and nothing breaks.
+     - on track start and end: append a UTC line to the journal in `/journal`, and send an HTTP callback to `BACKEND_CALLBACK_URL` (default `http://host.docker.internal:8090/api/playout/callback`, which reaches a backend running on the host with `make run`; `http://backend:8090/...` when the `app` profile is used). A failed callback is ignored by Liquidsoap and never stops playout. The callback endpoint itself is implemented in the Liquidsoap phase; until then the backend returns 404 and nothing breaks.
      - Health check: the telnet port answers.
    - The control and harbor ports are published to `127.0.0.1` only so that a backend running on the host can reach them in development. In production they stay on the internal network (§8.9 of the design).
    - `backend` runs only with `docker compose --profile app up`. By default developers run the stack without it and start the backend with `make run`. The `migrate` service (`backend migrate up`, `service_completed_successfully` before `backend`) is added in Phase 2.
@@ -366,7 +366,7 @@ The v7-7 and v7-8 migration notes in §9.2 of the design (copying from `categori
 
 ### 10.4 Items missing from the design — ASK
 
-1. **HTTP listen address** is not listed among environment variables. Proposal: `HTTP_ADDR` in env, default `127.0.0.1:8080` (in Docker: `0.0.0.0:8080` on the internal network).
+1. **HTTP listen address** is not listed among environment variables. Proposal: `HTTP_ADDR` in env, default `127.0.0.1:8090` (in Docker: `0.0.0.0:8090` on the internal network).
 2. **Liquidsoap control host/port and callback URL** — **DECIDED.** Connection settings (Icecast host, port, mount, stream format; Liquidsoap control host and port, harbor port) are admin settings in the database, with code defaults equal to the dev compose values (Phase 5, task 2). Credentials stay in env. The callback URL is a startup setting of Liquidsoap and is set in the compose file (`BACKEND_CALLBACK_URL`).
 3. **Clock default filler mode.** §7 and §7.2 refer to "the clock's default mode", but `clocks` has no such column. Proposal: add `clocks.default_filler_mode` (nullable; falls back to the global setting).
 4. **`play_log.source`** is "auto or live" in §4, but §8.6 logs `source = emergency`. Proposal: `auto`, `live`, `emergency`.
