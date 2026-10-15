@@ -1,0 +1,14 @@
+# Dashboards from the JSON files in /etc/grafana/dashboards (mounted from
+# dev/grafana/dashboards). They cannot be saved from the UI: export a change
+# as JSON and commit it.
+apiVersion: 1
+
+providers:
+  - name: radio
+    orgId: 1
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

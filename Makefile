@@ -9,7 +9,8 @@ VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || ech
 IMAGE         ?= radio-atlantida-backend:dev
 
 .PHONY: help run build test test-integration lint fmt vuln migrate openapi openapi-lint \
-        image db-up db-down stack-up stack-down stack-logs media inbox live-check env
+        image db-up db-down stack-up stack-down stack-logs media inbox live-check env \
+        monitoring-up monitoring-down monitoring-reset
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -65,11 +66,23 @@ stack-up: env ## Start db, icecast, liquidsoap and wait until healthy
 	@mkdir -p .dev/media .dev/journal .dev/logs
 	$(COMPOSE) up -d --wait db icecast liquidsoap
 
-stack-down: ## Stop the dev stack (data volume is kept)
-	$(COMPOSE) --profile app down
+stack-down: ## Stop the dev stack (data volumes are kept)
+	$(COMPOSE) --profile app --profile monitoring down
 
 stack-logs: ## Follow the dev stack logs
-	$(COMPOSE) --profile app logs -f
+	$(COMPOSE) --profile app --profile monitoring logs -f
+
+monitoring-up: env ## Start Grafana (database view, log search) on 127.0.0.1:3000 with Loki and Alloy; starts db if needed
+	@mkdir -p .dev/journal .dev/logs
+	$(COMPOSE) --profile monitoring up -d --wait grafana-role loki alloy grafana
+
+monitoring-down: ## Stop Grafana, Loki, and Alloy only
+	$(COMPOSE) --profile monitoring stop grafana alloy loki
+
+monitoring-reset: ## Remove Grafana's, Loki's, and Alloy's volumes (new admin password; logs reloaded from the files)
+	$(COMPOSE) --profile monitoring rm -s -f grafana alloy loki
+	$(DOCKER) volume rm -f radio-atlantida-dev_grafana-data radio-atlantida-dev_loki-data radio-atlantida-dev_alloy-data
+	@echo "run make monitoring-up to start Grafana with the password from .env and reload the log files"
 
 media: ## Generate test MP3 files into .dev/media
 	dev/scripts/gen-media.sh ./.dev/media

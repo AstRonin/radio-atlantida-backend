@@ -1,0 +1,26 @@
+# The radio database, read through the read-only role grafana_ro (created by
+# role.sql). Grafana replaces ${...} with the container's environment, so
+# the password never lives in this file. The uid is referenced by every
+# dashboard panel.
+apiVersion: 1
+
+datasources:
+  - name: Radio database
+    uid: radio-db
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: db:5432
+    user: grafana_ro
+    isDefault: true
+    editable: false
+    jsonData:
+      database: ${POSTGRES_DB}
+      sslmode: disable
+      postgresVersion: 1700
+      timescaledb: false
+      # The role has CONNECTION LIMIT 3: two for Grafana, one spare.
+      maxOpenConns: 2
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}

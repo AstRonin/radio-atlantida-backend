@@ -28,7 +28,7 @@ import (
 )
 
 func main() {
-	api := flag.String("api", "http://127.0.0.1:8080", "backend base URL")
+	api := flag.String("api", "http://127.0.0.1:8090", "backend base URL")
 	file := flag.String("file", ".dev/live-check.ogg", "Ogg/Opus file, one packet per page")
 	flag.Parse()
 

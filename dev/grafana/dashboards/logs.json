@@ -1,0 +1,474 @@
+{
+  "uid": "radio-logs",
+  "title": "Logs",
+  "description": "Backend log and playout journal from Loki (docs/tech-design.md §10.4). Kept 10 days, like the files.",
+  "tags": [
+    "radio",
+    "logs"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "level",
+        "label": "Level",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "radio-logs"
+        },
+        "query": {
+          "qryType": 1,
+          "query": "label_values({job=\"backend\"}, level)",
+          "refId": "level-values"
+        },
+        "definition": "label_values({job=\"backend\"}, level)",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "options": []
+      },
+      {
+        "name": "component",
+        "label": "Component",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "radio-logs"
+        },
+        "query": {
+          "qryType": 1,
+          "query": "label_values({job=\"backend\"}, component)",
+          "refId": "component-values"
+        },
+        "definition": "label_values({job=\"backend\"}, component)",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "options": []
+      },
+      {
+        "name": "search",
+        "label": "Search",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "options": [],
+        "description": "Text the line must contain (case-sensitive). Empty: no filter."
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Errors and warnings by component",
+      "description": "ERROR and WARN entries of the backend per component and interval.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "radio-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 19,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "radio-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum by (component) (count_over_time({job=\"backend\", level=~\"ERROR|WARN\"} [$__interval]))",
+          "queryType": "range",
+          "refId": "A",
+          "legendFormat": "{{component}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisLabel": ""
+          },
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Errors in range",
+      "description": "ERROR entries of the backend in the selected time range.",
+      "type": "stat",
+      "datasource": {
+        "type": "loki",
+        "uid": "radio-logs"
+      },
+      "gridPos": {
+        "x": 19,
+        "y": 0,
+        "w": 5,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "radio-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum(count_over_time({job=\"backend\", level=\"ERROR\"} [$__range]))",
+          "queryType": "instant",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "decimals": 0,
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 3,
+      "title": "Backend log",
+      "description": "Entries of LOG_ROOT/app-*.log, newest first, filtered by level, component, and search text. The line shows msg and err; expand an entry for every field (request_id, …).",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "radio-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 14
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "radio-logs"
+          },
+          "editorMode": "code",
+          "expr": "{job=\"backend\", level=~\"$level\", component=~\"$component\"} |= `$search` | json | drop level_extracted, component_extracted | line_format `{{.msg}}{{with .err}}: {{.}}{{end}}`",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "enableInfiniteScrolling": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Icecast output",
+      "description": "Whether Liquidsoap's Icecast output was connected, from the output lines of the playout journal. Empty when the state did not change in the range.",
+      "type": "state-timeline",
+      "datasource": {
+        "type": "loki",
+        "uid": "radio-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "radio-logs"
+          },
+          "editorMode": "code",
+          "expr": "{job=\"playout-journal\", event=\"output\"} | json | line_format \"{{.connected}}\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "labels": true,
+              "id": true,
+              "tsNs": true,
+              "labelTypes": true
+            },
+            "renameByName": {
+              "Line": "Icecast"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "true": {
+                  "text": "connected",
+                  "color": "green",
+                  "index": 0
+                },
+                "false": {
+                  "text": "disconnected",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "left",
+        "rowHeight": 0.9,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Tracks started per hour",
+      "description": "Track starts in the playout journal per hour: plan items and emergency tracks.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "radio-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 8
+      },
+      "interval": "1h",
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "radio-logs"
+          },
+          "editorMode": "code",
+          "expr": "sum by (source) (count_over_time({job=\"playout-journal\", event=\"start\"} [1h]))",
+          "queryType": "range",
+          "refId": "A",
+          "legendFormat": "{{source}}",
+          "step": "1h"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisLabel": ""
+          },
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Playout journal",
+      "description": "Lines of PLAYOUT_JOURNAL_ROOT/journal-*.jsonl (track start and end, Icecast output), newest first, filtered by the search text.",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "radio-logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "radio-logs"
+          },
+          "editorMode": "code",
+          "expr": "{job=\"playout-journal\"} |= `$search`",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "enableInfiniteScrolling": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-15)
-Last updated: 2026-10-14
+Status: Draft (v7-17)
+Last updated: 2026-10-15
 
 ## 1. Overview
 
@@ -745,16 +745,17 @@ Services in a single `docker-compose.yml` (kept in `radio-atlantida-deploy`):
 - `icecast`: test stream server with default configuration.
 - `frontend`: Angular build served by a static server (image `radio-atlantida-frontend`, built from `radio-atlantida-frontend`).
 - `proxy` (optional): reverse proxy for the panel and API.
+- `grafana` (optional, `monitoring` switch): a live view of the database (§10.3) and log search (§10.4) for the operator. With it, `grafana-role`: a one-shot job that keeps the read-only database role of Grafana in step with `.env` and exits; `loki`: log storage; `alloy`: the collector that reads the log and journal files into Loki.
 
 Guidelines:
 
 - Each service has its own image; no secrets are baked into images.
 - Configuration comes from environment variables and `.env` files that are not committed, limited to the database connection, secrets, and host paths. All other settings are edited in the admin panel (see §6.3).
 - Media files are never inside a container image or a named volume (see §8.7).
-- Health checks are defined for `db`, `backend`, and `liquidsoap`.
+- Health checks are defined for `db`, `backend`, `liquidsoap`, `grafana`, and `alloy`. `loki` has none: its image is distroless (only the `loki` binary, no shell or HTTP client) and `loki` has no health subcommand. Nothing waits for it to be healthy: Alloy retries its pushes, and Grafana's data source answers once Loki is ready.
 - The log directory (`LOG_ROOT`) is a host bind mount writable by `backend`. Logs are never kept only inside a container (see §10.1).
 - The playout journal directory (`PLAYOUT_JOURNAL_ROOT`) is on the host. `liquidsoap` writes to it read-write, and `backend` mounts the same directory read-only for reconciliation (§7.1). It survives container recreation and is included in the backup set (§10).
-- Services communicate over an internal Docker network. Only the panel port and the Icecast listener port are published to the host.
+- Services communicate over an internal Docker network. Only the panel port, the Icecast listener port, and the Grafana port are published to the host. The Grafana port is always bound to `127.0.0.1` (§10.3); `loki` and `alloy` are not published.
 
 ### 9.1 Development and runtime platforms
 
@@ -777,12 +778,12 @@ The production machine runs the stack from the **radio-atlantida-deploy** reposi
 
 **Deploy repository contents (`radio-atlantida-deploy`)**
 
-- `docker-compose.yml`: services `backend`, `migrate`, `db`, `liquidsoap`, `icecast`, `frontend`.
+- `docker-compose.yml`: services `backend`, `migrate`, `db`, `liquidsoap`, `icecast`, `frontend`, and the monitoring services `grafana-role`, `grafana`, `loki`, and `alloy` (§10.3, §10.4).
 - `.env.example`: the template for the machine's `.env`. The real `.env` is not committed.
 - `IMAGE_TAG`: the release tag in use, for example `1.4.2`.
 - `update.bat`: the entry point the manager runs on double-click or from a terminal.
 - `update.ps1`: the update logic in PowerShell, called by `update.bat`.
-- `config/`: Liquidsoap script and Icecast configuration for the test stack.
+- `config/`: Liquidsoap script, Icecast configuration, Grafana provisioning (role script, data sources, dashboards; §10.3, §10.4), and the Loki and Alloy configuration (§10.4).
 - `backups/`: database dumps, not committed.
 - `logs/`: update run logs, not committed.
 - `README.md`: a short description of the steps above.
@@ -821,7 +822,7 @@ Usage:
 
 Steps, in order:
 
-1. **Preflight**: check that Docker Desktop is running and that the Docker engine responds. If not, stop with a message. The script does not install or upgrade Docker Desktop, because that installer is manual.
+1. **Preflight**: check that Docker Desktop is running and that the Docker engine responds. If not, stop with a message. The script does not install or upgrade Docker Desktop, because that installer is manual. When monitoring is enabled in `.env` (§10.3), its passwords must be set; otherwise the script stops before any change and names the missing variable.
 2. **Live check**: query the API for the live status. If a broadcast is on air, the script asks for confirmation before continuing. If an outage is open (§7.1), the script stops and reports it.
 3. **Fetch the deploy repository**: `git pull` (or a zip download if Git is not installed). Show what changed.
 4. **Record the current tag** in `state.json` so rollback knows where to return.
@@ -829,8 +830,8 @@ Steps, in order:
 6. **Pull the images**: `docker compose pull`.
 7. **Backup the database (mandatory)**: `docker compose exec db pg_dump -Fc` into `backups/db-YYYY-MM-DDTHHMMSSZ.dump`. The file name uses the UTC time (§10.2). A dump is made on every update, including updates without migrations, and the script has no flag to skip it. If the dump fails, the update stops. The dump path is saved in `state.json` for this run, so a restore uses exactly this dump. The script keeps the last 14 dumps and deletes older ones.
 8. **Migrate**: `docker compose run --rm migrate`. If it fails, the script stops, does not start the new `backend`, and reports the error.
-9. **Restart services**: `docker compose up -d`. Compose recreates only containers whose image or configuration changed, so `liquidsoap` and `icecast` keep running if their images did not change.
-10. **Health check**: wait for the healthchecks of `db`, `backend`, and `liquidsoap` to pass, with a timeout.
+9. **Restart services**: `docker compose up -d`. Compose recreates only containers whose image or configuration changed, so `liquidsoap` and `icecast` keep running if their images did not change. When monitoring is enabled, the monitoring services are started after that in a separate call (§10.3).
+10. **Health check**: wait for the healthchecks of `db`, `backend`, and `liquidsoap` to pass, with a timeout. Grafana is not part of this check: a failure of the monitoring services is reported as a warning and never triggers step 11, because monitoring does not affect the air.
 11. **On failure**: set `IMAGE_TAG` back to the recorded previous tag, run `docker compose up -d`, and report the error. Migrations are not rolled back, and the script never runs down migrations. Because of the expand and contract rule, the previous code still works with the new schema. If the migration itself failed, the database is restored with `update.bat restore`, using the dump recorded for this run (see "Forward-only migrations" above).
 12. **Log the run**: write the steps, the tags, and the result to `logs/update-YYYY-MM-DDTHHMMSSZ.log` (UTC).
 
@@ -846,6 +847,7 @@ Steps, in order:
 - Time and timezones: all stored times are UTC; the panel displays them in the selected timezone. See §10.2.
 - Fallback content available if the engine or database is unavailable.
 - Logging: structured logs in the backend; Liquidsoap logs to a file or stdout.
+- Monitoring: an optional Grafana shows the live state of the database (§10.3) and searches the application logs and the playout journal (§10.4).
 - Backups: daily PostgreSQL dumps, a copy of the media directory kept outside the machine that runs the stack (the media directory itself is not duplicated inside Docker), and a copy of the playout journal directory with the database dumps.
 
 ### 10.1 Logging and diagnostics
@@ -914,6 +916,72 @@ Steps, in order:
 - If the station timezone changes, grid rules keep their local meaning, and plans already generated keep their UTC times.
 - If the station timezone ever observes daylight saving time, the planner must handle days with 23 or 25 hours explicitly, so a clock does not start an hour off. Armenia currently does not use DST, so this is a future-proofing requirement only.
 
+### 10.3 Database monitoring (Grafana)
+
+**Purpose and scope**
+
+- Grafana gives the operator a live view of PostgreSQL: connections, running queries, locks, database and table sizes. It answers "what is the database doing now", not "what did it do last night".
+- There is no metrics history: no Prometheus, no exporter, no `/metrics` endpoint in the backend. The backend code does not change for monitoring.
+- A history of database metrics can be added later with `postgres_exporter` and Prometheus, without backend changes. Log search in the same Grafana is §10.4.
+
+**Service**
+
+- `grafana`: the official open source image, pinned to an exact tag like every infrastructure image. One named volume for Grafana's own state; it holds nothing that cannot be rebuilt from the provisioning files.
+- Published only on `127.0.0.1` (port from `.env`, default 3000), like the panel (deploy plan §8.1). The address is not configurable, so Grafana cannot be exposed to the LAN by mistake.
+- Monitoring is optional and enabled in `.env` (`MONITORING_ENABLED`), so it can be switched off to save memory on the production machine. In the dev stack it is the compose profile `monitoring`.
+- The machine may be offline: update checks, usage reporting, and the news feed are switched off.
+- No other service depends on `grafana`. Its failure never affects playout, the backend, or an update (§9.2, step 10).
+
+**Access**
+
+- Grafana requires a login, unlike the panel (§10): it is a separate tool with its own users and its own configuration. Anonymous access and sign-up are off.
+- One admin user. Its password is `GRAFANA_ADMIN_PASSWORD` in `.env`. Grafana applies it only when its state volume is created; a later change is made with `grafana cli admin reset-admin-password` (runbook).
+
+**Database access**
+
+- Grafana connects as its own role, `grafana_ro`, never as the application user. The role has `LOGIN`, membership in `pg_monitor` (read access to the statistics views and to other sessions' queries in `pg_stat_activity`), no access to application tables, `statement_timeout` 5 s, and a connection limit of 3.
+- The role is created and updated by the one-shot service `grafana-role` (the PostgreSQL image running `psql` with an idempotent SQL script) every time the monitoring services start. The password comes from `GRAFANA_DB_PASSWORD` in `.env`, so changing it in `.env` and restarting is enough.
+- The role is not created by a migration: migrations seed only system rows and must not carry a password, and the role exists only where monitoring is enabled. The job connects as `POSTGRES_USER`, which the official image creates as a superuser, so it may create the role and grant `pg_monitor`.
+- `pg_stat_statements` (statistics per query) is not enabled: it needs `shared_preload_libraries` and a restart of `db`. It is a later step if the live view is not enough.
+
+**Configuration as files**
+
+- The data source (PostgreSQL, fixed uid) and the dashboard are provisioned from files mounted read-only. The password reaches the data source through an environment variable, never through a file in git.
+- A provisioned dashboard cannot be saved from the UI. A change is exported as JSON and committed. The production files live in `radio-atlantida-deploy` (`config/grafana/`), the dev copies in `radio-atlantida-backend` (`dev/grafana/`); they are kept in step, like the Liquidsoap script (§8.3).
+- Dashboard queries read only the PostgreSQL statistics views and catalog functions. Sessions are grouped by `application_name` (the backend sets `radio-atlantida-backend`, migrations `radio-atlantida-backend-migrate`).
+
+### 10.4 Log search (Loki)
+
+**Purpose and scope**
+
+- The same Grafana (§10.3) searches and filters the application logs (§10.1) and the playout journal (§7.1), and shows how many errors each component logged over time. It complements the Logs section of the panel; it does not replace it.
+- No alerts in this version. Grafana alert rules on log queries can be added later without backend changes.
+- The backend code does not change: the log format of §10.1 (JSON Lines, UTC `time`, `level`, `component`) is read as it is.
+
+**Services**
+
+- `loki`: log storage, single process, filesystem storage in a named volume. Not published; Grafana reaches it on the internal network. No multi-tenancy (`auth_enabled: false`), since only Grafana and Alloy can reach it.
+- `alloy` (Grafana Alloy): the collector. It reads `LOG_ROOT` and `PLAYOUT_JOURNAL_ROOT` read-only and sends every new line to Loki. Its read positions live in a named volume, so a restart neither loses nor repeats lines. Not published.
+- Both are pinned images, part of the monitoring switch of §10.3 (one switch for all monitoring services), and nothing else depends on them.
+
+**What is collected**
+
+- Application logs: the files `app-YYYY-MM-DD.log` in `LOG_ROOT`, not the container's stdout, so each entry is collected once and survives container recreation. Labels: `job="backend"`, `level`, `component`. `request_id`, `err`, and other fields stay in the line and are filtered in queries, not as labels, so the label set stays small.
+- Playout journal: the files `journal-YYYY-MM-DD.jsonl` in `PLAYOUT_JOURNAL_ROOT`. Labels: `job="playout-journal"`, `event` (`start`, `end`, `output`), `source`. The line time is the entry's `time` field, for both sources.
+- Both sources also carry `file`, the name of the daily file. Loki accepts a line at most about an hour older than the newest line of its stream; with one stream per file, an older file read after a newer one (a first start, a long stop of the collector) is still accepted. It has at most ten values per source.
+- Not collected: stdout of `liquidsoap`, `icecast`, `db`, and the other containers (Docker `json-file` logs, deploy plan D2). Collecting them needs access to the Docker socket and is a later step.
+- The files on the host stay the source of truth (§10.1, §7.1). Loki is a searchable copy.
+
+**Retention and files**
+
+- Loki keeps 10 days, like the log files (`retention.log_days` default) and the journal. Lines up to 10 days old are accepted, so a first start or a long stop of the collector loads the files still on disk.
+- The files are on the Windows file system through the WSL2 layer, where file change notifications are not reliable. Alloy polls the files and the folders, so new lines, the daily file switch, and the deletion of old files are seen without notifications.
+- Loki's and Alloy's volumes are not backed up: both can be rebuilt from the files on the host while they exist.
+
+**Configuration as files**
+
+- The Loki data source (fixed uid) and a "Logs" dashboard are provisioned like the database ones (§10.3). The Loki and Alloy configuration files are mounted read-only. The production files live in `radio-atlantida-deploy`, the dev copies in `radio-atlantida-backend` (`dev/grafana/`, `dev/loki/`, `dev/alloy/`), kept in step.
+
 ## 11. Resolved Decisions
 
 The open questions from the previous version are closed. The decisions are recorded here so the reasoning stays visible.
@@ -947,6 +1015,8 @@ The open questions from the previous version are closed. The decisions are recor
 26. **Repository layer.** All SQL lives in `internal/repository/<domain>`, one package per domain, named as the domain package. Domain code depends on interfaces it declares itself, and the repositories implement them. Reason: business rules stay free of SQL and driver errors, and a domain rename changes the domain and its repository in the same change (§5.1).
 27. **Import and transcoding.** New files arrive through an inbox folder under the media root and are moved into the library folder on import; there is no upload through the panel. Analysis flags problems against the broadcast standard set in the admin settings, and nothing changes audio without the manager: the panel offers "Fix loudness" and "Optimize track", and the manager chooses whether the fixed file replaces the original or is kept as an optimal copy next to it (§8.7, decided 2026-10-14).
 28. **Live voice without transcoding.** The bridge relays the browser's Opus packets to the harbor as Ogg/Opus, without decoding, using `pion/webrtc` (pure Go, no cgo). Its UDP port and public addresses are environment variables like `HTTP_ADDR`, because they belong to the compose port mapping (§8.4, decided 2026-10-14).
+29. **Database monitoring is a live view.** An optional Grafana reads PostgreSQL's statistics views directly through a read-only role, with a login, bound to localhost. No metrics history, no Prometheus, and no backend changes; a metrics history can be added later without backend changes (§10.3, decided 2026-10-15).
+30. **Log search in Grafana.** Loki stores the application logs and the playout journal, collected by Grafana Alloy from the files on the host (not from container stdout), with 10 days of retention like the files. No alerts in this version; the backend does not change (§10.4, decided 2026-10-15).
 
 ## 12. Non-functional Requirements
 
