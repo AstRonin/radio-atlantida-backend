@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
 	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/config"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
@@ -29,6 +30,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	broadcastrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/broadcast"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	ingestrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/ingest"
@@ -133,14 +135,17 @@ func serve(ctx context.Context) error {
 		gridSvc, clockSettings(settingsSvc), time.Now)
 	rotationSvc := rotation.NewService(database, rotationrepo.New(database.Pool), clocksSvc, gridSvc,
 		rotationSettings(settingsSvc), tracker, hub, log, time.Now)
-	playoutSvc := newPlayout(database, settingsSvc, hub, log)
+	// The broadcast state follows Liquidsoap's output reports (playout) and
+	// the outage detector's checks and outages.
+	broadcastState := broadcast.NewTracker(database, broadcastrepo.New(database.Pool), hub, log, time.Now)
+	playoutSvc := newPlayout(database, settingsSvc, hub, broadcastState, log)
 	ingestSvc := ingest.NewService(database, ingestrepo.New(database.Pool), mediaLib, prober, ff, tracker,
 		ingestSettings(settingsSvc), log, time.Now)
 	outageStore := outagerepo.New(database.Pool)
 	outageSvc := outage.NewService(outageStore, time.Now)
 	detector := outage.NewDetector(database, outageStore, playoutSvc,
 		outage.NewIcecastChecker(&http.Client{}), outage.NewJournal(cfg.PlayoutJournalRoot, playoutSvc, log),
-		tracker, hub, outageSettings(settingsSvc), log, time.Now)
+		tracker, hub, broadcastState, outageSettings(settingsSvc), log, time.Now)
 
 	bridge := live.NewBridge(live.Config{UDPAddr: cfg.LiveUDPAddr, PublicIPs: cfg.LivePublicIPs}, live.DefaultTimeouts,
 		harborTarget(settingsSvc, cfg.Secrets), hub, log, time.Now)
@@ -173,6 +178,7 @@ func serve(ctx context.Context) error {
 		Outages:    outageSvc,
 		Ingest:     ingestSvc,
 		Live:       bridge,
+		Broadcast:  broadcastState,
 		Now:        time.Now,
 	}), apiLog)
 	// Shutdown does not wait for hijacked connections: close the panels'
@@ -236,7 +242,9 @@ func serve(ctx context.Context) error {
 // newPlayout wires the Liquidsoap control client and playout. The control
 // address is read on every connect; a change of it drops the connection, so
 // the next command connects to the new address (apply mode reconnect).
-func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, log *slog.Logger) *playout.Service {
+func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, outputs playout.OutputObserver,
+	log *slog.Logger,
+) *playout.Service {
 	lsLog := logging.For(log, logging.ComponentLiquidsoap)
 	ctl := liquidsoap.New(controlAddr(svc), time.Now, func(st liquidsoap.State) {
 		if st.Connected {
@@ -253,7 +261,7 @@ func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, log *slog.L
 
 	// Emergency picks need no reproducibility; the seed only varies them.
 	rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)) //nolint:gosec // G404: not for security; G115: positive
-	p := playout.NewService(database, playoutrepo.New(database.Pool), ctl, playoutSettings(svc), hub, log, time.Now, rnd)
+	p := playout.NewService(database, playoutrepo.New(database.Pool), ctl, playoutSettings(svc), hub, outputs, log, time.Now, rnd)
 	settings.OnChange(svc, settings.LiquidsoapMusicGain, p.MusicGainSettingChanged)
 	// The pass reads the duck gain from the settings; wake it to apply a
 	// change at once.

@@ -185,7 +185,8 @@ const (
 )
 
 // IcecastStateEvent reports the connection state of the Icecast output, as
-// Liquidsoap reports it (§6.5, §8.3).
+// Liquidsoap reports it (§6.5, §8.3): the raw report. The panel shows
+// [BroadcastStateEvent].
 type IcecastStateEvent struct {
 	Type string           `json:"type" doc:"Always icecast.state."`
 	Time time.Time        `json:"time"`
@@ -195,6 +196,30 @@ type IcecastStateEvent struct {
 // IcecastStateData is the payload of [IcecastStateEvent].
 type IcecastStateData struct {
 	State string `json:"state" enum:"connected,disconnected"`
+}
+
+// EventBroadcastState is the type of [BroadcastStateEvent].
+const EventBroadcastState = "broadcast.state"
+
+// BroadcastStateEvent reports a change of the derived broadcast state:
+// whether the stream reaches Icecast, and since when (§6.5, §7.1). It is
+// sent only when the state changes; a panel reads GET /api/broadcast/status
+// when its event connection opens.
+type BroadcastStateEvent struct {
+	Type string             `json:"type" doc:"Always broadcast.state."`
+	Time time.Time          `json:"time"`
+	Data BroadcastStateData `json:"data"`
+}
+
+// BroadcastStateData is the payload of [BroadcastStateEvent] and the body of
+// the broadcast status.
+type BroadcastStateData struct {
+	State       string     `json:"state" enum:"connected,reconnecting,unreachable,unknown" doc:"connected: Liquidsoap streams to Icecast and no outage is open; reconnecting: Liquidsoap lost its Icecast output and no outage is open yet; unreachable: a broadcast outage is open; unknown: no evidence yet after a start of the backend, or no heartbeat from Liquidsoap."`
+	Since       *time.Time `json:"since" nullable:"true" doc:"When the state last changed (UTC); kept across restarts of the backend. Null while unknown."`
+	Reason      *string    `json:"reason,omitempty" doc:"The open outage's reason or component (unreachable only)."`
+	OutageID    *uint64    `json:"outage_id,omitempty" doc:"The open outage (unreachable only)."`
+	MountOK     *bool      `json:"mount_ok" nullable:"true" doc:"Result of the last Icecast mount check; null before the first."`
+	LastCheckAt *time.Time `json:"last_check_at" nullable:"true" doc:"When the mount was last checked; null before the first check."`
 }
 
 // EventOutageStarted is the type of [OutageStartedEvent].

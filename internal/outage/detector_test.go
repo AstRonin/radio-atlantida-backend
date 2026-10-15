@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
@@ -172,6 +173,47 @@ func (p *publisher) Publish(e any) {
 	p.events = append(p.events, e)
 }
 
+// fakeBroadcast records what the detector tells the broadcast state; err
+// fails its transactions.
+type fakeBroadcast struct {
+	checks []bool
+	silent []bool
+	opened []broadcast.Outage
+	closed []time.Time
+	err    error
+}
+
+func (b *fakeBroadcast) OnMountCheck(_ context.Context, ok bool, _ time.Time) {
+	b.checks = append(b.checks, ok)
+}
+
+func (b *fakeBroadcast) OnHeartbeat(_ context.Context, silent bool, _ time.Time) {
+	b.silent = append(b.silent, silent)
+}
+
+func (b *fakeBroadcast) OutageOpened(ctx context.Context, open func(context.Context, db.Tx) (broadcast.Outage, error)) error {
+	if b.err != nil {
+		return b.err
+	}
+	o, err := open(ctx, db.Tx{})
+	if err != nil {
+		return err
+	}
+	b.opened = append(b.opened, o)
+	return nil
+}
+
+func (b *fakeBroadcast) OutageClosed(ctx context.Context, at time.Time, closeFn func(context.Context, db.Tx) error) error {
+	if b.err != nil {
+		return b.err
+	}
+	if err := closeFn(ctx, db.Tx{}); err != nil {
+		return err
+	}
+	b.closed = append(b.closed, at)
+	return nil
+}
+
 type harness struct {
 	d       *Detector
 	store   *fakeStore
@@ -180,6 +222,7 @@ type harness struct {
 	journal *fakeJournal
 	ops     *fakeOps
 	pub     *publisher
+	bc      *fakeBroadcast
 	now     time.Time
 }
 
@@ -187,7 +230,7 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
 		store: &fakeStore{}, icecast: &fakeIcecast{}, journal: &fakeJournal{}, ops: &fakeOps{}, pub: &publisher{},
-		now: t0,
+		bc: &fakeBroadcast{}, now: t0,
 	}
 	h.playout = &fakePlayout{lastCB: new(t0), link: liquidsoap.State{Connected: true, LastOK: t0}}
 	set := func(context.Context) (Settings, error) {
@@ -196,7 +239,7 @@ func newHarness(t *testing.T) *harness {
 			Prepush: 5 * time.Minute, Icecast: IcecastTarget{Host: "icecast", Port: 8000, Mount: "/radio"},
 		}, nil
 	}
-	h.d = NewDetector(txRunner{}, h.store, h.playout, h.icecast, h.journal, h.ops, h.pub, set, slog.New(slog.DiscardHandler),
+	h.d = NewDetector(txRunner{}, h.store, h.playout, h.icecast, h.journal, h.ops, h.pub, h.bc, set, slog.New(slog.DiscardHandler),
 		func() time.Time { return h.now })
 	h.d.st.startedAt = t0
 	return h
@@ -243,6 +286,11 @@ func TestIcecastOutageOpensAfterFailedChecksAndCloses(t *testing.T) {
 	require.Equal(t, []operations.Kind{operations.KindMissedItems}, h.ops.kinds)
 	ended := h.pub.events[1].(ws.OutageEndedEvent)
 	require.Equal(t, 3, *ended.Data.MissedCount)
+	// The broadcast state saw every check, the outage, and its end.
+	require.Equal(t, []bool{false, false, true}, h.bc.checks)
+	require.Equal(t, []broadcast.Outage{{ID: 1, StartedAt: t0, Reason: "mount not found"}}, h.bc.opened)
+	require.Equal(t, []time.Time{h.now}, h.bc.closed)
+	require.Equal(t, []bool{false, false, false}, h.bc.silent)
 	// The journal of the window was replayed before marking.
 	require.Equal(t, t0.Add(-replayMargin), h.journal.windows[0][0])
 }
@@ -258,6 +306,7 @@ func TestCallbacksStalledOpensLiquidsoapOutage(t *testing.T) {
 	require.Empty(t, h.store.outages, "not past the timeout yet")
 	h.step(t, time.Second)
 	require.Len(t, h.store.outages, 1)
+	require.Equal(t, []bool{false, true}, h.bc.silent, "silent past the timeout")
 	require.Equal(t, DetectedByLiquidsoapCallback, h.store.outages[0].DetectedBy)
 	require.Equal(t, ComponentLiquidsoap, h.store.outages[0].Component)
 	require.Equal(t, last, h.store.outages[0].StartedAt)
@@ -392,4 +441,43 @@ func TestStartupRecordsBackendDowntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOutageIsNotOpenWhenTheBroadcastStateIsNotStored(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.icecast.err = errors.New("mount not found")
+	h.bc.err = errors.New("database down")
+
+	h.step(t, 0)
+	h.alive()
+	h.now = h.now.Add(5 * time.Second)
+	require.ErrorIs(t, h.d.evaluate(t.Context()), h.bc.err)
+	require.Nil(t, h.d.st.open, "retried at the next evaluation")
+	require.Empty(t, h.pub.events)
+
+	h.bc.err = nil
+	h.alive()
+	h.step(t, time.Second)
+	require.NotNil(t, h.d.st.open)
+	require.Len(t, h.bc.opened, 1)
+}
+
+func TestOutageAdoptedAtStartupIsToldToTheBroadcastState(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	reason := "mount gone"
+	h.store.outages = []Outage{{ID: 1, StartedAt: t0.Add(-time.Hour), Component: ComponentIcecast, Reason: &reason}}
+	h.icecast.err = errors.New("down")
+	h.d.startup(t.Context())
+	require.Empty(t, h.bc.opened, "told by the evaluation, not the reconcile operation")
+
+	h.bc.err = errors.New("database down")
+	require.ErrorIs(t, h.d.evaluate(t.Context()), h.bc.err)
+	h.bc.err = nil
+	h.alive()
+	h.step(t, time.Second)
+	h.alive()
+	h.step(t, time.Second)
+	require.Equal(t, []broadcast.Outage{{ID: 1, StartedAt: t0.Add(-time.Hour), Reason: reason}}, h.bc.opened, "told once")
 }

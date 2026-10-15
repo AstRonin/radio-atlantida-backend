@@ -56,7 +56,7 @@ func (s *Service) Callback(ctx context.Context, e Event) error {
 	case e.Kind == EventHeartbeat:
 		return nil
 	case e.Kind == EventOutput:
-		s.setOutput(e)
+		s.setOutput(ctx, e)
 		return nil
 	case e.Source == SourcePlan && e.ItemID != nil && e.Kind == EventStart:
 		defer s.Wake() // a queue slot was freed
@@ -216,8 +216,10 @@ func nowPlayingData(np NowPlaying) ws.NowPlayingData {
 }
 
 // setOutput records the Icecast output state and sends icecast.state when
-// it changes.
-func (s *Service) setOutput(e Event) {
+// it changes. Every report goes on to the broadcast state, which may have
+// forgotten an unchanged one (a silent heartbeat).
+func (s *Service) setOutput(ctx context.Context, e Event) {
+	defer s.outputs.OnOutput(ctx, e.Connected, e.Time)
 	s.mu.Lock()
 	changed := s.output == nil || s.output.Connected != e.Connected
 	if changed {

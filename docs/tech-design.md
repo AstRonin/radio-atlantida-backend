@@ -160,6 +160,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
   - `clock_element_id` (nullable, FK to `clock_elements`, `ON DELETE SET NULL`): the element the item was planned for; null for filler. `filler_pool_id` (nullable, FK to `clock_filler_pool`, `ON DELETE SET NULL`): the pool row a `filler_pool` item took; a rebuild of the hour sets that row's `used_at` back to null (v7-11).
 - **plan_hours**: hour_start_utc (primary key), clock_id (FK, `ON DELETE CASCADE`), clock_updated_at, grid_slot_id (nullable, `ON DELETE SET NULL`), seed, built_at, filler_request_id (nullable, `ON DELETE SET NULL`). One row per built hour of the track plan (v7-11, `docs/phase-8-plan.md` §2). An hour is stale when the grid now assigns another clock or none, or the clock's `updated_at` changed; the seed makes a rebuild after a reminder answer reproducible.
 - **hour_inserts**: id, hour_start_utc, track_id (FK, `ON DELETE RESTRICT`), missed_id (nullable, FK to `play_log`, `ON DELETE SET NULL`), placement (`start`, `end`, `fixed`), fixed_minute, fixed_tolerance_ms, created_at. One-time elements of a single hour: a missed item rescheduled into it (§7.1, §7.2). Every build of the hour places them; the clock template is not changed (v7-13, `docs/phase-10-plan.md` §2).
+- **broadcast_state**: one row (`id = 1`): state (`connected`, `reconnecting`, `unreachable`), since (the last change of the derived broadcast state), reason (nullable: the open outage's reason or component), updated_at. Written only when the state changes, so the panel's timer survives a restart of the backend (§7.1, v7-16, `docs/phase-16-plan.md`). An empty table means the state is unknown; `unknown` is never stored.
 - **backend_heartbeat**: one row, alive_at. Written by the outage detector every 30 seconds, so a restart can tell how long the backend was down (v7-13).
 - **broadcast_outages**: id, started_at (timestamptz, UTC), ended_at (timestamptz, UTC, nullable while the outage is open), detected_by (`icecast`, `liquidsoap_callback`, `liquidsoap_control`, `backend`), component (`icecast`, `liquidsoap`, `backend`, `network`), reason (short text, nullable), reconciled_at (timestamptz, nullable). One row per interruption. An open outage has `ended_at` null.
 - **play_rules**: id, name, window_from (time, nullable), window_to (time, nullable), weekdays (array of 1 to 7, nullable; null means every day), min_interval_minutes (int, nullable), max_per_hour (int, nullable), notes, created_at. A reusable, named rule (see §7.3). Times are station local time (§10.2).
@@ -228,7 +229,7 @@ All database access goes through a repository layer. Business logic never contai
 ## 6. API and Data Transfer
 
 - REST over JSON for commands and data queries.
-- WebSocket for UI events from the backend to the panel: now playing, track progress, live on/off, Liquidsoap state, Icecast connection state, outage start and end, missed-item updates, error alerts, filler requests, and the outcome of asynchronous operations (§6.5). The panel does not poll for these.
+- WebSocket for UI events from the backend to the panel: now playing, track progress, live on/off, Liquidsoap state, Icecast connection state, broadcast state, outage start and end, missed-item updates, error alerts, filler requests, and the outcome of asynchronous operations (§6.5). The panel does not poll for these.
 - Error alerts are shown in the panel as a popup window with the error text. Errors are also written to the log file (see §10.1).
 - All timestamps in the API are ISO 8601 in UTC (ending with `Z`).
 - Database structs are never sent to or accepted from the frontend directly.
@@ -420,6 +421,12 @@ Track responses carry the analysis columns, `quality_issues`, and `fixes` (the t
 
 `GET /api/status/live` now answers `on_air` (a live session sends audio), `open_outage_id`, and `current_clock` (the clock the grid assigns to the current hour). The live state is sent as the `live.state` event.
 
+**Endpoints added in v7-16 (broadcast status, `docs/phase-16-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/broadcast/status` | The derived broadcast state (`connected`, `reconnecting`, `unreachable`, `unknown`), `since` (null while unknown), `reason` and `outage_id` (unreachable only), `mount_ok` and `last_check_at` (the last Icecast mount check), and the server `time`. The panel reads it when its event connection opens; each change is sent as the `broadcast.state` event (§6.5, §7.1) |
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -449,7 +456,8 @@ Some backend operations take time and run asynchronously. Examples: building a t
 
 - `broadcast_outage.started`: outage opened, with `started_at`, `component`, and `reason`.
 - `broadcast_outage.ended`: outage closed, with `started_at`, `ended_at`, and the number of items marked missed.
-- `icecast.state`: connection state of the Icecast output (connected, disconnected, reconnecting).
+- `icecast.state`: connection state of the Icecast output (`connected`, `disconnected`): the raw report of Liquidsoap. The panel does not show it.
+- `broadcast.state`: the derived broadcast state (§7.1): `state` (`connected`, `reconnecting`, `unreachable`, `unknown`), `since`, `reason`, `outage_id`, `mount_ok`, `last_check_at`. Sent only when the state changes (v7-16).
 - `live.state`: state of the live voice input (`off`, `connecting`, `on_air`, `reconnecting`), with the reason when a session ends (v7-15).
 
 **Operation tracking**
@@ -552,6 +560,17 @@ An outage is a period when the station's audio did not reach listeners, for exam
 - Missed items are moved to `play_log` with `status = missed`, `resolution = 'open'`, and `outage_id` set, so the played-tracks list shows them next to aired items.
 
 **Implementation decisions (v7-13, `docs/phase-10-plan.md` §2).** The journal decides what aired: an item Liquidsoap started counts as aired even if Icecast was down at that moment. Items that did not air while no outage was open (a leftover flushed at the hour switch, an item more than 30 seconds late) are dropped from the plan like tracks removed by overflow: not missed, no separation count. Before marking or dropping, the journal of the window is replayed through the same idempotent logic as the callbacks, so no cursor is kept. At startup, if the backend was down longer than the heartbeat timeout and planned items did not air, the downtime is recorded as a closed outage (`component = backend`) and its items are marked missed.
+
+**Broadcast state (v7-16, `docs/phase-16-plan.md` §2)**
+
+The panel shows on every page whether the stream reaches Icecast, and for how long. The backend derives one state from the signals above, in this order:
+
+- `unreachable` while any outage is open (every component: listeners hear nothing).
+- `unknown` while Liquidsoap's heartbeat is silent beyond the timeout, and after the backend starts until the first evidence (an output report or a mount check). Liquidsoap's last output report is forgotten while the heartbeat is silent.
+- `connected` or `reconnecting` from Liquidsoap's last output report (connected or not). `reconnecting` is the time before the detector opens an outage; Liquidsoap retries on its own.
+- Without an output report since the start (Liquidsoap reports the output only when it changes), the last mount check decides in the same way.
+
+The timer measures continuous broadcasting: `since` is the moment of the last state change, and any drop resets it. For `unreachable` it is the outage's start (the first failed check) when that is not before the previous change. The state is stored in `broadcast_state` only when it changes; a transition caused by an outage is stored in the same transaction as the outage row. After a restart of the backend, the first evidence that confirms the stored state keeps its `since`; evidence that contradicts it starts a new `since` at that moment, so after a restart with the stream down `since` is the first failed check. A failed write leaves the state unchanged and is retried at the next signal.
 
 **Reconciliation after backend downtime**
 

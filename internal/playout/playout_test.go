@@ -236,6 +236,18 @@ func (p *publisher) Publish(e any) {
 	p.events = append(p.events, e)
 }
 
+// outputs records the output reports passed on to the broadcast state.
+type outputs struct {
+	mu      sync.Mutex
+	reports []bool
+}
+
+func (o *outputs) OnOutput(_ context.Context, connected bool, _ time.Time) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.reports = append(o.reports, connected)
+}
+
 var yerevan = mustLoad("Asia/Yerevan")
 
 func mustLoad(name string) *time.Location {
@@ -254,6 +266,7 @@ type harness struct {
 	store *fakeStore
 	ctl   *fakeControl
 	pub   *publisher
+	out   *outputs
 	now   time.Time
 	set   Settings
 }
@@ -261,14 +274,15 @@ type harness struct {
 func newHarness(t *testing.T, items ...Item) *harness {
 	t.Helper()
 	h := &harness{
-		store: newFakeStore(items...), ctl: newFakeControl(), pub: &publisher{}, now: h10.Add(10 * time.Second),
+		store: newFakeStore(items...), ctl: newFakeControl(), pub: &publisher{}, out: &outputs{},
+		now: h10.Add(10 * time.Second),
 		set: Settings{
 			Location: yerevan, Lookahead: 2, Prepush: 5 * time.Minute, FadeOutMS: 2500, MediaRoot: "/media", MusicGain: 1,
 			DuckGain: 0.2,
 		},
 	}
 	h.svc = NewService(txRunner{}, h.store, h.ctl,
-		func(context.Context) (Settings, error) { return h.set, nil }, h.pub,
+		func(context.Context) (Settings, error) { return h.set, nil }, h.pub, h.out,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return h.now }, rand.New(rand.NewPCG(1, 2))) //nolint:gosec // G404: emergency picks, not security
 	h.svc.push.shift, h.svc.push.duck = -1, -1
 	return h
@@ -495,6 +509,7 @@ func TestOutputCallback(t *testing.T) {
 	require.NoError(t, h.svc.Callback(ctx, Event{Kind: EventOutput, Time: h10.Add(time.Second), Connected: false}))
 	require.Len(t, h.pub.events, 2, "only changes are sent")
 	require.Equal(t, ws.IcecastDisconnected, h.pub.events[1].(ws.IcecastStateEvent).Data.State)
+	require.Equal(t, []bool{true, true, false}, h.out.reports, "every report goes on to the broadcast state")
 	st, err := h.svc.Status(ctx)
 	require.NoError(t, err)
 	require.False(t, st.Output.Connected)

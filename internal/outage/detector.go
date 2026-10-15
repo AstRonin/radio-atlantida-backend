@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
@@ -74,6 +75,21 @@ type Operations interface {
 	Do(ctx context.Context, kind operations.Kind, component logging.Component, fn operations.Func) (uint64, error)
 }
 
+// Broadcast derives the broadcast state from the detector's signals and
+// outages (*broadcast.Tracker). It is told after the detector's own logic,
+// so the outage behaviour does not depend on it.
+type Broadcast interface {
+	// OnMountCheck records an Icecast mount check.
+	OnMountCheck(ctx context.Context, ok bool, at time.Time)
+	// OnHeartbeat records whether Liquidsoap's callbacks are silent beyond
+	// the heartbeat timeout.
+	OnHeartbeat(ctx context.Context, silent bool, at time.Time)
+	// OutageOpened runs open and stores the state in its transaction.
+	OutageOpened(ctx context.Context, open func(ctx context.Context, tx db.Tx) (broadcast.Outage, error)) error
+	// OutageClosed runs closeFn and stores the state in its transaction.
+	OutageClosed(ctx context.Context, at time.Time, closeFn func(ctx context.Context, tx db.Tx) error) error
+}
+
 // Settings are the detection settings, read on every evaluation (§6.3).
 type Settings struct {
 	// HeartbeatTimeout: callbacks or a control link silent this long are
@@ -104,6 +120,7 @@ type Detector struct {
 	journal  JournalReader
 	ops      Operations
 	pub      Publisher
+	bc       Broadcast
 	settings SettingsFunc
 	log      *slog.Logger // component outage
 	now      func() time.Time
@@ -117,6 +134,9 @@ type detectorState struct {
 	// until the first ones arrive.
 	startedAt time.Time
 	open      *Outage
+	// openTold: the broadcast state knows the open outage. One adopted at
+	// startup is told at the first evaluation.
+	openTold bool
 	// lastClosed is the end of the last outage closed by this process; a
 	// new one never starts before it.
 	lastClosed time.Time
@@ -135,10 +155,10 @@ type detectorState struct {
 
 // NewDetector returns the detector. log is the root logger.
 func NewDetector(tx TxRunner, store Store, p Playout, icecast MountChecker, journal JournalReader, ops Operations,
-	pub Publisher, settings SettingsFunc, log *slog.Logger, now func() time.Time,
+	pub Publisher, bc Broadcast, settings SettingsFunc, log *slog.Logger, now func() time.Time,
 ) *Detector {
 	return &Detector{
-		tx: tx, store: store, playout: p, icecast: icecast, journal: journal, ops: ops, pub: pub, settings: settings,
+		tx: tx, store: store, playout: p, icecast: icecast, journal: journal, ops: ops, pub: pub, bc: bc, settings: settings,
 		log: logging.For(log, logging.ComponentOutage), now: now,
 	}
 }
@@ -202,6 +222,19 @@ func (d *Detector) evaluate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Before open and close: a heartbeat back is known when the outage
+	// closes, so the state does not pass through unknown.
+	d.bc.OnHeartbeat(ctx, now.Sub(d.lastCallback()) > set.HeartbeatTimeout, now)
+	if d.st.open != nil && !d.st.openTold {
+		o := *d.st.open
+		err := d.bc.OutageOpened(ctx, func(context.Context, db.Tx) (broadcast.Outage, error) {
+			return broadcastOutage(o), nil
+		})
+		if err != nil {
+			return fmt.Errorf("report open outage %d: %w", o.ID, err)
+		}
+		d.st.openTold = true
+	}
 	switch {
 	case d.st.open == nil && down != nil:
 		if err := d.openOutage(ctx, *down); err != nil {
@@ -229,6 +262,7 @@ func (d *Detector) evaluate(ctx context.Context) error {
 
 func (d *Detector) checkIcecast(ctx context.Context, set Settings, now time.Time) {
 	err := d.icecast.Check(ctx, set.Icecast)
+	defer d.bc.OnMountCheck(ctx, err == nil, now)
 	if err == nil {
 		if d.st.icecastFails >= set.FailedChecks {
 			d.log.Info("icecast mount reachable again", "mount", set.Icecast.Mount)
@@ -247,10 +281,7 @@ func (d *Detector) checkIcecast(ctx context.Context, set Settings, now time.Time
 // control link lost while items are due, Icecast mount missing. Nil when
 // all are up.
 func (d *Detector) signals(ctx context.Context, set Settings, now time.Time) (*signal, error) {
-	lastCB := d.st.startedAt
-	if t := d.playout.LastCallback(); t != nil && t.After(lastCB) {
-		lastCB = *t
-	}
+	lastCB := d.lastCallback()
 	if now.Sub(lastCB) > set.HeartbeatTimeout {
 		return &signal{
 			by: DetectedByLiquidsoapCallback, comp: ComponentLiquidsoap, since: lastCB,
@@ -288,29 +319,51 @@ func (d *Detector) signals(ctx context.Context, set Settings, now time.Time) (*s
 	return nil, nil
 }
 
+// lastCallback is when Liquidsoap last called back, or the start of the
+// detector before the first callback.
+func (d *Detector) lastCallback() time.Time {
+	last := d.st.startedAt
+	if t := d.playout.LastCallback(); t != nil && t.After(last) {
+		last = *t
+	}
+	return last
+}
+
+// openOutage records the outage, and the broadcast state in the same
+// transaction (docs/phase-16-plan.md, decision 6). An outage opened by an
+// earlier run of the backend is adopted.
 func (d *Detector) openOutage(ctx context.Context, s signal) error {
 	since := s.since
 	if since.Before(d.st.lastClosed) {
 		since = d.st.lastClosed
 	}
-	o, err := d.store.CreateOutage(ctx, NewOutage{StartedAt: since, DetectedBy: s.by, Component: s.comp, Reason: s.reason}, nil)
-	if errors.Is(err, ErrOutageOpen) {
-		// Opened by an earlier run of the backend: adopt it.
-		var found bool
-		o, found, err = d.store.OpenOutage(ctx)
-		if err == nil && !found {
-			err = errors.New("open outage vanished")
-		}
+	var (
+		o       Outage
+		adopted bool
+	)
+	err := d.bc.OutageOpened(ctx, func(ctx context.Context, tx db.Tx) (broadcast.Outage, error) {
+		st := d.store.WithTx(tx)
+		found, isOpen, err := st.OpenOutage(ctx)
 		if err != nil {
-			return fmt.Errorf("read open outage: %w", err)
+			return broadcast.Outage{}, fmt.Errorf("read open outage: %w", err)
 		}
-		d.st.open = &o
+		if isOpen {
+			o, adopted = found, true
+			return broadcastOutage(o), nil
+		}
+		o, err = st.CreateOutage(ctx, NewOutage{StartedAt: since, DetectedBy: s.by, Component: s.comp, Reason: s.reason}, nil)
+		if err != nil {
+			return broadcast.Outage{}, fmt.Errorf("open outage: %w", err)
+		}
+		return broadcastOutage(o), nil
+	})
+	if err != nil {
+		return err
+	}
+	d.st.open, d.st.openTold = &o, true
+	if adopted {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("open outage: %w", err)
-	}
-	d.st.open = &o
 	d.log.Warn("broadcast outage opened",
 		"outage_id", o.ID, "failed_component", string(o.Component), "detected_by", string(o.DetectedBy),
 		"started_at", o.StartedAt, "reason", s.reason)
@@ -328,11 +381,14 @@ func (d *Detector) openOutage(ctx context.Context, s signal) error {
 // the end with their count.
 func (d *Detector) closeOutage(ctx context.Context, now time.Time) error {
 	o := *d.st.open
-	if err := d.store.CloseOutage(ctx, o.ID, now); err != nil {
+	err := d.bc.OutageClosed(ctx, now, func(ctx context.Context, tx db.Tx) error {
+		return d.store.WithTx(tx).CloseOutage(ctx, o.ID, now)
+	})
+	if err != nil {
 		return fmt.Errorf("close outage %d: %w", o.ID, err)
 	}
 	o.EndedAt = &now
-	d.st.open, d.st.lastClosed = nil, now
+	d.st.open, d.st.openTold, d.st.lastClosed = nil, false, now
 	d.log.Info("broadcast outage closed",
 		"outage_id", o.ID, "failed_component", string(o.Component), "duration_s", int(now.Sub(o.StartedAt).Seconds()))
 
@@ -345,6 +401,16 @@ func (d *Detector) closeOutage(ctx context.Context, now time.Time) error {
 	}
 	d.pub.Publish(ws.OutageEndedEvent{Type: ws.EventOutageEnded, Time: d.now().UTC(), Data: data})
 	return nil
+}
+
+// broadcastOutage is the outage as the broadcast state shows it: its
+// reason, or its component when it has none.
+func broadcastOutage(o Outage) broadcast.Outage {
+	reason := string(o.Component)
+	if o.Reason != nil && *o.Reason != "" {
+		reason = *o.Reason
+	}
+	return broadcast.Outage{ID: o.ID, StartedAt: o.StartedAt, Reason: reason}
 }
 
 // markOp marks the missed items of a closed outage as a missed_items

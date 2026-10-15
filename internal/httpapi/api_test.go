@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/require"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/handlers"
@@ -301,7 +302,7 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/music-gain",
 		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
 		"/api/outages",
-		"/api/live/session", "/api/live/status",
+		"/api/live/session", "/api/live/status", "/api/broadcast/status",
 	} {
 		require.Contains(t, doc.Paths, p)
 	}
@@ -309,7 +310,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 12)
+	require.Len(t, schemas["Event"].OneOf, 13)
 	require.Equal(t, []string{ws.EventLiveState}, schemas["LiveStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackPlanWarning}, schemas["TrackPlanWarningEvent"].Properties["type"].Enum)
@@ -317,6 +318,12 @@ func TestOpenAPIDocument(t *testing.T) {
 	require.Equal(t, []string{ws.EventNowPlaying}, schemas["NowPlayingEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventLiquidsoapState}, schemas["LiquidsoapStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventIcecastState}, schemas["IcecastStateEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventBroadcastState}, schemas["BroadcastStateEvent"].Properties["type"].Enum)
+	states := stringsOf([]broadcast.State{
+		broadcast.StateConnected, broadcast.StateReconnecting, broadcast.StateUnreachable, broadcast.StateUnknown,
+	})
+	require.Equal(t, states, schemas["BroadcastStateData"].Properties["state"].Enum)
+	require.Equal(t, states, schemas["BroadcastStatus"].Properties["state"].Enum)
 	require.Equal(t, []string{ws.EventOutageStarted}, schemas["OutageStartedEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventOutageEnded}, schemas["OutageEndedEvent"].Properties["type"].Enum)
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindMissedItems.CompletedEvent())

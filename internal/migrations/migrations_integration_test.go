@@ -39,7 +39,7 @@ func TestUpCreatesSchemaAndSeeds(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
 	require.Equal(t, []string{
-		"artists", "backend_heartbeat", "broadcast_outages", "clock_element_playlists", "clock_elements",
+		"artists", "backend_heartbeat", "broadcast_outages", "broadcast_state", "clock_element_playlists", "clock_elements",
 		"clock_filler_pool", "clocks", "filler_requests", "grid_slots", "hour_inserts", "operations", "plan_hours",
 		"play_log", "play_rules", "playlist_play_rules", "playlist_types", "playlists",
 		"scheduled_items", "separation_rules", "settings", "track_play_rules",
@@ -219,6 +219,12 @@ func TestConstraints(t *testing.T) {
 		// Outages: at most one open.
 		{"one open outage", `INSERT INTO broadcast_outages (started_at, detected_by, component) VALUES (now(), 'icecast', 'icecast')`, ""},
 		{"two open outages", `INSERT INTO broadcast_outages (started_at, detected_by, component) VALUES (now(), 'icecast', 'icecast'), (now(), 'backend', 'backend')`, "uq_broadcast_outages_open"},
+
+		// Broadcast state: one row, known states only.
+		{"broadcast state row", `INSERT INTO broadcast_state (id, state, since, updated_at) VALUES (1, 'connected', now(), now())`, ""},
+		{"broadcast state second row", `INSERT INTO broadcast_state (id, state, since, updated_at) VALUES (2, 'connected', now(), now())`, "ck_broadcast_state_one_row"},
+		{"broadcast state unknown is not stored", `INSERT INTO broadcast_state (id, state, since, updated_at) VALUES (1, 'unknown', now(), now())`, "ck_broadcast_state_state"},
+		{"broadcast state other value", `INSERT INTO broadcast_state (id, state, since, updated_at) VALUES (1, 'disconnected', now(), now())`, "ck_broadcast_state_state"},
 
 		// Play log.
 		{"missed needs an outage", `INSERT INTO play_log (track_id, status, planned_start_utc, resolution) VALUES (` + track + `, 'missed', now(), 'open')`, "ck_play_log_missed_fields"},

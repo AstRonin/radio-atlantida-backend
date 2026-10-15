@@ -259,6 +259,14 @@ func TestPlayoutPushesAndLogs(t *testing.T) {
 	f.callback(map[string]any{"event": "output", "time": start.Format(time.RFC3339Nano), "connected": false})
 	f.ok(http.StatusOK, http.MethodGet, "/api/playout/status", nil, &st)
 	require.Equal(t, "disconnected", st.Output.State)
+	// ... and the broadcast state derived from it, stored with its since.
+	var bs dto.BroadcastStatus
+	f.ok(http.StatusOK, http.MethodGet, "/api/broadcast/status", nil, &bs)
+	require.Equal(t, "reconnecting", bs.State)
+	require.Equal(t, start, bs.Since.UTC())
+	var stored string
+	require.NoError(t, f.db.Pool.QueryRow(t.Context(), `SELECT state FROM broadcast_state`).Scan(&stored))
+	require.Equal(t, "reconnecting", stored)
 }
 
 func TestPlayoutMusicGain(t *testing.T) {

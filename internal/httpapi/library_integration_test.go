@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
 	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/dbtest"
@@ -35,6 +36,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
+	broadcastrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/broadcast"
 	clocksrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/clocks"
 	gridrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/grid"
 	ingestrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/ingest"
@@ -156,12 +158,13 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 				},
 			}, nil
 		}, log, clock.now)
+	broadcastState := broadcast.NewTracker(d, broadcastrepo.New(d.Pool), hub, log, clock.now)
 	a.playout = playout.NewService(d, playoutrepo.New(d.Pool), ctl, func(context.Context) (playout.Settings, error) {
 		return playout.Settings{ // setting defaults
 			Location: stationTZ(t), Lookahead: 3, Prepush: 5 * time.Minute, FadeOutMS: 2500, MediaRoot: "/media",
 			MusicGain: 1, EmergencyPlaylistID: a.emergency.get(),
 		}, nil
-	}, hub, log, clock.now, rand.New(rand.NewPCG(1, 1))) //nolint:gosec // G404: emergency picks, not security
+	}, hub, broadcastState, log, clock.now, rand.New(rand.NewPCG(1, 1))) //nolint:gosec // G404: emergency picks, not security
 	planner := make(chan struct{})
 	go func() {
 		defer close(planner)
@@ -188,12 +191,13 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		Separation: separation.NewService(separationrepo.New(d), func(context.Context) (int, error) {
 			return 10 * 24, nil // retention.play_log_days default
 		}),
-		Clocks:  clocksSvc,
-		Grid:    gridSvc,
-		Playout: a.playout,
-		Outages: outage.NewService(outagerepo.New(d.Pool), time.Now),
-		Ingest:  ingestSvc,
-		Now:     time.Now,
+		Clocks:    clocksSvc,
+		Grid:      gridSvc,
+		Playout:   a.playout,
+		Outages:   outage.NewService(outagerepo.New(d.Pool), time.Now),
+		Ingest:    ingestSvc,
+		Broadcast: broadcastState,
+		Now:       time.Now,
 	}))
 	t.Cleanup(srv.Close)
 	a.url = srv.URL

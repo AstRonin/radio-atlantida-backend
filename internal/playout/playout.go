@@ -156,6 +156,12 @@ type Publisher interface {
 	Publish(event any)
 }
 
+// OutputObserver follows Liquidsoap's reports of its Icecast output
+// (*broadcast.Tracker).
+type OutputObserver interface {
+	OnOutput(ctx context.Context, connected bool, at time.Time)
+}
+
 // TxRunner runs fn in one transaction (*db.DB).
 type TxRunner interface {
 	WithTx(ctx context.Context, fn func(ctx context.Context, tx db.Tx) error) error
@@ -201,6 +207,7 @@ type Service struct {
 	ctl      Control
 	settings SettingsFunc
 	pub      Publisher
+	outputs  OutputObserver
 	log      *slog.Logger // component liquidsoap
 	now      func() time.Time
 	// wake asks the pusher for a pass now (a slot was freed, the gain
@@ -220,13 +227,13 @@ type Service struct {
 	lastEmergency uint64
 }
 
-// NewService returns the service. log is the root logger; rnd picks the
-// emergency tracks.
-func NewService(tx TxRunner, store Store, ctl Control, settings SettingsFunc, pub Publisher,
+// NewService returns the service. outputs follows the Icecast output
+// reports; log is the root logger; rnd picks the emergency tracks.
+func NewService(tx TxRunner, store Store, ctl Control, settings SettingsFunc, pub Publisher, outputs OutputObserver,
 	log *slog.Logger, now func() time.Time, rnd *rand.Rand,
 ) *Service {
 	return &Service{
-		tx: tx, store: store, ctl: ctl, settings: settings, pub: pub,
+		tx: tx, store: store, ctl: ctl, settings: settings, pub: pub, outputs: outputs,
 		log: logging.For(log, logging.ComponentLiquidsoap), now: now, rnd: rnd,
 		wake: make(chan struct{}, 1),
 	}

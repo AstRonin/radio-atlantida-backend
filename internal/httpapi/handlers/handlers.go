@@ -45,7 +45,8 @@ type Deps struct {
 	Outages    Outages
 	Ingest     Ingest
 	Live       Live
-	// Now is the clock of the live status.
+	Broadcast  Broadcast
+	// Now is the clock of the live and broadcast status.
 	Now func() time.Time
 }
 
@@ -55,6 +56,7 @@ func Register(api huma.API, d Deps) {
 	registerOperations(api, log, d.Operations)
 	registerLogs(api, log, d.Logs)
 	registerStatus(api, log, d.Now, d.Live, d.Outages, d.Grid)
+	registerBroadcast(api, log, d.Now, d.Broadcast)
 	registerSettings(api, log, d.Settings)
 	registerPlaylistTypes(api, log, d.Library)
 	registerPlaylists(api, log, d.Library, d.PlayRules)
