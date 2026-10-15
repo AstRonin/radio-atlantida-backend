@@ -50,6 +50,12 @@ func TestWalk(t *testing.T) {
 
 	_, _, err = lib.Walk(t.Context(), "../x", 10)
 	require.ErrorIs(t, err, ErrInvalidPath)
+
+	files, more, err = lib.Walk(t.Context(), "", 10)
+	require.NoError(t, err, "the root")
+	require.False(t, more)
+	require.Len(t, files, 3)
+	require.Equal(t, "library/c.mp3", files[2].Path)
 }
 
 func TestChecksum(t *testing.T) {
@@ -63,29 +69,53 @@ func TestChecksum(t *testing.T) {
 	require.ErrorIs(t, err, ErrFileNotFound)
 }
 
-func TestFreeNameAndMove(t *testing.T) {
+func TestTree(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	write(t, root, "incoming/x/song.mp3", "new")
-	write(t, root, "library/x/song.mp3", "old")
-	write(t, root, "library/x/song (2).mp3", "older")
+	write(t, root, "music/rock/a.mp3", "a")
+	write(t, root, "music/b.mp3", "bb")
+	write(t, root, "music-old/c.mp3", "c")
+	write(t, root, "jingles/.hidden/x.mp3", "x")
+	write(t, root, "top.mp3", "t")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "empty"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".trash", "inner"), 0o750))
+	require.NoError(t, os.Symlink(filepath.Join(root, "music"), filepath.Join(root, "linked")))
 	lib := New(root)
 
-	name, err := lib.FreeName("library/x/song.mp3")
+	tree, err := lib.Tree(t.Context(), "", 10)
 	require.NoError(t, err)
-	require.Equal(t, "library/x/song (3).mp3", name)
-	name, err = lib.FreeName("library/y/song.mp3")
-	require.NoError(t, err)
-	require.Equal(t, "library/y/song.mp3", name)
+	require.Equal(t, []string{"empty", "jingles", "music", "music/rock", "music-old"}, tree.Folders,
+		"a folder before its subfolders; hidden folders and links skipped")
+	paths := make([]string, len(tree.Files))
+	for i, f := range tree.Files {
+		paths[i] = f.Path
+	}
+	require.Equal(t, []string{"music/b.mp3", "music/rock/a.mp3", "music-old/c.mp3", "top.mp3"}, paths)
 
-	require.ErrorIs(t, lib.Move("incoming/x/song.mp3", "library/x/song.mp3"), ErrExists, "never overwrites")
-	require.NoError(t, lib.Move("incoming/x/song.mp3", "library/y/song.mp3"), "creates the folder")
-	b, err := os.ReadFile(filepath.Join(root, "library", "y", "song.mp3")) //nolint:gosec // G304: test file in a temp dir
+	tree, err = lib.Tree(t.Context(), "music", 10)
 	require.NoError(t, err)
-	require.Equal(t, "new", string(b))
-	ok, err := lib.Exists("incoming/x/song.mp3")
-	require.NoError(t, err)
-	require.False(t, ok)
+	require.Equal(t, []string{"music/rock"}, tree.Folders)
+	require.Len(t, tree.Files, 2)
+
+	_, err = lib.Tree(t.Context(), "", 3)
+	require.ErrorIs(t, err, ErrTooManyFiles)
+	_, err = lib.Tree(t.Context(), "/etc", 3)
+	require.ErrorIs(t, err, ErrInvalidPath)
+}
+
+func TestIsDir(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "music/a.mp3", "a")
+	require.NoError(t, os.Symlink(filepath.Join(root, "music"), filepath.Join(root, "linked")))
+	lib := New(root)
+	for rel, want := range map[string]bool{"music": true, "music/a.mp3": false, "missing": false, "linked": false} {
+		ok, err := lib.IsDir(rel)
+		require.NoError(t, err, rel)
+		require.Equal(t, want, ok, rel)
+	}
+	_, err := lib.IsDir("../x")
+	require.ErrorIs(t, err, ErrInvalidPath)
 }
 
 func TestCommitAndRemove(t *testing.T) {
@@ -99,9 +129,8 @@ func TestCommitAndRemove(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(root, "m", "a.mp3")) //nolint:gosec // G304: test file in a temp dir
 	require.NoError(t, err)
 	require.Equal(t, "new", string(b))
-	ok, err := lib.Exists("m/.a.tmp.mp3")
-	require.NoError(t, err)
-	require.False(t, ok)
+	_, err = os.Stat(filepath.Join(root, "m", ".a.tmp.mp3"))
+	require.ErrorIs(t, err, os.ErrNotExist)
 
 	require.NoError(t, lib.Remove("m/a.mp3"))
 	require.NoError(t, lib.Remove("m/a.mp3"), "a missing file is not an error")

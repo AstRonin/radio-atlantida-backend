@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -16,20 +17,20 @@ import (
 func TestImport(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.tools.audio("incoming/a/song.mp3", "A", mp3Info("Song", "ABBA"), loud(-16, -2))
-	f.tools.audio("incoming/b.mp3", "B", mp3Info("", "abba"), loud(-10, 0.3)) // no title tag; artist differs in case
-	f.tools.audio("incoming/known.mp3", "K", mp3Info("Known", ""), nil)
-	f.files.put("incoming/notes.txt", "text")
-	f.files.put("incoming/broken.mp3", "garbage")
-	f.files.put("incoming/.hidden.mp3", "hidden")
-	f.files.put("library/b.mp3", "taken") // a name collision in the library folder
-	f.store.add(Track{ID: 1, FilePath: "library/known.mp3", Checksum: new(sha("K"))})
+	f.tools.audio("music/a/song.mp3", "A", mp3Info("Song", "ABBA"), loud(-16, -2))
+	f.tools.audio("music/b.mp3", "B", mp3Info("", "abba"), loud(-10, 0.3)) // no title tag; artist differs in case
+	f.tools.audio("music/copied.mp3", "K", mp3Info("Known", ""), nil)
+	f.tools.audio("jingles/id.mp3", "J", mp3Info("ID", ""), nil)
+	f.files.put("music/notes.txt", "text")
+	f.files.put("music/broken.mp3", "garbage")
+	f.files.put("music/.hidden.mp3", "hidden")
+	f.store.add(Track{ID: 1, FilePath: "old/known.mp3", Checksum: new(sha("K"))})
 
-	_, err := f.svc.Import(t.Context(), ImportRequest{TypeID: 1, PlaylistIDs: []uint64{10}})
+	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1, PlaylistIDs: []uint64{10}})
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "imported 2, duplicates 1, unreadable 1, skipped 1", summary)
+	require.Equal(t, "folder music: imported 2, duplicates 1, unreadable 1, skipped 1", summary)
 
 	created := f.store.created()
 	require.Len(t, created, 2)
@@ -37,63 +38,182 @@ func TestImport(t *testing.T) {
 	for _, c := range created {
 		byPath[c.FilePath] = c
 	}
-	a := byPath["library/a/song.mp3"]
+	a := byPath["music/a/song.mp3"]
 	require.Equal(t, "Song", a.Title)
 	require.Equal(t, uint64(1), a.TypeID)
 	require.Equal(t, []uint64{10}, a.PlaylistIDs)
 	require.Empty(t, a.Issues)
-	b := byPath["library/b (2).mp3"]
-	require.Equal(t, "b", b.Title, "title from the file name")
+	b := byPath["music/b.mp3"]
+	require.Equal(t, "b", b.Title, "title from the file name, without the folder and the extension")
 	require.Equal(t, *a.ArtistID, *b.ArtistID, "one artist, whatever the case")
 	require.Equal(t, []library.QualityIssue{library.IssueLoudness, library.IssueTruePeak}, b.Issues)
 
-	// Imported files left the inbox; the rest stays.
+	// Nothing moved; the other folder was not imported.
 	require.Equal(t, []string{
-		"incoming/.hidden.mp3", "incoming/broken.mp3", "incoming/known.mp3", "incoming/notes.txt",
-		"library/a/song.mp3", "library/b (2).mp3", "library/b.mp3",
+		"jingles/id.mp3", "music/.hidden.mp3", "music/a/song.mp3", "music/b.mp3", "music/broken.mp3",
+		"music/copied.mp3", "music/notes.txt",
 	}, f.files.paths())
 	require.Equal(t, 5, f.ops.progress)
+
+	// A second run reads no file: the new tracks are in the library by
+	// path. The duplicate and the unreadable file are read again.
+	reads := f.files.reads
+	_, err = f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1})
+	require.NoError(t, err)
+	summary, err = f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "folder music: in_library 2, duplicates 1, unreadable 1, skipped 1", summary)
+	require.Equal(t, reads+2, f.files.reads)
+	require.Len(t, f.store.created(), 2)
 }
 
-func TestImportTwoCopiesInTheInbox(t *testing.T) {
+func TestImportNewFileOnly(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.tools.audio("incoming/a.mp3", "A", mp3Info("Song", ""), loud(-16, -2))
-	f.tools.audio("incoming/b.mp3", "A", mp3Info("Song", ""), loud(-16, -2))
+	f.tools.audio("jingles/a.mp3", "A", mp3Info("A", ""), nil)
+	f.tools.audio("jingles/b.mp3", "B", mp3Info("B", ""), nil)
+	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "jingles", TypeID: 1, PlaylistIDs: []uint64{10}})
+	require.NoError(t, err)
+	summary, err := f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "folder jingles: imported 2", summary)
+
+	f.tools.audio("jingles/c.mp3", "C", mp3Info("C", ""), nil)
+	_, err = f.svc.Import(t.Context(), ImportRequest{Folder: "jingles", TypeID: 1, PlaylistIDs: []uint64{11}})
+	require.NoError(t, err)
+	summary, err = f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "folder jingles: imported 1, in_library 2", summary)
+	created := f.store.created()
+	require.Len(t, created, 3)
+	require.Equal(t, []uint64{10}, created[0].PlaylistIDs, "existing tracks keep their playlists")
+	require.Equal(t, []uint64{11}, created[2].PlaylistIDs)
+}
+
+func TestImportWholeMediaFolder(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("music/a.mp3", "A", mp3Info("A", ""), nil)
+	f.tools.audio("jingles/b.mp3", "B", mp3Info("B", ""), nil)
+	f.tools.audio("top.mp3", "T", mp3Info("T", ""), nil)
 	_, err := f.svc.Import(t.Context(), ImportRequest{TypeID: 1})
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "imported 1, duplicates 1", summary)
-	require.Len(t, f.store.created(), 1)
-	// Which copy wins depends on the workers; one stays in the inbox.
-	inbox, _, err := f.files.Walk(t.Context(), "incoming", 10)
-	require.NoError(t, err)
-	require.Len(t, inbox, 1)
+	require.Equal(t, "whole media folder: imported 3", summary)
 }
 
-func TestImportMovesBackWhenTheTrackIsNotStored(t *testing.T) {
+func TestImportSkipsOriginalsOfCopies(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.tools.audio("incoming/song.mp3", "A", mp3Info("Song", ""), loud(-16, -2))
+	f.tools.audio("music/a.flac", "A", mp3Info("A", ""), nil)
+	f.tools.audio("music/a.optimal.mp3", "A2", mp3Info("A", ""), nil)
+	f.store.add(Track{ID: 1, FilePath: "music/a.optimal.mp3", Checksum: new(sha("A2"))})
+	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1})
+	require.NoError(t, err)
+	summary, err := f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "folder music: in_library 2", summary)
+	require.Zero(t, f.files.reads)
+}
+
+func TestImportTitleAndArtist(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("m/Morning - DJ Ann.mp3", "1", mp3Info("", ""), nil)
+	f.tools.audio("m/Evening – DJ Ann.mp3", "2", mp3Info("", ""), nil)
+	f.tools.audio("m/Jay-Z - Song.mp3", "3", mp3Info("", ""), nil)
+	f.tools.audio("m/Tagged - Name Artist.mp3", "4", mp3Info("Tag Title", "Tag Artist"), nil)
+	f.tools.audio("m/Only Title - Name Artist.mp3", "5", mp3Info("Tag Title 2", ""), nil)
+	f.tools.audio("m/Name Title - Name Artist.mp3", "6", mp3Info("", "Tag Artist"), nil)
+
+	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "m", TypeID: 1})
+	require.NoError(t, err)
+	summary, err := f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "folder m: imported 6", summary)
+
+	type got struct{ title, artist string }
+	byPath := map[string]got{}
+	for _, c := range f.store.created() {
+		g := got{title: c.Title}
+		if c.ArtistID != nil {
+			g.artist = f.store.artists[*c.ArtistID]
+		}
+		byPath[c.FilePath] = g
+	}
+	require.Equal(t, map[string]got{
+		"m/Morning - DJ Ann.mp3":         {"Morning", "DJ Ann"},
+		"m/Evening – DJ Ann.mp3":         {"Evening", "DJ Ann"},
+		"m/Jay-Z - Song.mp3":             {"Jay-Z - Song", ""},
+		"m/Tagged - Name Artist.mp3":     {"Tag Title", "Tag Artist"},
+		"m/Only Title - Name Artist.mp3": {"Tag Title 2", "Name Artist"},
+		"m/Name Title - Name Artist.mp3": {"Name Title", "Tag Artist"},
+	}, byPath)
+	require.Len(t, f.store.artists, 3, "DJ Ann created once for two files")
+}
+
+func TestImportArtistOfTheRequestWins(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.store.artists[7] = "House Band"
+	f.tools.audio("m/Morning - DJ Ann.mp3", "1", mp3Info("", "Tag Artist"), nil)
+	f.tools.audio("m/plain.mp3", "2", mp3Info("", ""), nil)
+	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "m", TypeID: 1, ArtistID: new(uint64(7))})
+	require.NoError(t, err)
+	_, err = f.runQueued(t)
+	require.NoError(t, err)
+	var titles []string
+	for _, c := range f.store.created() {
+		require.Equal(t, uint64(7), *c.ArtistID, c.FilePath)
+		titles = append(titles, c.Title)
+	}
+	require.ElementsMatch(t, []string{"Morning", "plain"}, titles, "the title still comes from the name")
+	require.Len(t, f.store.artists, 1, "no artist created")
+}
+
+func TestImportTwoCopiesInOneRun(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("music/a.mp3", "A", mp3Info("Song", ""), loud(-16, -2))
+	f.tools.audio("music/b.mp3", "A", mp3Info("Song", ""), loud(-16, -2))
+	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1})
+	require.NoError(t, err)
+	summary, err := f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "folder music: imported 1, duplicates 1", summary)
+	require.Len(t, f.store.created(), 1)
+}
+
+func TestImportFailureLeavesTheFile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("music/song.mp3", "A", mp3Info("Song", ""), loud(-16, -2))
 	f.store.createErr = errors.New("database down")
 
-	_, err := f.svc.Import(t.Context(), ImportRequest{TypeID: 1})
+	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1})
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "failed 1; failed: [incoming/song.mp3] (see the log)", summary)
-	require.Equal(t, []string{"incoming/song.mp3"}, f.files.paths())
+	require.Equal(t, "folder music: failed 1; failed: [music/song.mp3] (see the log)", summary)
+	require.Equal(t, []string{"music/song.mp3"}, f.files.paths())
 }
 
 func TestImportRefusals(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	_, err := f.svc.Import(t.Context(), ImportRequest{TypeID: 9, PlaylistIDs: []uint64{10, 77}})
+	f.files.put("music/a.mp3", "A")
+	_, err := f.svc.Import(t.Context(), ImportRequest{
+		Folder: "jingles", TypeID: 9, PlaylistIDs: []uint64{10, 77}, ArtistID: new(uint64(5)),
+	})
 	var verr *validation.Error
 	require.ErrorAs(t, err, &verr)
-	require.Equal(t, "type_id", verr.Fields[0].Field)
-	require.Equal(t, "playlist_ids", verr.Fields[1].Field)
+	fields := make([]string, len(verr.Fields))
+	for i, fe := range verr.Fields {
+		fields[i] = fe.Field
+	}
+	require.Equal(t, []string{"folder", "type_id", "playlist_ids", "artist_id"}, fields)
+	require.Equal(t, "no such folder in the media folder", verr.Fields[0].Message)
 	require.Empty(t, f.ops.started)
 
 	f.tools.missing = true
@@ -101,14 +221,100 @@ func TestImportRefusals(t *testing.T) {
 	require.ErrorIs(t, err, ErrToolsUnavailable)
 }
 
-func TestImportFoldersMustNotOverlap(t *testing.T) {
+func TestFolderValidation(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.set.LibraryDir = "incoming/done"
-	_, err := f.svc.Import(t.Context(), ImportRequest{TypeID: 1})
+	f.files.put("music/a.mp3", "A")
+	f.files.put(".hidden/a.mp3", "A")
+	for _, folder := range []string{"..", "music/..", "/music", `music\rock`, "music/", "./music", ".hidden", "missing", "music/a.mp3"} {
+		_, err := f.svc.Files(t.Context(), folder)
+		var verr *validation.Error
+		require.ErrorAs(t, err, &verr, folder)
+		require.Equal(t, "folder", verr.Fields[0].Field, folder)
+		require.Equal(t, validation.Invalid, verr.Fields[0].Rule, folder)
+	}
+	for _, folder := range []string{"", "music"} {
+		_, err := f.svc.Files(t.Context(), folder)
+		require.NoError(t, err, folder)
+	}
+}
+
+func TestFolders(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.files.put("music/a.mp3", "A")
+	f.files.put("music/notes.txt", "N")
+	f.files.put("music/rock/b.mp3", "B")
+	f.files.put("music/rock/c.flac", "C")
+	f.files.put("music/rock/c.optimal.mp3", "C2")
+	f.files.put("jingles/id.mp3", "J")
+	f.files.put("top.mp3", "T")
+	f.files.put(".trash/x.mp3", "X")
+	f.files.mkdir("empty")
+	f.store.add(Track{ID: 1, FilePath: "music/rock/b.mp3"})
+	f.store.add(Track{ID: 2, FilePath: "music/rock/c.optimal.mp3"})
+
+	got, err := f.svc.Folders(t.Context())
 	require.NoError(t, err)
-	_, err = f.runQueued(t)
-	require.ErrorContains(t, err, "must not contain each other")
+	require.Equal(t, Folders{
+		Root: Counts{AudioFiles: 6, NewFiles: 3},
+		Folders: []Folder{
+			{Path: "empty"},
+			{Path: "jingles", Counts: Counts{AudioFiles: 1, NewFiles: 1}},
+			{Path: "music", Counts: Counts{AudioFiles: 4, NewFiles: 1}},
+			{Path: "music/rock", Counts: Counts{AudioFiles: 3, NewFiles: 0}},
+		},
+	}, got)
+}
+
+func TestFoldersLimit(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	for i := range maxFolders + 1 {
+		f.files.mkdir(fmt.Sprintf("f%04d", i))
+	}
+	got, err := f.svc.Folders(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got.Folders, maxFolders)
+	require.True(t, got.More)
+}
+
+func TestFiles(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.files.put("music/a.mp3", "A")
+	f.files.put("music/notes.txt", "N")
+	f.files.put("music/rock/b.mp3", "BB")
+	f.files.put("music/rock/c.flac", "C")
+	f.files.put("music/rock/c.optimal.mp3", "C2")
+	f.files.put("music/d.flac", "D")
+	f.files.put("other/d.optimal.mp3", "D2")
+	f.store.add(Track{ID: 1, FilePath: "music/rock/b.mp3"})
+	f.store.add(Track{ID: 2, FilePath: "music/rock/c.optimal.mp3"})
+	f.store.add(Track{ID: 3, FilePath: "other/d.optimal.mp3"})
+
+	got, err := f.svc.Files(t.Context(), "music")
+	require.NoError(t, err)
+	require.Equal(t, "music", got.Folder)
+	require.False(t, got.More)
+	type row struct {
+		path    string
+		status  FileStatus
+		trackID uint64
+	}
+	rows := make([]row, len(got.Files))
+	for i, file := range got.Files {
+		rows[i] = row{file.Path, file.Status, file.TrackID}
+	}
+	require.Equal(t, []row{
+		{"music/a.mp3", FileNew, 0},
+		{"music/d.flac", FileNew, 0}, // its copy is in another folder
+		{"music/notes.txt", FileNotAudio, 0},
+		{"music/rock/b.mp3", FileInLibrary, 1},
+		{"music/rock/c.flac", FileOriginal, 2},
+		{"music/rock/c.optimal.mp3", FileInLibrary, 2},
+	}, rows)
+	require.Equal(t, int64(2), got.Files[3].Size)
 }
 
 func TestOneOperationAtATime(t *testing.T) {
@@ -135,21 +341,6 @@ func TestRunFailsTheQueuedOperationAtShutdown(t *testing.T) {
 	require.NoError(t, f.svc.Run(ctx))
 	// Whether Run takes the job or the shutdown first, the operation fails.
 	require.ErrorIs(t, f.ops.failure[1], context.Canceled)
-}
-
-func TestInbox(t *testing.T) {
-	t.Parallel()
-	f := newFixture(t)
-	f.files.put("incoming/b.mp3", "B")
-	f.files.put("incoming/a.mp3", "AA")
-	f.files.put("library/c.mp3", "C")
-	in, err := f.svc.Inbox(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, "incoming", in.Dir)
-	require.Equal(t, []media.File{
-		{Path: "incoming/a.mp3", Size: 2, ModTime: testNow}, {Path: "incoming/b.mp3", Size: 1, ModTime: testNow},
-	}, in.Files)
-	require.False(t, in.More)
 }
 
 func TestAnalyse(t *testing.T) {
@@ -376,13 +567,4 @@ func TestImportable(t *testing.T) {
 	} {
 		require.Equal(t, want, importable(name), name)
 	}
-}
-
-func TestOverlap(t *testing.T) {
-	t.Parallel()
-	require.True(t, overlap("incoming", "incoming"))
-	require.True(t, overlap("incoming", "incoming/done"))
-	require.True(t, overlap("media/library", "media"))
-	require.False(t, overlap("incoming", "incoming2"))
-	require.False(t, overlap("incoming", "library"))
 }

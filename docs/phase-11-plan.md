@@ -1,6 +1,14 @@
 # Phase 11 Plan — Import, Quality Analysis, and Transcoding
 
 Status: Done
+
+> **Superseded in part by `docs/phase-18-plan.md` (import in place).** The
+> inbox and library folders (decisions 1, 2, the settings `import.inbox_dir`
+> and `import.library_dir` of decision 11, and the inbox listing of decision
+> 12) are replaced: an import registers the files of a chosen folder of the
+> media root where they lie and moves nothing. `make inbox` is now
+> `make import-samples`. Analysis, quality issues, and transcoding are
+> unchanged.
 Based on: `base.md` (Audio Quality Analysis, Audio Transcoding), `tech-design.md` (§3, §4, §6.2, §6.3, §6.5, §8.7, §10.1), `backend-init-plan.md` §8 item 4 and §9 item 11
 Last updated: 2026-10-14
 

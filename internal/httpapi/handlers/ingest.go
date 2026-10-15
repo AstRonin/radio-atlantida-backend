@@ -14,14 +14,23 @@ import (
 
 // Ingest imports, analyses, and transcodes track files (*ingest.Service).
 type Ingest interface {
-	Inbox(ctx context.Context) (ingest.Inbox, error)
+	Folders(ctx context.Context) (ingest.Folders, error)
+	Files(ctx context.Context, folder string) (ingest.FolderFiles, error)
 	Import(ctx context.Context, req ingest.ImportRequest) (uint64, error)
 	Analyse(ctx context.Context, req ingest.AnalyseRequest) (uint64, error)
 	Transcode(ctx context.Context, req ingest.TranscodeRequest) (uint64, error)
 }
 
-type inboxOutput struct {
-	Body dto.Inbox
+type importFoldersOutput struct {
+	Body dto.ImportFolders
+}
+
+type importFilesInput struct {
+	Folder string `query:"folder" maxLength:"1024" doc:"Folder relative to the media root (music/rock); absent or empty: the media root."`
+}
+
+type importFilesOutput struct {
+	Body dto.ImportFiles
 }
 
 type importInput struct {
@@ -43,20 +52,48 @@ func registerIngest(api huma.API, log *slog.Logger, svc Ingest) {
 	tags := []string{"Import"}
 
 	register(api, log, huma.Operation{
-		OperationID: "get-import-inbox",
+		OperationID: "list-import-folders",
 		Method:      http.MethodGet,
-		Path:        "/api/import/inbox",
-		Summary:     "List the inbox",
-		Description: "The files waiting in the inbox folder under the media root (setting import.inbox_dir), at most 1,000.",
-		Tags:        tags,
-	}, func(ctx context.Context, _ *struct{}) (*inboxOutput, error) {
-		in, err := svc.Inbox(ctx)
+		Path:        "/api/import/folders",
+		Summary:     "List the folders of the media root",
+		Description: "Every folder under the media root, nested ones included, in path order, at most 500, with the audio files in it and its subfolders " +
+			"and how many of them are new. The counts compare paths only; no file is read.",
+		Tags: tags,
+	}, func(ctx context.Context, _ *struct{}) (*importFoldersOutput, error) {
+		fs, err := svc.Folders(ctx)
 		if err != nil {
 			return nil, err
 		}
-		out := &inboxOutput{Body: dto.Inbox{Dir: in.Dir, More: in.More, Items: make([]dto.InboxFile, len(in.Files))}}
-		for i, f := range in.Files {
-			out.Body.Items[i] = dto.InboxFile{Path: f.Path, Size: f.Size, ModifiedAt: f.ModTime.UTC()}
+		out := &importFoldersOutput{Body: dto.ImportFolders{
+			Root: importCounts(fs.Root), Folders: make([]dto.ImportFolder, len(fs.Folders)), More: fs.More,
+		}}
+		for i, f := range fs.Folders {
+			out.Body.Folders[i] = dto.ImportFolder{Path: f.Path, ImportCounts: importCounts(f.Counts)}
+		}
+		return out, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "list-import-files",
+		Method:      http.MethodGet,
+		Path:        "/api/import/files",
+		Summary:     "List the files of a folder",
+		Description: "The files of a folder of the media root and its subfolders, in path order, at most 1,000, with what an import would do with each. " +
+			"A folder that is not a clean relative path, is hidden, or does not exist is refused per field (folder, invalid).",
+		Tags:   tags,
+		Errors: errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *importFilesInput) (*importFilesOutput, error) {
+		fs, err := svc.Files(ctx, in.Folder)
+		if err != nil {
+			return nil, err
+		}
+		out := &importFilesOutput{Body: dto.ImportFiles{Folder: fs.Folder, Items: make([]dto.ImportFile, len(fs.Files)), More: fs.More}}
+		for i, f := range fs.Files {
+			item := dto.ImportFile{Path: f.Path, Size: f.Size, ModifiedAt: f.ModTime.UTC(), Status: string(f.Status)}
+			if f.TrackID != 0 {
+				item.TrackID = new(f.TrackID)
+			}
+			out.Body.Items[i] = item
 		}
 		return out, nil
 	})
@@ -65,15 +102,19 @@ func registerIngest(api huma.API, log *slog.Logger, svc Ingest) {
 		OperationID: "start-import",
 		Method:      http.MethodPost,
 		Path:        "/api/import",
-		Summary:     "Import the inbox",
-		Description: "Starts an import operation: every audio file of the inbox is analysed, moved to the library folder (setting import.library_dir), " +
-			"and registered as a track with the given type and playlists. Title and artist come from the file's tags, else from its name. " +
-			"A file already in the library (same checksum) or not readable as audio stays in the inbox. " + mediaBusy,
+		Summary:     "Import a folder",
+		Description: "Starts an import operation: every audio file of the folder and its subfolders that is not a track yet becomes one where it lies, " +
+			"with the given type, playlists, and artist; nothing is moved, and tracks that exist already are not changed. " +
+			"The title comes from the title tag, else from the file name; the artist from artist_id, else the artist tag, else the file name " +
+			"(\"Title - Artist\" with exactly one hyphen). A file with the content of an existing track (a copy) or not readable as audio is left alone. " +
+			mediaBusy,
 		Tags:          tags,
 		DefaultStatus: http.StatusAccepted,
 		Errors:        errorsWith(http.StatusConflict, http.StatusUnprocessableEntity, http.StatusServiceUnavailable),
 	}, func(ctx context.Context, in *importInput) (*operationAcceptedOutput, error) {
-		id, err := svc.Import(ctx, ingest.ImportRequest{TypeID: in.Body.TypeID, PlaylistIDs: in.Body.PlaylistIDs})
+		id, err := svc.Import(ctx, ingest.ImportRequest{
+			Folder: in.Body.Folder, TypeID: in.Body.TypeID, PlaylistIDs: in.Body.PlaylistIDs, ArtistID: in.Body.ArtistID,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -117,4 +158,8 @@ func registerIngest(api huma.API, log *slog.Logger, svc Ingest) {
 		}
 		return &operationAcceptedOutput{Body: dto.OperationAccepted{OperationID: id}}, nil
 	})
+}
+
+func importCounts(c ingest.Counts) dto.ImportCounts {
+	return dto.ImportCounts{AudioFiles: c.AudioFiles, NewFiles: c.NewFiles}
 }

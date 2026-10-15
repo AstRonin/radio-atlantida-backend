@@ -1,7 +1,9 @@
 // Package ingest brings audio files into the library and keeps them at the
-// broadcast standard (docs/phase-11-plan.md): the import of the inbox
-// folder, the quality analysis of track files, and the transcodes that fix
-// what the analysis found ("Fix loudness", "Optimize track").
+// broadcast standard (docs/phase-11-plan.md): the import of a folder of the
+// media root, which registers its files where they lie
+// (docs/phase-18-plan.md), the quality analysis of track files, and the
+// transcodes that fix what the analysis found ("Fix loudness", "Optimize
+// track").
 //
 // The three run as asynchronous operations (§6.5) one at a time, on the
 // worker goroutine of the service (Run): they touch the same files, and
@@ -48,9 +50,16 @@ type Track struct {
 	AnalyzedAt *time.Time
 }
 
+// TrackFile is a track and the path of its file.
+type TrackFile struct {
+	ID       uint64
+	FilePath string
+}
+
 // NewTrack is a track created by an import.
 type NewTrack struct {
-	Title    string
+	Title string
+	// ArtistID is nil for a track without an artist.
 	ArtistID *uint64
 	TypeID   uint64
 	// PlaylistIDs are the playlists of the import request.
@@ -75,8 +84,13 @@ type Store interface {
 	TypeExists(ctx context.Context, id uint64) (bool, error)
 	// MissingPlaylists returns the IDs of ids that are not playlists.
 	MissingPlaylists(ctx context.Context, ids []uint64) ([]uint64, error)
+	// ArtistExists reports whether the artist exists.
+	ArtistExists(ctx context.Context, id uint64) (bool, error)
 	// TrackByChecksum returns a track whose file has the checksum.
-	TrackByChecksum(ctx context.Context, sum string) (id uint64, ok bool, err error)
+	TrackByChecksum(ctx context.Context, sum string) (t TrackFile, ok bool, err error)
+	// TrackPaths maps the file path of every track under folder ("" for
+	// every track) to the track.
+	TrackPaths(ctx context.Context, folder string) (map[string]uint64, error)
 	// TrackByPath returns the track of the file path.
 	TrackByPath(ctx context.Context, path string) (id uint64, ok bool, err error)
 	// EnsureArtist returns the artist with the name, ignoring case, and
@@ -108,9 +122,9 @@ type TxRunner interface {
 // Files are the files under MEDIA_ROOT (*media.Library).
 type Files interface {
 	Walk(ctx context.Context, dir string, limit int) ([]media.File, bool, error)
+	Tree(ctx context.Context, dir string, limit int) (media.Tree, error)
+	IsDir(rel string) (bool, error)
 	Checksum(ctx context.Context, rel string) (string, error)
-	FreeName(rel string) (string, error)
-	Move(src, dst string) error
 	Commit(tmp, dst string) error
 	Remove(rel string) error
 }
@@ -138,10 +152,7 @@ type Operations interface {
 
 // Settings are the settings of the service, read when an operation starts.
 type Settings struct {
-	// InboxDir and LibraryDir are folders relative to the media root.
-	InboxDir   string
-	LibraryDir string
-	Standard   Standard
+	Standard Standard
 	// BusyAhead: a track planned to start within this time is busy, so
 	// its file is not replaced under the pusher (decision 8).
 	BusyAhead time.Duration

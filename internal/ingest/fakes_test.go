@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -27,15 +26,25 @@ import (
 
 var testNow = time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC)
 
-// fakeFiles is a media root in memory: path → content.
+// fakeFiles is a media root in memory: path → content. A folder exists
+// when a file is in it or it is in dirs.
 type fakeFiles struct {
 	mu      sync.Mutex
 	files   map[string]string
-	failOps map[string]error // "move:<src>", "commit:<dst>"
+	dirs    map[string]bool
+	failOps map[string]error // "commit:<dst>"
+	reads   int              // Checksum calls
 }
 
 func newFakeFiles() *fakeFiles {
-	return &fakeFiles{files: map[string]string{}, failOps: map[string]error{}}
+	return &fakeFiles{files: map[string]string{}, dirs: map[string]bool{}, failOps: map[string]error{}}
+}
+
+// mkdir adds an empty folder.
+func (f *fakeFiles) mkdir(p string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dirs[p] = true
 }
 
 func (f *fakeFiles) put(p, content string) {
@@ -57,10 +66,18 @@ func (f *fakeFiles) paths() []string {
 	return slices.Sorted(maps.Keys(f.files))
 }
 
+// under reports whether p is below dir ("" for the root) and not hidden.
+func under(p, dir string) bool {
+	if dir != "" && !strings.HasPrefix(p, dir+"/") {
+		return false
+	}
+	return !strings.HasPrefix(p, ".") && !strings.Contains(p, "/.")
+}
+
 func (f *fakeFiles) Walk(_ context.Context, dir string, limit int) ([]media.File, bool, error) {
 	var out []media.File
 	for _, p := range f.paths() {
-		if !strings.HasPrefix(p, dir+"/") || strings.HasPrefix(path.Base(p), ".") {
+		if !under(p, dir) {
 			continue
 		}
 		if len(out) == limit {
@@ -72,42 +89,54 @@ func (f *fakeFiles) Walk(_ context.Context, dir string, limit int) ([]media.File
 	return out, false, nil
 }
 
+func (f *fakeFiles) Tree(ctx context.Context, dir string, limit int) (media.Tree, error) {
+	files, more, err := f.Walk(ctx, dir, limit)
+	if err != nil {
+		return media.Tree{}, err
+	}
+	if more {
+		return media.Tree{}, media.ErrTooManyFiles
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	folders := map[string]bool{}
+	for p := range f.dirs {
+		if under(p, dir) {
+			folders[p] = true
+		}
+	}
+	for _, file := range files {
+		for d := path.Dir(file.Path); d != "." && d != dir; d = path.Dir(d) {
+			folders[d] = true
+		}
+	}
+	return media.Tree{Folders: slices.Sorted(maps.Keys(folders)), Files: files}, nil
+}
+
+func (f *fakeFiles) IsDir(rel string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dirs[rel] {
+		return true, nil
+	}
+	for p := range f.files {
+		if strings.HasPrefix(p, rel+"/") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeFiles) Checksum(_ context.Context, rel string) (string, error) {
+	f.mu.Lock()
+	f.reads++
+	f.mu.Unlock()
 	c, ok := f.get(rel)
 	if !ok {
 		return "", media.ErrFileNotFound
 	}
 	sum := sha256.Sum256([]byte(c))
 	return hex.EncodeToString(sum[:]), nil
-}
-
-func (f *fakeFiles) FreeName(rel string) (string, error) {
-	ext := path.Ext(rel)
-	candidate := rel
-	for n := 2; ; n++ {
-		if _, ok := f.get(candidate); !ok {
-			return candidate, nil
-		}
-		candidate = fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(rel, ext), n, ext)
-	}
-}
-
-func (f *fakeFiles) Move(src, dst string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.failOps["move:"+src]; err != nil {
-		return err
-	}
-	if _, ok := f.files[dst]; ok {
-		return media.ErrExists
-	}
-	c, ok := f.files[src]
-	if !ok {
-		return media.ErrFileNotFound
-	}
-	delete(f.files, src)
-	f.files[dst] = c
-	return nil
 }
 
 func (f *fakeFiles) Commit(tmp, dst string) error {
@@ -287,15 +316,34 @@ func (s *fakeStore) MissingPlaylists(_ context.Context, ids []uint64) ([]uint64,
 	return out, nil
 }
 
-func (s *fakeStore) TrackByChecksum(_ context.Context, sum string) (uint64, bool, error) {
+func (s *fakeStore) ArtistExists(_ context.Context, id uint64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.artists[id]
+	return ok, nil
+}
+
+func (s *fakeStore) TrackByChecksum(_ context.Context, sum string) (TrackFile, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, id := range slices.Sorted(maps.Keys(s.tracks)) {
 		if c := s.tracks[id].Checksum; c != nil && *c == sum {
-			return id, true, nil
+			return TrackFile{ID: id, FilePath: s.tracks[id].FilePath}, true, nil
 		}
 	}
-	return 0, false, nil
+	return TrackFile{}, false, nil
+}
+
+func (s *fakeStore) TrackPaths(_ context.Context, folder string) (map[string]uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]uint64{}
+	for id, t := range s.tracks {
+		if folder == "" || strings.HasPrefix(t.FilePath, folder+"/") {
+			out[t.FilePath] = id
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeStore) TrackByPath(_ context.Context, p string) (uint64, bool, error) {
@@ -475,7 +523,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{files: newFakeFiles(), store: newFakeStore(), ops: newFakeOps()}
 	f.tools = newFakeTools(f.files)
-	f.set = Settings{InboxDir: "incoming", LibraryDir: "library", Standard: testStandard(), BusyAhead: 10 * time.Minute}
+	f.set = Settings{Standard: testStandard(), BusyAhead: 10 * time.Minute}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	f.svc = NewService(fakeTx{}, f.store, f.files, f.tools, f.tools, f.ops,
 		func(context.Context) (Settings, error) { return f.set, nil }, log, func() time.Time { return testNow })

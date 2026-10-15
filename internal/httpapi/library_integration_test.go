@@ -156,7 +156,7 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	ingestSvc := ingest.NewService(d, ingestrepo.New(d.Pool), lib, prober, ff, tracker,
 		func(context.Context) (ingest.Settings, error) {
 			return ingest.Settings{ // setting defaults
-				InboxDir: "incoming", LibraryDir: "library", BusyAhead: 10 * time.Minute,
+				BusyAhead: 10 * time.Minute,
 				Standard: ingest.Standard{
 					Format: media.FormatMP3, Codec: "mp3", BitrateKbps: 320, SampleRate: 44100, Channels: 2,
 					MinBitrateKbps: 128, LoudnessLUFS: -16, LoudnessToleranceLU: 2, MaxTruePeakDBTP: -1,

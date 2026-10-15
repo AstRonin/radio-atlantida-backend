@@ -36,15 +36,34 @@ func (a *libraryAPI) trackByTitle(title string) dto.Track {
 	return page.Items[0]
 }
 
-func TestImportInbox(t *testing.T) {
+// folderCounts returns the counts of the folders by path.
+func (a *libraryAPI) folderCounts() (dto.ImportCounts, map[string]dto.ImportCounts) {
+	a.t.Helper()
+	var fs dto.ImportFolders
+	a.ok(http.StatusOK, http.MethodGet, "/api/import/folders", nil, &fs)
+	out := map[string]dto.ImportCounts{}
+	for _, f := range fs.Folders {
+		out[f.Path] = f.ImportCounts
+	}
+	return fs.Root, out
+}
+
+func TestImportFolder(t *testing.T) {
 	t.Parallel()
 	a := newLibraryAPI(t)
-	music := a.typeID("music")
+	music, jingle := a.typeID("music"), a.typeID("jingle")
 
-	var inbox dto.Inbox
-	a.ok(http.StatusOK, http.MethodGet, "/api/import/inbox", nil, &inbox)
-	require.Equal(t, "incoming", inbox.Dir)
-	require.Empty(t, inbox.Items, "no inbox folder yet")
+	root, folders := a.folderCounts()
+	require.Equal(t, dto.ImportCounts{}, root, "an empty media root")
+	require.Empty(t, folders)
+	a.fieldError("folder", errcodes.Invalid, http.MethodGet, "/api/import/files?folder=missing", nil)
+	a.fieldError("folder", errcodes.Invalid, http.MethodGet, "/api/import/files?folder=..%2Fetc", nil)
+	a.problem(http.StatusNotFound, errcodes.NotFound, http.MethodGet, "/api/import/inbox", nil)
+	var settingsList dto.SettingList
+	a.ok(http.StatusOK, http.MethodGet, "/api/settings", nil, &settingsList)
+	for _, s := range settingsList.Items {
+		require.NotContains(t, []string{"import.inbox_dir", "import.library_dir"}, s.Key)
+	}
 
 	if !a.tools {
 		t.Log("ffmpeg not installed: only the refusals are checked")
@@ -53,30 +72,71 @@ func TestImportInbox(t *testing.T) {
 		return
 	}
 
+	// Three songs and two jingles, each with its own content. A mono,
+	// 22 kHz, 64 kbps, quiet MP3 with tags, and stereo 44.1 kHz 320 kbps
+	// ones at about the target loudness (the lavfi sine is at -18 dBFS, and
+	// the upmix to stereo takes 3 dB: +5.8 dB gives about -16 LUFS).
+	good := []string{"-ac", "2", "-ar", "44100", "-b:a", "320k", "-af", "volume=5.8dB"}
+	a.tone("music/talk/low.mp3", "-ac", "1", "-ar", "22050", "-b:a", "64k", "-af", "volume=-20dB",
+		"-metadata", "title=Low Tone", "-metadata", "artist=Test Artist")
+	a.tone("music/Morning - DJ Ann.mp3", append(good, "-metadata", "comment=1")...)
+	a.tone("music/Jay-Z - Song.mp3", append(good, "-metadata", "comment=2")...)
+	a.tone("jingles/id1.mp3", append(good, "-metadata", "comment=3")...)
+	a.tone("jingles/id2.mp3", append(good, "-metadata", "comment=4")...)
+	require.NoError(t, os.WriteFile(filepath.Join(a.mediaRoot, "music", "readme.txt"), []byte("x"), 0o600))
+
+	root, folders = a.folderCounts()
+	require.Equal(t, dto.ImportCounts{AudioFiles: 5, NewFiles: 5}, root)
+	require.Equal(t, map[string]dto.ImportCounts{
+		"jingles":    {AudioFiles: 2, NewFiles: 2},
+		"music":      {AudioFiles: 3, NewFiles: 3},
+		"music/talk": {AudioFiles: 1, NewFiles: 1},
+	}, folders)
+
+	a.fieldError("folder", errcodes.Invalid, http.MethodPost, "/api/import", map[string]any{"folder": "missing", "type_id": jingle})
 	a.fieldError("type_id", errcodes.UnknownID, http.MethodPost, "/api/import", map[string]any{"type_id": 999999})
 	a.fieldError("playlist_ids", errcodes.UnknownID, http.MethodPost, "/api/import", map[string]any{"type_id": music, "playlist_ids": []uint64{999999}})
+	a.fieldError("artist_id", errcodes.UnknownID, http.MethodPost, "/api/import", map[string]any{"type_id": music, "artist_id": 999999})
 
-	// A mono, 22 kHz, 64 kbps, quiet MP3 with tags, and a stereo 44.1 kHz
-	// 320 kbps one at about the target loudness (the lavfi sine is at
-	// -18 dBFS, and the upmix to stereo takes 3 dB: +5.8 dB gives about
-	// -16 LUFS).
-	a.tone("incoming/talk/low.mp3", "-ac", "1", "-ar", "22050", "-b:a", "64k", "-af", "volume=-20dB",
-		"-metadata", "title=Low Tone", "-metadata", "artist=Test Artist")
-	a.tone("incoming/good.mp3", "-ac", "2", "-ar", "44100", "-b:a", "320k", "-af", "volume=5.8dB")
-	require.NoError(t, os.WriteFile(filepath.Join(a.mediaRoot, "incoming", "readme.txt"), []byte("x"), 0o600))
-	a.ok(http.StatusOK, http.MethodGet, "/api/import/inbox", nil, &inbox)
-	require.Len(t, inbox.Items, 3)
-
+	// The jingles where they lie.
 	var accepted dto.OperationAccepted
-	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"type_id": music}, &accepted)
+	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"folder": "jingles", "type_id": jingle}, &accepted)
 	op := a.waitOperation(&accepted.OperationID)
-	require.Equal(t, "imported 2, skipped 1", op.ResultSummary)
+	require.Equal(t, "folder jingles: imported 2", op.ResultSummary)
+	id1 := a.trackByTitle("id1")
+	require.Equal(t, "jingles/id1.mp3", id1.FilePath)
+	require.Equal(t, jingle, id1.Type.ID)
+	_, err := os.Stat(filepath.Join(a.mediaRoot, "jingles", "id1.mp3"))
+	require.NoError(t, err, "the file has not moved")
+	_, folders = a.folderCounts()
+	require.Equal(t, dto.ImportCounts{AudioFiles: 2, NewFiles: 0}, folders["jingles"])
 
-	a.ok(http.StatusOK, http.MethodGet, "/api/import/inbox", nil, &inbox)
-	require.Len(t, inbox.Items, 1, "only the text file stays")
+	var files dto.ImportFiles
+	a.ok(http.StatusOK, http.MethodGet, "/api/import/files?folder=jingles", nil, &files)
+	require.Equal(t, "jingles", files.Folder)
+	require.Len(t, files.Items, 2)
+	require.Equal(t, "in_library", files.Items[0].Status)
+	require.Equal(t, id1.ID, *files.Items[0].TrackID)
+
+	// A third jingle: the next import adds exactly that one.
+	a.tone("jingles/id3.mp3", append(good, "-metadata", "comment=5")...)
+	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"folder": "jingles", "type_id": jingle}, &accepted)
+	op = a.waitOperation(&accepted.OperationID)
+	require.Equal(t, "folder jingles: imported 1, in_library 2", op.ResultSummary)
+
+	// The music: title and artist from the file name when there are no
+	// tags.
+	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"folder": "music", "type_id": music}, &accepted)
+	op = a.waitOperation(&accepted.OperationID)
+	require.Equal(t, "folder music: imported 3, skipped 1", op.ResultSummary)
+	morning := a.trackByTitle("Morning")
+	require.Equal(t, "music/Morning - DJ Ann.mp3", morning.FilePath)
+	require.Equal(t, "DJ Ann", morning.Artist.Name)
+	jay := a.trackByTitle("Jay-Z - Song")
+	require.Nil(t, jay.Artist)
 
 	low := a.trackByTitle("Low Tone")
-	require.Equal(t, "library/talk/low.mp3", low.FilePath)
+	require.Equal(t, "music/talk/low.mp3", low.FilePath)
 	require.Equal(t, "Test Artist", low.Artist.Name)
 	require.Equal(t, 1, *low.Channels)
 	require.Equal(t, "mp3", *low.Codec)
@@ -90,11 +150,19 @@ func TestImportInbox(t *testing.T) {
 	a.ok(http.StatusOK, http.MethodGet, "/api/tracks?quality=issues", nil, &page)
 	require.Len(t, page.Items, 1)
 
-	// The same file again is a duplicate and stays in the inbox.
-	a.tone("incoming/again.mp3", "-ac", "2", "-ar", "44100", "-b:a", "320k", "-af", "volume=5.8dB")
-	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"type_id": music}, &accepted)
+	// With artist_id, every new track of the run gets that artist; a copy
+	// of a track's file is a duplicate and stays where it is.
+	var band dto.Artist
+	a.ok(http.StatusCreated, http.MethodPost, "/api/artists", map[string]any{"name": "House Band"}, &band)
+	a.tone("promos/Spot - Somebody.mp3", append(good, "-metadata", "comment=6")...)
+	a.tone("promos/again.mp3", append(good, "-metadata", "comment=1")...)
+	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"type_id": music, "artist_id": band.ID}, &accepted)
 	op = a.waitOperation(&accepted.OperationID)
-	require.Equal(t, "duplicates 1, skipped 1", op.ResultSummary)
+	require.Equal(t, "whole media folder: imported 1, in_library 6, duplicates 1, skipped 1", op.ResultSummary)
+	spot := a.trackByTitle("Spot")
+	require.Equal(t, "House Band", spot.Artist.Name)
+	_, err = os.Stat(filepath.Join(a.mediaRoot, "promos", "again.mp3"))
+	require.NoError(t, err)
 
 	// Optimize the low track into a copy: everything but the bitrate of
 	// its source is fixed.
@@ -104,7 +172,7 @@ func TestImportInbox(t *testing.T) {
 	require.Equal(t, "transcoded 1", op.ResultSummary)
 	var fixed dto.Track
 	a.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/tracks/%d", low.ID), nil, &fixed)
-	require.Equal(t, "library/talk/low.optimal.mp3", fixed.FilePath)
+	require.Equal(t, "music/talk/low.optimal.mp3", fixed.FilePath)
 	require.Equal(t, 2, *fixed.Channels)
 	require.Equal(t, 44100, *fixed.SampleRate)
 	require.InDelta(t, -16, *fixed.LoudnessLUFS, 1.5)
@@ -112,8 +180,14 @@ func TestImportInbox(t *testing.T) {
 	require.InDelta(t, 64000, *fixed.SourceBitrate, 2000, "the measured rate of the 64 kbps source")
 	require.Equal(t, []string{"low_bitrate"}, fixed.QualityIssues)
 	require.Empty(t, fixed.Fixes)
-	_, err := os.Stat(filepath.Join(a.mediaRoot, "library", "talk", "low.mp3"))
+	_, err = os.Stat(filepath.Join(a.mediaRoot, "music", "talk", "low.mp3"))
 	require.NoError(t, err, "the original stays next to the copy")
+	a.ok(http.StatusOK, http.MethodGet, "/api/import/files?folder=music/talk", nil, &files)
+	require.Len(t, files.Items, 2)
+	require.Equal(t, "original", files.Items[0].Status, "the original is not new")
+	require.Equal(t, low.ID, *files.Items[0].TrackID)
+	_, folders = a.folderCounts()
+	require.Equal(t, dto.ImportCounts{AudioFiles: 2, NewFiles: 0}, folders["music/talk"])
 
 	// The fix covers nothing now.
 	a.ok(http.StatusAccepted, http.MethodPost, "/api/tracks/transcode",
@@ -122,13 +196,13 @@ func TestImportInbox(t *testing.T) {
 	require.Equal(t, "nothing to fix 1", op.ResultSummary)
 
 	// A deleted file is found by the analysis.
-	require.NoError(t, os.Remove(filepath.Join(a.mediaRoot, "library", "good.mp3")))
-	good := a.trackByTitle("good")
-	a.ok(http.StatusAccepted, http.MethodPost, "/api/tracks/analyse", map[string]any{"track_ids": []uint64{good.ID, low.ID}}, &accepted)
+	require.NoError(t, os.Remove(filepath.Join(a.mediaRoot, "jingles", "id1.mp3")))
+	a.ok(http.StatusAccepted, http.MethodPost, "/api/tracks/analyse", map[string]any{"track_ids": []uint64{id1.ID, low.ID}}, &accepted)
 	op = a.waitOperation(&accepted.OperationID)
 	require.Equal(t, "rechecked 1, file missing 1", op.ResultSummary)
-	a.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/tracks/%d", good.ID), nil, &good)
-	require.Equal(t, []string{"file_missing"}, good.QualityIssues)
+	a.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/tracks/%d", id1.ID), nil, &id1)
+	require.Equal(t, []string{"file_missing"}, id1.QualityIssues)
+	require.Equal(t, "jingles/id1.mp3", id1.FilePath, "nothing else changes")
 
 	a.fieldError("track_ids", errcodes.UnknownID, http.MethodPost, "/api/tracks/transcode",
 		map[string]any{"track_ids": []uint64{999999}, "fix": "optimize", "output": "copy"})

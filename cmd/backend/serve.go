@@ -570,18 +570,11 @@ func outageSettings(svc *settings.Service) outage.SettingsFunc {
 }
 
 // ingestSettings reads the import settings when an operation starts
-// (docs/phase-11-plan.md §2, decision 11). The loudness target is the
+// (docs/phase-11-plan.md §2, decision 11; the folders of decision 11 are
+// gone with docs/phase-18-plan.md). The loudness target is the
 // station's one, stream.loudness_target_lufs.
 func ingestSettings(svc *settings.Service) ingest.SettingsFunc {
 	return func(ctx context.Context) (ingest.Settings, error) {
-		inbox, err := settings.Value(ctx, svc, settings.ImportInboxDir)
-		if err != nil {
-			return ingest.Settings{}, err
-		}
-		lib, err := settings.Value(ctx, svc, settings.ImportLibraryDir)
-		if err != nil {
-			return ingest.Settings{}, err
-		}
 		codec, err := settings.Value(ctx, svc, settings.ImportTargetCodec)
 		if err != nil {
 			return ingest.Settings{}, err
@@ -619,7 +612,6 @@ func ingestSettings(svc *settings.Service) ingest.SettingsFunc {
 			return ingest.Settings{}, err
 		}
 		return ingest.Settings{
-			InboxDir: inbox, LibraryDir: lib,
 			Standard: ingest.Standard{
 				Format: ingest.StandardFormat(codec), Codec: codec, BitrateKbps: bitrate, SampleRate: rate, Channels: channels,
 				MinBitrateKbps: minBitrate, LoudnessLUFS: loudness, LoudnessToleranceLU: tolerance, MaxTruePeakDBTP: peak,

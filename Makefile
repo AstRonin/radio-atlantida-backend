@@ -9,7 +9,7 @@ VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || ech
 IMAGE         ?= radio-atlantida-backend:dev
 
 .PHONY: help run build test test-integration lint fmt vuln migrate openapi openapi-lint \
-        image db-up db-down stack-up stack-down stack-logs media inbox live-check env \
+        image db-up db-down stack-up stack-down stack-logs media import-samples live-check env \
         monitoring-up monitoring-down monitoring-reset
 
 help: ## Show this help
@@ -87,8 +87,8 @@ monitoring-reset: ## Remove Grafana's, Loki's, and Alloy's volumes (new admin pa
 media: ## Generate test MP3 files into .dev/media
 	dev/scripts/gen-media.sh ./.dev/media
 
-inbox: ## Generate inbox files with known quality issues into .dev/media/incoming
-	dev/scripts/gen-inbox.sh ./.dev/media
+import-samples: ## Generate files with known quality issues into .dev/media/import-samples
+	dev/scripts/gen-import-samples.sh ./.dev/media
 
 live-check: ## Go live through a running backend with a test tone (WebRTC, no browser)
 	dev/scripts/gen-live.sh ./.dev/live-check.ogg

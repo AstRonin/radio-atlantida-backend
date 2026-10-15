@@ -89,14 +89,14 @@ func TestCreateAndRead(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	got, ok, err := f.store.TrackByChecksum(ctx, "sum-1")
+	byChecksum, ok, err := f.store.TrackByChecksum(ctx, "sum-1")
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, id, got)
+	require.Equal(t, ingest.TrackFile{ID: id, FilePath: "library/song.mp3"}, byChecksum)
 	_, ok, err = f.store.TrackByChecksum(ctx, "sum-2")
 	require.NoError(t, err)
 	require.False(t, ok)
-	got, ok, err = f.store.TrackByPath(ctx, "library/song.mp3")
+	got, ok, err := f.store.TrackByPath(ctx, "library/song.mp3")
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, id, got)
@@ -127,6 +127,43 @@ FROM tracks WHERE id = $1`, id).Scan(&qualityOK, &playlists))
 		return cerr
 	})
 	require.ErrorIs(t, err, library.ErrUnknownPlaylist)
+}
+
+func TestArtistExists(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ok, err := f.store.ArtistExists(t.Context(), f.artist)
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = f.store.ArtistExists(t.Context(), 999999)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+func TestTrackPaths(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	ids := map[string]uint64{}
+	for _, p := range []string{
+		"music/a.mp3", "music/rock/b.optimal.mp3", "music-old/c.mp3", "music0/d.mp3", "musicx.mp3", "jingles/id.mp3", "top.mp3",
+	} {
+		ids[p] = f.id(`INSERT INTO tracks (title, file_path, type_id) VALUES ($1, $1, $2) RETURNING id`, p, f.music)
+	}
+
+	got, err := f.store.TrackPaths(ctx, "music")
+	require.NoError(t, err)
+	require.Equal(t, map[string]uint64{"music/a.mp3": ids["music/a.mp3"], "music/rock/b.optimal.mp3": ids["music/rock/b.optimal.mp3"]}, got,
+		"only below music/, not music-old, music0, or musicx.mp3")
+	got, err = f.store.TrackPaths(ctx, "music/rock")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	got, err = f.store.TrackPaths(ctx, "")
+	require.NoError(t, err)
+	require.Equal(t, ids, got)
+	got, err = f.store.TrackPaths(ctx, "missing")
+	require.NoError(t, err)
+	require.Empty(t, got)
 }
 
 func TestEnsureArtist(t *testing.T) {

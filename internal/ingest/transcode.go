@@ -246,7 +246,7 @@ func encodingFor(fix library.Fix, m Measurements, std Standard) (media.Encoding,
 
 // targetPaths returns where the fixed file of src goes, and the temporary
 // name it is written under first: hidden, in the same folder, so a rename
-// puts it in place and the inbox walk skips it.
+// puts it in place and an import skips it.
 func targetPaths(src, ext string, mode OutputMode, trackID uint64) (final, tmp string) {
 	dir, base := path.Split(src)
 	stem := strings.TrimSuffix(base, path.Ext(base))

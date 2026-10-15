@@ -131,8 +131,8 @@ services:
       - "127.0.0.1:8090:8090"
       - "127.0.0.1:8189:8189/udp"
     volumes:
-      # Read-write: an import moves files from the inbox into the library
-      # folder, and a transcode writes fixed files (docs/phase-11-plan.md).
+      # Read-write: a transcode writes fixed files (docs/phase-11-plan.md);
+      # an import only reads (docs/phase-18-plan.md).
       - ${MEDIA_ROOT:?set in .env}:/media
       - ${LOG_ROOT:?set in .env}:/logs
       # Playout journal, read for reconciliation (§7.1).

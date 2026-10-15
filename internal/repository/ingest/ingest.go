@@ -1,6 +1,6 @@
 // Package ingest is the pgx store of internal/ingest: tracks created by an
-// import, the analysis columns of tracks, and the checks around them
-// (§5.1).
+// import, the track paths of a folder, the analysis columns of tracks, and
+// the checks around them (§5.1).
 package ingest
 
 import (
@@ -55,27 +55,92 @@ ORDER BY u.id`, ids)
 	return missing, nil
 }
 
+// ArtistExists reports whether the artist exists.
+func (s *Store) ArtistExists(ctx context.Context, id uint64) (bool, error) {
+	var ok bool
+	if err := s.q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM artists WHERE id = $1)`, id).Scan(&ok); err != nil {
+		return false, fmt.Errorf("select artist %d: %w", id, err)
+	}
+	return ok, nil
+}
+
 // TrackByChecksum returns a track whose file has the checksum
 // (ix_tracks_file_checksum).
-func (s *Store) TrackByChecksum(ctx context.Context, sum string) (uint64, bool, error) {
-	return s.trackBy(ctx, `SELECT id FROM tracks WHERE file_checksum = $1 ORDER BY id LIMIT 1`, sum)
+func (s *Store) TrackByChecksum(ctx context.Context, sum string) (ingest.TrackFile, bool, error) {
+	var t ingest.TrackFile
+	err := s.q.QueryRow(ctx, `SELECT id, file_path FROM tracks WHERE file_checksum = $1 ORDER BY id LIMIT 1`, sum).
+		Scan(&t.ID, &t.FilePath)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ingest.TrackFile{}, false, nil
+	case err != nil:
+		return ingest.TrackFile{}, false, fmt.Errorf("select track by checksum: %w", err)
+	}
+	return t, true, nil
 }
 
 // TrackByPath returns the track of the file path (uq_tracks_file_path).
 func (s *Store) TrackByPath(ctx context.Context, path string) (uint64, bool, error) {
-	return s.trackBy(ctx, `SELECT id FROM tracks WHERE file_path = $1`, path)
-}
-
-func (s *Store) trackBy(ctx context.Context, sql, arg string) (uint64, bool, error) {
 	var id uint64
-	err := s.q.QueryRow(ctx, sql, arg).Scan(&id)
+	err := s.q.QueryRow(ctx, `SELECT id FROM tracks WHERE file_path = $1`, path).Scan(&id)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return 0, false, nil
 	case err != nil:
-		return 0, false, fmt.Errorf("select track: %w", err)
+		return 0, false, fmt.Errorf("select track by path: %w", err)
 	}
 	return id, true, nil
+}
+
+// trackPathsUnderSQL selects the tracks under a folder: the paths from
+// "<folder>/" up to "<folder>0" ('0' is the byte after '/'), compared
+// bytewise by the pattern operators, so ix_tracks_file_path serves it with
+// the bounds as parameters (a generic plan included).
+const trackPathsUnderSQL = `SELECT file_path, id FROM tracks WHERE file_path ~>=~ $1 AND file_path ~<~ $2`
+
+type pathRow struct {
+	FilePath string `db:"file_path"`
+	ID       uint64 `db:"id"`
+}
+
+// TrackPaths maps the file path of every track under folder ("" for every
+// track) to the track. The import compares a folder's files with it by
+// path, the originals of .optimal copies included, without reading a file.
+//
+// EXPLAIN ANALYZE (PostgreSQL 17.11, TestTrackPathsUsesTheIndex: 3,000
+// tracks in 30 folders, folder f07):
+//
+//	Bitmap Heap Scan on tracks (actual rows=100 loops=1)
+//	  Recheck Cond: ((file_path ~>=~ 'f07/'::text) AND (file_path ~<~ 'f070'::text))
+//	  Heap Blocks: exact=39
+//	  ->  Bitmap Index Scan on ix_tracks_file_path (actual rows=100 loops=1)
+//	        Index Cond: ((file_path ~>=~ 'f07/'::text) AND (file_path ~<~ 'f070'::text))
+//	Planning Time: 0.145 ms
+//	Execution Time: 0.070 ms
+//
+// The root ("") reads every track: the folder counts need all of them.
+func (s *Store) TrackPaths(ctx context.Context, folder string) (map[string]uint64, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if folder == "" {
+		rows, err = s.q.Query(ctx, `SELECT file_path, id FROM tracks`)
+	} else {
+		rows, err = s.q.Query(ctx, trackPathsUnderSQL, folder+"/", folder+"0")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select track paths: %w", err)
+	}
+	ps, err := pgx.CollectRows(rows, pgx.RowToStructByName[pathRow])
+	if err != nil {
+		return nil, fmt.Errorf("scan track paths: %w", err)
+	}
+	out := make(map[string]uint64, len(ps))
+	for _, r := range ps {
+		out[r.FilePath] = r.ID
+	}
+	return out, nil
 }
 
 // EnsureArtist returns the artist with the name, ignoring case, and creates

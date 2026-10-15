@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Generates inbox files for the import (docs/phase-11-plan.md): one that
-# meets the broadcast standard and one per kind of quality issue.
+# Generates sample files for the import (docs/phase-11-plan.md,
+# docs/phase-18-plan.md) into the folder import-samples of the media root:
+# one that meets the broadcast standard and one per kind of quality issue.
+# Import them by choosing that folder.
 #
 # ffmpeg runs from a container, so no local install is needed.
-# Usage: dev/scripts/gen-inbox.sh [media-root]   (default: ./.dev/media)
+# Usage: dev/scripts/gen-import-samples.sh [media-root]   (default: ./.dev/media)
 set -euo pipefail
 
 FFMPEG_IMAGE="linuxserver/ffmpeg:9.0-cli-ls84"
 ROOT="${1:-./.dev/media}"
 
-mkdir -p "$ROOT/incoming"
-OUT_DIR="$(cd "$ROOT/incoming" && pwd)"
+mkdir -p "$ROOT/import-samples"
+OUT_DIR="$(cd "$ROOT/import-samples" && pwd)"
 
 # The lavfi sine is at -18 dBFS; mono to stereo takes 3 dB more, so +5.8 dB
 # gives about -16 LUFS in stereo.
@@ -27,7 +29,7 @@ FILES=(
 for entry in "${FILES[@]}"; do
   IFS='|' read -r file opts <<<"$entry"
   if [[ -f "$OUT_DIR/$file" ]]; then
-    echo "skip   incoming/$file (exists)"
+    echo "skip   import-samples/$file (exists)"
     continue
   fi
   # $opts is split into words on purpose.
@@ -35,7 +37,7 @@ for entry in "${FILES[@]}"; do
   docker run --rm --user "$(id -u):$(id -g)" -v "$OUT_DIR:/out" "$FFMPEG_IMAGE" \
     -hide_banner -loglevel error \
     -f lavfi -i "sine=frequency=523:duration=20:sample_rate=48000" \
-    $opts -metadata title="${file%.*}" -metadata artist="Inbox Test" \
+    $opts -metadata title="${file%.*}" -metadata artist="Import Test" \
     "/out/$file"
-  echo "create incoming/$file"
+  echo "create import-samples/$file"
 done

@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"math"
 	"net"
-	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -148,8 +146,6 @@ var (
 	AirPlayedCount = Key[int]{"air.played_count"}
 	AirQueuedCount = Key[int]{"air.queued_count"}
 
-	ImportInboxDir            = Key[string]{"import.inbox_dir"}
-	ImportLibraryDir          = Key[string]{"import.library_dir"}
 	ImportMinBitrateKbps      = Key[int]{"import.min_bitrate_kbps"}
 	ImportTargetCodec         = Key[string]{"import.target_codec"}
 	ImportTargetBitrateKbps   = Key[int]{"import.target_bitrate_kbps"}
@@ -273,10 +269,12 @@ func NewRegistry() *Registry {
 	r.add(intDef(AirQueuedCount, "Queued items shown in the air window: the next planned items after the one on air.", "", 9, 0, 50),
 		ApplyImmediate, false)
 
-	// Import and the broadcast standard of track files (docs/phase-11-plan.md
-	// §2). The loudness target is stream.loudness_target_lufs.
-	r.add(stringDef(ImportInboxDir, "Folder under the media root that an import scans for new files.", "incoming", 1, 255, validFolder), ApplyImmediate, false)
-	r.add(stringDef(ImportLibraryDir, "Folder under the media root that imported files are moved to.", "library", 1, 255, validFolder), ApplyImmediate, false)
+	// The broadcast standard of track files (docs/phase-11-plan.md §2). The
+	// loudness target is stream.loudness_target_lufs. The import has no
+	// folder settings: it registers files where they lie
+	// (docs/phase-18-plan.md); a saved value of the removed
+	// import.inbox_dir or import.library_dir is ignored, as every key that
+	// is not in the registry.
 	r.add(intDef(ImportMinBitrateKbps, "Lossy files below this bitrate get the low_bitrate issue.", "kbps", 128, 32, 320), ApplyImmediate, false)
 	r.add(enumStringDef(ImportTargetCodec, "Codec of the broadcast standard (Optimize track).", "mp3", "mp3", "aac", "vorbis"), ApplyImmediate, false)
 	r.add(enumIntDef(ImportTargetBitrateKbps, "Bitrate of the broadcast standard.", "kbps", 320, 128, 160, 192, 256, 320), ApplyImmediate, false)
@@ -612,18 +610,6 @@ func validMediaRoot(s string) error {
 	}
 	return nil
 }
-
-// validFolder accepts a clean relative folder path with forward slashes,
-// like the track paths it becomes part of (media.ValidatePath).
-func validFolder(s string) error {
-	if strings.Contains(s, `\`) || strings.HasPrefix(s, "/") || drivePrefix.MatchString(s) ||
-		!fs.ValidPath(s) || s == "." || path.Clean(s) != s {
-		return errors.New(`must be a folder relative to the media root, with forward slashes and no "." or ".." parts`)
-	}
-	return nil
-}
-
-var drivePrefix = regexp.MustCompile(`^[A-Za-z]:`)
 
 var mountPattern = regexp.MustCompile(`^/[A-Za-z0-9._~-]+$`)
 

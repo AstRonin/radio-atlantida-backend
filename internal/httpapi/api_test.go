@@ -303,9 +303,11 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
 		"/api/outages",
 		"/api/live/session", "/api/live/status", "/api/broadcast/status", "/api/air-window",
+		"/api/import", "/api/import/folders", "/api/import/files", "/api/tracks/analyse", "/api/tracks/transcode",
 	} {
 		require.Contains(t, doc.Paths, p)
 	}
+	require.NotContains(t, doc.Paths, "/api/import/inbox", "replaced by the folders (docs/phase-18-plan.md)")
 
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
