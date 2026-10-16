@@ -350,7 +350,7 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 				return out, nil
 			}
 		}
-		out.Body = &dto.TrackWaveform{DurationMS: w.DurationMS, BucketMS: w.BucketMS, Peaks: w.Peaks}
+		out.Body = &dto.TrackWaveform{DurationMS: w.DurationMS, BucketMS: w.BucketMS, Peaks: w.Peaks, MaxPeak: w.MaxPeak()}
 		return out, nil
 	})
 

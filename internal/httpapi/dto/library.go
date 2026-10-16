@@ -157,7 +157,8 @@ type TrackCueResult struct {
 type TrackWaveform struct {
 	DurationMS int    `json:"duration_ms" minimum:"0" doc:"Length of the decoded audio."`
 	BucketMS   int    `json:"bucket_ms" minimum:"1" doc:"Length of one bucket."`
-	Peaks      []int8 `json:"peaks" nullable:"false" doc:"The min and max amplitude of every bucket of a mono mix, -127 to 127, flat: [min0, max0, min1, max1, ...]. The last bucket may be partial."`
+	Peaks      []int8 `json:"peaks" nullable:"false" doc:"The min and max amplitude of every bucket of a mono mix, -127 to 127 (linear; 127 is full scale, 0 dBFS), flat: [min0, max0, min1, max1, ...]. The last bucket may be partial."`
+	MaxPeak    int    `json:"max_peak" minimum:"0" maximum:"127" doc:"The largest absolute value in peaks, so the drawing can be scaled to it (0 for silence). In dBFS: 20 × log10(max_peak / 127)."`
 }
 
 // TrackPage is a page of tracks in the requested order.

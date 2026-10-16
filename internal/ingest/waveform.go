@@ -36,6 +36,24 @@ type Waveform struct {
 	Checksum string
 }
 
+// MaxPeak is the largest absolute amplitude of the waveform, 0 to 127; the
+// panel scales its drawing by it, so a quiet file is as readable as a loud
+// one.
+func (w Waveform) MaxPeak() int {
+	peak := 0
+	for _, p := range w.Peaks {
+		peak = max(peak, abs(int(p)))
+	}
+	return peak
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 // Waveform returns the waveform of a track file: the stored one while its
 // checksum is the track's, else it is computed with ffmpeg and stored. At
 // most waveformDecodes run at a time; a request waits for a slot until ctx

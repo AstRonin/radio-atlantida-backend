@@ -29,6 +29,13 @@ func TestWaveformCachedByChecksum(t *testing.T) {
 	require.Equal(t, 2, f.tools.peaks)
 }
 
+func TestWaveformMaxPeak(t *testing.T) {
+	t.Parallel()
+	require.Zero(t, Waveform{}.MaxPeak())
+	require.Equal(t, 49, Waveform{Peaks: []int8{-3, 10, -49, 20}}.MaxPeak())
+	require.Equal(t, 127, Waveform{Peaks: []int8{-127, 0}}.MaxPeak())
+}
+
 func TestWaveformWithoutChecksumIsNotStored(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

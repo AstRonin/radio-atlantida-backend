@@ -144,6 +144,7 @@ func TestTrackWaveform(t *testing.T) {
 	require.Equal(t, 50, w.BucketMS)
 	require.InDelta(t, 2000, w.DurationMS, 100)
 	require.InDelta(t, 80, len(w.Peaks), 4)
+	require.InDelta(t, 63, w.MaxPeak, 6, "a half-scale tone")
 
 	// The client holds it: 304, from the stored row even with the file gone.
 	require.NoError(t, os.Remove(filepath.Join(a.mediaRoot, "tone.mp3")))
