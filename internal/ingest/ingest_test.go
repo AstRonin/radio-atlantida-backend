@@ -410,6 +410,57 @@ func TestAnalyseUnknownTracks(t *testing.T) {
 	require.Contains(t, verr.Fields[0].Message, "[5 6]")
 }
 
+// A track deleted while the analysis runs is skipped, not failed
+// (docs/phase-19-plan.md decision 8).
+func TestAnalyseTrackDeletedMeanwhile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("library/a.mp3", "A", mp3Info("", ""), loud(-16, -2))
+	f.tools.audio("library/b.mp3", "B", mp3Info("", ""), loud(-16, -2))
+	f.store.add(Track{ID: 1, FilePath: "library/a.mp3"})
+	f.store.add(Track{ID: 2, FilePath: "library/b.mp3"})
+	f.store.add(Track{ID: 3, FilePath: "library/gone.mp3"})
+	f.store.deletedMidRun[2], f.store.deletedMidRun[3] = true, true
+
+	_, err := f.svc.Analyse(t.Context(), AnalyseRequest{TrackIDs: []uint64{1, 2, 3}})
+	require.NoError(t, err)
+	summary, err := f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "analysed 1, track deleted 2", summary)
+}
+
+// A transcode of a track deleted meanwhile is skipped: a copy is removed,
+// a file replaced in place stays (files are never deleted).
+func TestTranscodeTrackDeletedMeanwhile(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		output  OutputMode
+		content string
+	}{
+		{"copy", OutputCopy, "J"},
+		{"replace", OutputReplace, "J|libmp3lame"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			f.tools.audio("library/jingle.mp3", "J", mp3Info("", ""), loud(-9, 0.4))
+			f.store.add(Track{ID: 1, FilePath: "library/jingle.mp3", Issues: []library.QualityIssue{library.IssueLoudness}})
+			f.store.deletedMidRun[1] = true
+
+			_, err := f.svc.Transcode(t.Context(), TranscodeRequest{TrackIDs: []uint64{1}, Fix: library.FixLoudness, Output: tt.output})
+			require.NoError(t, err)
+			summary, err := f.runQueued(t)
+			require.NoError(t, err)
+			require.Equal(t, "track deleted 1", summary)
+			require.Equal(t, []string{"library/jingle.mp3"}, f.files.paths(), "no copy left")
+			content, _ := f.files.get("library/jingle.mp3")
+			require.Equal(t, tt.content, content)
+		})
+	}
+}
+
 func TestTranscodeOptimizeCopy(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

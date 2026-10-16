@@ -85,7 +85,7 @@ func (s *Service) runTranscode(ctx context.Context, id uint64, req TranscodeRequ
 		return "", fmt.Errorf("transcode stopped after %d of %d tracks: %w", t.done, len(ts), err)
 	}
 	return t.summary(outcomeTranscoded, outcomeNothingToFix, outcomeBusy, outcomePathTaken, outcomeMissing,
-		outcomeUnreadable, outcomeFailed), nil
+		outcomeDeleted, outcomeUnreadable, outcomeFailed), nil
 }
 
 // transcodeTrack fixes the file of one track and stores the analysis of
@@ -167,13 +167,21 @@ func (s *Service) transcodeTrack(ctx context.Context, tr Track, req TranscodeReq
 	dctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	if err := s.store.SaveAnalysis(dctx, tr.ID, a); err != nil {
-		if final != tr.FilePath {
+		deleted := errors.Is(err, library.ErrTrackNotFound)
+		switch {
+		case final != tr.FilePath:
 			s.removeTemp(ctx, final)
-		} else {
+		case deleted:
+			// No track refers to the file any more; files are never
+			// deleted (§4), so the new one stays where the old one was.
+		default:
 			// The original is replaced already; the next analysis reads
 			// the new file.
 			s.log.ErrorContext(ctx, "transcode: file replaced but its analysis not saved; run the analysis of the track",
 				"track_id", tr.ID, "file_path", final, logging.KeyError, err)
+		}
+		if deleted {
+			return s.trackDeleted(ctx, tr)
 		}
 		return s.trackFailed(ctx, tr, "save analysis", err)
 	}

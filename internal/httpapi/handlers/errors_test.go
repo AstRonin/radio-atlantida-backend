@@ -16,6 +16,7 @@ import (
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 )
@@ -133,4 +134,26 @@ func requireProblem(t *testing.T, err error) *dto.Problem {
 	var p *dto.Problem
 	require.ErrorAs(t, err, &p)
 	return p
+}
+
+// A bulk delete stopped by an unexpected error says how far it got, even
+// when the cause is a timeout; the cause is logged, not sent.
+func TestProblemForStoppedBulkDelete(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	err := &library.DeleteTracksError{Deleted: 312, Requested: 1000, Err: fmt.Errorf("delete track 9: %w", context.DeadlineExceeded)}
+	p := problemFor(t.Context(), log, err)
+	require.Equal(t, http.StatusInternalServerError, p.Status)
+	require.Equal(t, errcodes.InternalError, p.Code)
+	require.Equal(t, "deleted 312 of 1000 tracks before the error", p.Detail)
+	require.Contains(t, logs.String(), "delete track 9")
+}
+
+// The codes of a bulk delete's refusals are those of the single delete.
+func TestTrackRefusalCode(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, errcodes.TrackInUse, trackRefusalCode(library.ErrTrackInUse))
+	require.Equal(t, errcodes.TrackHasHistory, trackRefusalCode(library.ErrTrackHasHistory))
+	require.Equal(t, errcodes.TrackNotFound, trackRefusalCode(library.ErrTrackNotFound))
 }

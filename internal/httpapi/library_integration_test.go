@@ -663,3 +663,42 @@ func TestLibraryTrackPreview(t *testing.T) {
 	}, &link)
 	a.problem(http.StatusNotFound, errcodes.TrackFileNotFound, http.MethodGet, fmt.Sprintf("/api/tracks/%d/audio", link.ID), nil)
 }
+
+func TestLibraryDeleteTracks(t *testing.T) {
+	a := newLibraryAPI(t)
+	music := a.typeID("music")
+	newTrack := func(title string) dto.Track {
+		var tr dto.Track
+		a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", map[string]any{
+			"title": title, "file_path": "music/" + title + ".mp3", "type_id": music, "duration_ms": 200000, "playlist_ids": []uint64{},
+		}, &tr)
+		return tr
+	}
+	one, pooled, two := newTrack("One"), newTrack("Pooled"), newTrack("Two")
+	clock := a.exec(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
+	a.exec(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 0) RETURNING id`, clock, pooled.ID)
+
+	var res dto.DeleteTracksResult
+	a.ok(http.StatusOK, http.MethodPost, "/api/tracks/delete", map[string]any{"track_ids": []uint64{one.ID, pooled.ID, two.ID}}, &res)
+	require.Equal(t, []uint64{one.ID, two.ID}, res.Deleted)
+	require.Equal(t, []dto.TrackRefusal{{
+		TrackID: pooled.ID, Code: string(errcodes.TrackInUse), Title: "Pooled",
+		UsedBy: []dto.EntityRef{{Kind: "clock", ID: clock, Name: "Morning"}},
+	}}, res.Refused)
+	a.problem(http.StatusNotFound, errcodes.TrackNotFound, http.MethodGet, fmt.Sprintf("/api/tracks/%d", one.ID), nil)
+
+	// Deleted meanwhile: a refusal of that track, not a 404 of the request.
+	raw := a.call(http.MethodPost, "/api/tracks/delete", map[string]any{"track_ids": []uint64{one.ID}}, &res)
+	require.Equal(t, http.StatusOK, raw.status, string(raw.body))
+	require.JSONEq(t, fmt.Sprintf(`{"deleted":[],"refused":[{"track_id":%d,"code":"track_not_found"}]}`, one.ID),
+		string(raw.body))
+
+	tooMany := make([]uint64, 1001)
+	for i := range tooMany {
+		tooMany[i] = uint64(i + 1)
+	}
+	a.fieldError("track_ids", errcodes.Length, http.MethodPost, "/api/tracks/delete", map[string]any{"track_ids": []uint64{}})
+	a.fieldError("track_ids", errcodes.Length, http.MethodPost, "/api/tracks/delete", map[string]any{"track_ids": tooMany})
+	a.fieldError("track_ids", errcodes.Unique, http.MethodPost, "/api/tracks/delete", map[string]any{"track_ids": []uint64{two.ID, two.ID}})
+	a.fieldError("track_ids", errcodes.Required, http.MethodPost, "/api/tracks/delete", map[string]any{})
+}

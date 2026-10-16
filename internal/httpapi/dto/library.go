@@ -150,3 +150,22 @@ type TrackBody struct {
 	QualityNotes string   `json:"quality_notes,omitempty" maxLength:"2000"`
 	PlaylistIDs  []uint64 `json:"playlist_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every playlist of the track; playlists not listed lose it."`
 }
+
+// DeleteTracksBody is the body of POST /api/tracks/delete.
+type DeleteTracksBody struct {
+	TrackIDs []uint64 `json:"track_ids" nullable:"false" minItems:"1" maxItems:"1000" uniqueItems:"true" doc:"Tracks to delete, in the order they are deleted."`
+}
+
+// DeleteTracksResult lists what a bulk delete removed and what it refused.
+type DeleteTracksResult struct {
+	Deleted []uint64       `json:"deleted" nullable:"false" doc:"Deleted tracks, in request order."`
+	Refused []TrackRefusal `json:"refused" nullable:"false" doc:"Tracks not deleted, in request order."`
+}
+
+// TrackRefusal is a track a bulk delete did not remove.
+type TrackRefusal struct {
+	TrackID uint64      `json:"track_id"`
+	Code    string      `json:"code" enum:"track_in_use,track_has_history,track_not_found" doc:"Why the track was kept; the codes of DELETE /api/tracks/{id}."`
+	Title   string      `json:"title,omitempty" doc:"Title of the track; absent for track_not_found."`
+	UsedBy  []EntityRef `json:"used_by,omitempty" nullable:"false" doc:"Clocks whose filler pool holds the track (track_in_use)."`
+}

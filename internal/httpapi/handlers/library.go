@@ -34,6 +34,7 @@ type Library interface {
 	CreateTrack(ctx context.Context, in library.TrackInput) (library.Track, error)
 	UpdateTrack(ctx context.Context, id uint64, in library.TrackInput) (library.Track, error)
 	DeleteTrack(ctx context.Context, id uint64) error
+	DeleteTracks(ctx context.Context, ids []uint64) (library.DeleteTracksResult, error)
 	TrackAudio(ctx context.Context, id uint64) (library.Audio, error)
 }
 

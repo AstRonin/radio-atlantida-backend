@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-18)
+Status: Draft (v7-19)
 Last updated: 2026-10-16
 
 ## 1. Overview
@@ -174,7 +174,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
   - `ended_at` (timestamptz, nullable): set when the end of the track is recorded; null while it plays and for missed items. The first recorded end wins, because Liquidsoap may report the end of a track twice (v7-12, `docs/phase-9-plan.md` §2). A unique partial index on `scheduled_item_id` makes a repeated start a no-op.
   - `scheduled_item_id` and `resolved_item_id` are trace ids of `scheduled_items` rows, without a foreign key: those rows are deleted once they air or are missed (§4.1), so a foreign key would point at nothing. Aired rows are kept for 10 days (see §4.1). Missed rows are kept until resolved.
 - **settings**: key, value (JSONB), updated_at (timestamptz, UTC). Holds all backend settings edited in the admin panel, including the audio output profile (see §6.3 and §8.8), `fade_out_ms` (default 2500, allowed 2000 to 3000), and outage detection thresholds (see §6.3).
-- **Deletion and history.** A track, artist, or clock that is referenced by `play_log` or `scheduled_items` cannot be deleted (`ON DELETE RESTRICT`). The API refuses the request and says why. This keeps the played-tracks list and open missed items complete. A grid slot can be deleted; the history rows keep their other references and lose only `grid_slot_id`.
+- **Deletion and history.** A track, artist, or clock that is referenced by `play_log` or `scheduled_items` cannot be deleted (`ON DELETE RESTRICT`). The API refuses the request and says why. This keeps the played-tracks list and open missed items complete. The bulk delete of tracks (`POST /api/tracks/delete`) applies the same rules per track and lists the refused ones. A grid slot can be deleted; the history rows keep their other references and lose only `grid_slot_id`.
 - **operations**: id, kind, status (`running`, `completed`, `failed`), started_at, finished_at, error_message, result_summary (see §6.5).
 
 Indexes:
@@ -443,6 +443,14 @@ Track responses carry the analysis columns, `quality_issues`, and `fixes` (the t
 | `POST /api/import` | Body: `folder` (absent or empty: the media root), `type_id`, `playlist_ids`, `artist_id` (an existing artist; it wins over the artist tag and the file name). Every audio file of the folder that is not a track yet becomes one where it lies; nothing is moved, and existing tracks are not changed. Returns `accepted` (`import`); the summary starts with the folder |
 
 `GET /api/import/inbox` is removed. The title of a new track is its title tag, else the title part of the file name; its artist is `artist_id`, else the artist tag, else the artist part of the file name (`Title - Artist` with exactly one hyphen, en dash, or em dash), else none.
+
+**Endpoints added in v7-19 (bulk track delete, `docs/phase-19-plan.md` §4)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /api/tracks/delete` | Body: `track_ids` (1 to 1,000, unique). Deletes, in one statement, every listed track that `DELETE /api/tracks/{id}` would delete; a refused track does not keep the others; the files are not touched. Returns 200 with `deleted` (IDs) and `refused` (`track_id`, `code` `track_in_use`, `track_has_history` or `track_not_found`, `title`, `used_by` for `track_in_use`). Synchronous, not an operation; runs to the end when the client disconnects. An unexpected error gives 500 with a detail naming how many tracks were deleted |
+
+An analysis or transcode that reaches a track deleted after it started counts it as `track deleted`, not as a failure.
 
 **Endpoints added in v7-8 (play rules and track preview)**
 

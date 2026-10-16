@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -43,10 +44,20 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 		ruleInUse      *playrules.InUseError
 		clockInUse     *clocks.InUseError
 		badOffer       *live.OfferError
+		bulkDelete     *library.DeleteTracksError
 	)
 	switch {
 	case errors.As(err, &p):
 		// Already a problem (built by a handler).
+	case errors.As(err, &bulkDelete):
+		// Checked first: the cause may be a timeout or any other error, but
+		// the panel must learn that some tracks are already gone.
+		log.ErrorContext(ctx, "delete tracks failed",
+			logging.KeyRequestID, middleware.GetReqID(ctx),
+			logging.KeyError, err,
+		)
+		p = dto.NewProblem(http.StatusInternalServerError, errcodes.InternalError,
+			fmt.Sprintf("deleted %d of %d tracks before the error", bulkDelete.Deleted, bulkDelete.Requested))
 	case errors.As(err, &invalid):
 		p = dto.NewProblem(http.StatusUnprocessableEntity, errcodes.ValidationFailed, "")
 		for _, f := range invalid.Fields {
@@ -152,6 +163,18 @@ func refusalFor(err error) *refusal {
 		}
 	}
 	return nil
+}
+
+// trackRefusalCode is the code of a track a bulk delete kept: the code
+// DELETE /api/tracks/{id} answers with, from the same tables.
+func trackRefusalCode(err error) errcodes.Problem {
+	if code, ok := inUseCodes[err]; ok {
+		return code
+	}
+	if r := refusalFor(err); r != nil {
+		return r.code
+	}
+	return errcodes.InternalError
 }
 
 // inUseCodes map the refusals inside a library.InUseError.

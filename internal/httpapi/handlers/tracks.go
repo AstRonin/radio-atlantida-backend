@@ -44,6 +44,14 @@ type updateTrackInput struct {
 	Body dto.TrackBody
 }
 
+type deleteTracksInput struct {
+	Body dto.DeleteTracksBody
+}
+
+type deleteTracksOutput struct {
+	Body dto.DeleteTracksResult
+}
+
 // previewWriteDeadline replaces the server's write timeout for one preview
 // response. A paused player stops reading; when the deadline passes, the
 // connection closes and the player resumes with a Range request.
@@ -144,6 +152,29 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		Errors:      errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *idInput) (*struct{}, error) {
 		return nil, svc.DeleteTrack(ctx, in.ID)
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "delete-tracks",
+		Method:      http.MethodPost,
+		Path:        "/api/tracks/delete",
+		Summary:     "Delete several tracks",
+		Description: "Deletes several tracks from the library (the files are not touched), each like DELETE /api/tracks/{id}. Refused tracks are listed in refused with the reason; the others are deleted. Runs to the end even when the client disconnects.",
+		Tags:        tags,
+		Errors:      errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *deleteTracksInput) (*deleteTracksOutput, error) {
+		res, err := svc.DeleteTracks(ctx, in.Body.TrackIDs)
+		if err != nil {
+			return nil, err
+		}
+		out := dto.DeleteTracksResult{Deleted: res.Deleted, Refused: make([]dto.TrackRefusal, len(res.Refused))}
+		for i, r := range res.Refused {
+			out.Refused[i] = dto.TrackRefusal{TrackID: r.TrackID, Code: string(trackRefusalCode(r.Err)), Title: r.Title}
+			for _, u := range r.UsedBy {
+				out.Refused[i].UsedBy = append(out.Refused[i].UsedBy, dto.EntityRef{Kind: u.Kind, ID: u.ID, Name: u.Name})
+			}
+		}
+		return &deleteTracksOutput{Body: out}, nil
 	})
 
 	register(api, log, huma.Operation{

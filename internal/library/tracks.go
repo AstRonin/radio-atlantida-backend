@@ -197,6 +197,25 @@ type TrackStore interface {
 	// Users returns the clocks whose filler pool holds the track, at most
 	// limit.
 	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
+	// DeleteUnreferenced deletes, in one statement, the tracks of ids that
+	// no play log row, plan item, hour insert, or filler pool refers to,
+	// and returns their IDs. A reference added while it runs fails the
+	// whole statement with ErrInUse or ErrTrackHasHistory: nothing is
+	// deleted then.
+	DeleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error)
+	// Blockers returns, for each track of ids that exists, its title and
+	// what refers to it (at most limit clocks).
+	Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]TrackBlockers, error)
+}
+
+// TrackBlockers is what keeps a track from being deleted.
+type TrackBlockers struct {
+	Title string
+	// History: the play log, the track plan, or an hour insert refers to
+	// the track.
+	History bool
+	// UsedBy names the clocks whose filler pool holds the track.
+	UsedBy []Ref
 }
 
 // Files opens track files under MEDIA_ROOT (*media.Library).
@@ -291,6 +310,145 @@ func (s *Service) DeleteTrack(ctx context.Context, id uint64) error {
 	return refuseDelete(ctx, err, ErrTrackInUse, func(ctx context.Context) ([]Ref, error) {
 		return s.tracks.Users(ctx, id, MaxUsers)
 	})
+}
+
+// MaxDeleteTracks bounds one bulk delete, like an analysis by IDs.
+const MaxDeleteTracks = 1000
+
+// deleteAttempts bounds the bulk delete statements one request runs. A
+// statement fails when a track gets a new reference while it runs (a plan
+// build may plan a just imported track); the next attempt leaves that
+// track out.
+const deleteAttempts = 3
+
+// TrackRefusal is a track a bulk delete did not remove.
+type TrackRefusal struct {
+	TrackID uint64
+	// Title is empty for ErrTrackNotFound.
+	Title string
+	// Err is ErrTrackInUse, ErrTrackHasHistory, or ErrTrackNotFound.
+	Err error
+	// UsedBy names the clocks whose filler pool holds the track, for
+	// ErrTrackInUse.
+	UsedBy []Ref
+}
+
+// DeleteTracksResult is the outcome of a bulk delete, in request order.
+type DeleteTracksResult struct {
+	Deleted []uint64
+	Refused []TrackRefusal
+}
+
+// DeleteTracksError stops a bulk delete on an error that is not a
+// refusal. Deleted is 0 when the delete itself failed (it is one
+// statement), and the number of deleted tracks when reading the refusals
+// failed after it.
+type DeleteTracksError struct {
+	Deleted   int
+	Requested int
+	Err       error
+}
+
+func (e *DeleteTracksError) Error() string {
+	return fmt.Sprintf("deleted %d of %d tracks before the error: %v", e.Deleted, e.Requested, e.Err)
+}
+
+func (e *DeleteTracksError) Unwrap() error { return e.Err }
+
+// DeleteTracks deletes the tracks that DeleteTrack would delete, in one
+// statement, and reports why each other track was kept. A refused track
+// does not keep the others. It runs to the end when the caller goes away:
+// the manager may leave the page right after the click.
+func (s *Service) DeleteTracks(ctx context.Context, ids []uint64) (DeleteTracksResult, error) {
+	if err := checkDeleteTracks(ids); err != nil {
+		return DeleteTracksResult{}, err
+	}
+	ctx = context.WithoutCancel(ctx)
+
+	deleted, err := s.deleteUnreferenced(ctx, ids)
+	if err != nil {
+		return DeleteTracksResult{}, &DeleteTracksError{Requested: len(ids), Err: err}
+	}
+	gone := make(map[uint64]bool, len(deleted))
+	for _, id := range deleted {
+		gone[id] = true
+	}
+	res := DeleteTracksResult{Deleted: []uint64{}, Refused: []TrackRefusal{}}
+	var kept []uint64
+	for _, id := range ids {
+		if gone[id] {
+			res.Deleted = append(res.Deleted, id)
+		} else {
+			kept = append(kept, id)
+		}
+	}
+
+	if len(kept) > 0 {
+		bctx, cancel := context.WithTimeout(ctx, dbTimeout)
+		blockers, err := s.tracks.Blockers(bctx, kept, MaxUsers)
+		cancel()
+		if err != nil {
+			return DeleteTracksResult{}, &DeleteTracksError{
+				Deleted: len(res.Deleted), Requested: len(ids), Err: fmt.Errorf("read why tracks were kept: %w", err),
+			}
+		}
+		for _, id := range kept {
+			b, ok := blockers[id]
+			r := TrackRefusal{TrackID: id, Title: b.Title}
+			switch {
+			case !ok:
+				r.Err = ErrTrackNotFound
+			case len(b.UsedBy) > 0:
+				// As DeleteTrack: the pool is what the manager can fix.
+				r.Err, r.UsedBy = ErrTrackInUse, b.UsedBy
+			default:
+				// History, or a plan item a rebuild removed right after
+				// the delete: the track was planned when it was refused.
+				r.Err = ErrTrackHasHistory
+			}
+			res.Refused = append(res.Refused, r)
+		}
+	}
+
+	s.log.InfoContext(ctx, "tracks deleted",
+		"requested", len(ids), "deleted", len(res.Deleted), "refused", len(res.Refused))
+	return res, nil
+}
+
+// deleteUnreferenced runs the bulk delete statement, again when a new
+// reference failed it.
+func (s *Service) deleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error) {
+	for attempt := 1; ; attempt++ {
+		dctx, cancel := context.WithTimeout(ctx, dbTimeout)
+		deleted, err := s.tracks.DeleteUnreferenced(dctx, ids)
+		cancel()
+		raced := errors.Is(err, ErrInUse) || errors.Is(err, ErrTrackHasHistory)
+		switch {
+		case err == nil:
+			return deleted, nil
+		case !raced:
+			return nil, fmt.Errorf("delete tracks: %w", err)
+		case attempt == deleteAttempts:
+			return nil, fmt.Errorf("delete tracks: new references in each of %d attempts: %w", deleteAttempts, err)
+		}
+		s.log.InfoContext(ctx, "bulk delete met a new reference; retrying", "attempt", attempt, logging.KeyError, err)
+	}
+}
+
+// checkDeleteTracks refuses an empty, too long, or repeating list; the
+// handler's schema does the same, this guards other callers.
+func checkDeleteTracks(ids []uint64) error {
+	if len(ids) == 0 || len(ids) > MaxDeleteTracks {
+		return validation.Field("track_ids", validation.Range, "must list 1 to %d tracks", MaxDeleteTracks)
+	}
+	seen := make(map[uint64]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			return validation.Field("track_ids", validation.Invalid, "track %d is listed twice", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
 }
 
 // Audio is an open track file for the preview (§6.6). The caller closes

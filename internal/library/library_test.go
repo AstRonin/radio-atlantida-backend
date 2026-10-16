@@ -54,6 +54,10 @@ func newTrackService(tracks *fakeTracks, prober Prober, logs *bytes.Buffer) *Ser
 	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, prober, slog.New(slog.NewJSONHandler(logs, nil)))
 }
 
+func newTrackServiceOn(tracks TrackStore, logs *bytes.Buffer) *Service {
+	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, fakeProber{}, slog.New(slog.NewJSONHandler(logs, nil)))
+}
+
 func TestCreateTrackFillsMetadataFromFile(t *testing.T) {
 	t.Parallel()
 	probed := media.Info{DurationMS: new(181000), Format: new(media.FormatMP3), Bitrate: new(128000), SampleRate: new(44100)}

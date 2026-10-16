@@ -282,6 +282,10 @@ type fakeStore struct {
 	busy      map[uint64]bool
 	nextID    uint64
 	createErr error
+	// deletedMidRun are tracks the manager deletes while an operation
+	// runs: the operation has read them, but storing its result finds
+	// them gone.
+	deletedMidRun map[uint64]bool
 }
 
 type storedTrack struct {
@@ -293,6 +297,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		types: map[uint64]bool{1: true}, playlists: map[uint64]bool{10: true, 11: true},
 		artists: map[uint64]string{}, tracks: map[uint64]*storedTrack{}, busy: map[uint64]bool{}, nextID: 100,
+		deletedMidRun: map[uint64]bool{},
 	}
 }
 
@@ -440,7 +445,7 @@ func (s *fakeStore) SaveAnalysis(_ context.Context, id uint64, a Analysis) error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.tracks[id]
-	if !ok {
+	if !ok || s.deletedMidRun[id] {
 		return library.ErrTrackNotFound
 	}
 	t.FilePath, t.Checksum, t.Measurements, t.Issues = a.FilePath, new(a.Checksum), a.Measurements, a.Issues
@@ -451,7 +456,10 @@ func (s *fakeStore) SaveAnalysis(_ context.Context, id uint64, a Analysis) error
 func (s *fakeStore) MarkMissing(_ context.Context, id uint64, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.tracks[id]
+	t, ok := s.tracks[id]
+	if !ok || s.deletedMidRun[id] {
+		return library.ErrTrackNotFound
+	}
 	t.Issues, t.AnalyzedAt = []library.QualityIssue{library.IssueFileMissing}, new(at)
 	return nil
 }

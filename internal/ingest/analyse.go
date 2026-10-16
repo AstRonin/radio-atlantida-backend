@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
@@ -26,6 +27,10 @@ const (
 	outcomeAnalysed  = "analysed"
 	outcomeRechecked = "rechecked"
 	outcomeMissing   = "file missing"
+	// outcomeDeleted: the track was deleted while the operation ran (a
+	// delete is not refused during media operations, docs/phase-19-plan.md
+	// decision 8).
+	outcomeDeleted = "track deleted"
 )
 
 // AnalyseRequest selects the tracks to analyse.
@@ -99,7 +104,7 @@ func (s *Service) runAnalyse(ctx context.Context, id uint64, req AnalyseRequest)
 	if err != nil {
 		return "", fmt.Errorf("analysis stopped after %d of %d tracks: %w", t.done, len(ts), err)
 	}
-	return t.summary(outcomeAnalysed, outcomeRechecked, outcomeMissing, outcomeUnreadable, outcomeFailed), nil
+	return t.summary(outcomeAnalysed, outcomeRechecked, outcomeMissing, outcomeDeleted, outcomeUnreadable, outcomeFailed), nil
 }
 
 // analyseTrack analyses the file of one track and stores the result.
@@ -110,6 +115,9 @@ func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, forc
 		dctx, cancel := context.WithTimeout(ctx, dbTimeout)
 		defer cancel()
 		if merr := s.store.MarkMissing(dctx, tr.ID, s.now().UTC()); merr != nil {
+			if errors.Is(merr, library.ErrTrackNotFound) {
+				return s.trackDeleted(ctx, tr)
+			}
 			return s.trackFailed(ctx, tr, "mark file missing", merr)
 		}
 		s.log.WarnContext(ctx, "analysis: track file missing", "track_id", tr.ID, "file_path", tr.FilePath)
@@ -147,9 +155,19 @@ func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, forc
 	dctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	if err := s.store.SaveAnalysis(dctx, tr.ID, a); err != nil {
+		if errors.Is(err, library.ErrTrackNotFound) {
+			return s.trackDeleted(ctx, tr)
+		}
 		return s.trackFailed(ctx, tr, "save analysis", err)
 	}
 	return outcome
+}
+
+// trackDeleted counts a track deleted from the library while the
+// operation ran; that is the manager's choice, not a failure.
+func (s *Service) trackDeleted(ctx context.Context, tr Track) string {
+	s.log.InfoContext(ctx, "track deleted during the operation; skipped", "track_id", tr.ID, "file_path", tr.FilePath)
+	return outcomeDeleted
 }
 
 func (s *Service) trackFailed(ctx context.Context, tr Track, step string, err error) string {

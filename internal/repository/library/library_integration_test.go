@@ -5,6 +5,7 @@ package library_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -256,4 +257,56 @@ WHERE id = $1`, bad)
 	require.NoError(t, err)
 	_, err = f.d.Pool.Exec(ctx, `UPDATE tracks SET quality_issues = '{noise}' WHERE id = $1`, bad)
 	require.ErrorContains(t, err, "ck_tracks_quality_issues")
+}
+
+// A bulk delete on the real stores: each reference to a track gives its
+// refusal, the other tracks go with their links (docs/phase-19-plan.md).
+func TestDeleteTracks(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	pop := f.playlist("Pop")
+	free, pooled, played, planned, inserted := f.track("free", nil), f.track("pooled", nil), f.track("played", nil),
+		f.track("planned", nil), f.track("inserted", nil)
+	require.NoError(t, f.tracks.SetPlaylists(ctx, free, []uint64{pop}))
+	rule := f.id(`INSERT INTO play_rules (name, max_per_hour) VALUES ('once', 1) RETURNING id`)
+	f.id(`INSERT INTO track_play_rules (track_id, rule_id) VALUES ($1, $2) RETURNING track_id`, free, rule)
+
+	clock := f.id(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
+	f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 0) RETURNING id`, clock, pooled)
+	f.id(`INSERT INTO play_log (track_id, status, planned_start_utc, started_at, actual_duration_ms)
+	      VALUES ($1, 'aired', now(), now(), 1000) RETURNING id`, played)
+	f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
+	      VALUES ($1, $2, now(), 200000, 'clock') RETURNING id`, clock, planned)
+	f.id(`INSERT INTO hour_inserts (hour_start_utc, track_id, placement) VALUES (date_trunc('hour', now()), $1, 'start') RETURNING id`, inserted)
+
+	evening := f.id(`INSERT INTO clocks (name) VALUES ('Evening') RETURNING id`)
+	f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 0) RETURNING id`, evening, pooled)
+	f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 1) RETURNING id`, evening, pooled)
+	blockers, err := f.tracks.Blockers(ctx, []uint64{pooled, played, 9999}, 1)
+	require.NoError(t, err)
+	require.Equal(t, map[uint64]library.TrackBlockers{
+		pooled: {Title: "pooled", UsedBy: []library.Ref{{Kind: library.KindClock, ID: evening, Name: "Evening"}}},
+		played: {Title: "played", History: true},
+	}, blockers, "a clock once, in name order, at most limit; unknown IDs absent")
+
+	svc := library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, slog.New(slog.DiscardHandler))
+	res, err := svc.DeleteTracks(ctx, []uint64{free, pooled, played, planned, inserted, 9999})
+	require.NoError(t, err)
+	require.Equal(t, []uint64{free}, res.Deleted)
+	require.Equal(t, []library.TrackRefusal{
+		{TrackID: pooled, Title: "pooled", Err: library.ErrTrackInUse, UsedBy: []library.Ref{
+			{Kind: library.KindClock, ID: evening, Name: "Evening"}, {Kind: library.KindClock, ID: clock, Name: "Morning"},
+		}},
+		{TrackID: played, Title: "played", Err: library.ErrTrackHasHistory},
+		{TrackID: planned, Title: "planned", Err: library.ErrTrackHasHistory},
+		{TrackID: inserted, Title: "inserted", Err: library.ErrTrackHasHistory},
+		{TrackID: 9999, Err: library.ErrTrackNotFound},
+	}, res.Refused)
+
+	var links int
+	require.NoError(t, f.d.Pool.QueryRow(ctx, `
+SELECT (SELECT count(*) FROM track_playlists WHERE track_id = $1) + (SELECT count(*) FROM track_play_rules WHERE track_id = $1)`,
+		free).Scan(&links))
+	require.Zero(t, links, "the links of the deleted track are gone")
 }
