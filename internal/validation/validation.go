@@ -38,6 +38,12 @@ const (
 	// Blocked: the track breaks separation or a play rule at the time it
 	// would play.
 	Blocked Rule = "blocked"
+	// Length: a text is too long once cleaned (a title over 500
+	// characters).
+	Length Rule = "length"
+	// InvalidCharacters: a text contains characters it must not have
+	// (control characters such as line breaks and tabs in a title).
+	InvalidCharacters Rule = "invalid_characters"
 )
 
 // FieldError is the error of one request field.

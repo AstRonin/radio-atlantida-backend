@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort).
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort), `docs/phase-21-plan.md` for Phase 21 (on-air titles, reviewed mark, bulk rename).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -73,13 +73,13 @@ internal/
   retention/          retention rules (play log, operations); jobs schedules it
   workerpool/         bounded worker pool (Pool: fixed workers + bounded queue) and ForEach for batches
   validation/         validation.Error: per-field refusals of domain services (rule → field code in problemFor)
-  library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete
+  library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete; title rule, reviewed mark, bulk rename
   playrules/          play rules (window, weekdays, min interval, max per hour) and their track/playlist targets
   separation/         separation rules (edit only; capped at the play log retention)
   clocks/             clock templates: Arrange/LayoutOf (segments, shortfall, fixed replacement, filler holders), WithInsert (one-time element of an hour), save flow, dry check warnings
   grid/               grid slots (station local weekday/hour/dates), assign/unassign with trim/split/delete, Schedule, Hours, ClockHours
   rotation/           track plan: Build (pure, seeded: selection, separation and play rules, crossing, filler, emergency), Service.Sync (missing/stale hours, plan_hours), filler reminders (answer, deadline), Reschedule (hour_inserts pinned in the build), planner queue for clock_build and reschedule
-  liquidsoap/         telnet control client (push, queue, var.set, ping), link state and connection generation
+  liquidsoap/         telnet control client (push, queue, var.set, ping), link state and connection generation; Annotate (quoted request annotations)
   playout/            pusher (hour queues by parity, lookahead, pre-push, resync), callbacks → play log (Replay for journal lines), now playing, music gain, emergency picks
   broadcast/          Tracker: derived broadcast state (connected, reconnecting, unreachable, unknown) from output reports, outages, mount checks, heartbeat; since stored on change (broadcast_state), broadcast.state events
   airwindow/          air window: last due items (aired, truncated, missed), the item on air, next plan items; pure Assemble, counts from settings (group air); read only

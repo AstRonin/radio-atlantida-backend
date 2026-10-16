@@ -104,8 +104,8 @@ func TestItemsAndQueueMarks(t *testing.T) {
 	items, err := f.store.Items(ctx, hour, hour.Add(time.Hour))
 	require.NoError(t, err)
 	require.Equal(t, []playout.Item{
-		{ID: a, TrackID: f.tracks[0], FilePath: "t/0.mp3", Start: hour, OutMS: 180000},
-		{ID: b, TrackID: f.tracks[1], FilePath: "t/1.mp3", Start: hour.Add(3 * time.Minute), OutMS: 15000, Truncated: true},
+		{ID: a, TrackID: f.tracks[0], FilePath: "t/0.mp3", Title: "T0", Artist: "A", Start: hour, OutMS: 180000},
+		{ID: b, TrackID: f.tracks[1], FilePath: "t/1.mp3", Title: "T1", Start: hour.Add(3 * time.Minute), OutMS: 15000, Truncated: true},
 	}, items)
 
 	ok, err := f.store.MarkQueued(ctx, a)

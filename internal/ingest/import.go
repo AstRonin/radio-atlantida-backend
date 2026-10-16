@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
@@ -27,9 +28,8 @@ const (
 	// already in the library included; the rest wait for the next run
 	// (docs/phase-18-plan.md, decision 12).
 	maxImportFiles = 5000
-	// Limits of the track and artist names (the API limits of the track
-	// and artist forms).
-	maxTitleLength  = 500
+	// maxArtistLength is the limit of an artist name (the API limit of the
+	// artist form); the title has library.MaxTitleLength.
 	maxArtistLength = 200
 )
 
@@ -235,10 +235,12 @@ func (im *importer) register(ctx context.Context, info media.Info, a Analysis) e
 	s := im.s
 	base := path.Base(a.FilePath)
 	nameTitle, nameArtist := nameParts(strings.TrimSuffix(base, path.Ext(base)))
-	title := cmp.Or(strings.TrimSpace(info.Title), nameTitle)
+	// The title rule (docs/phase-21-plan.md §2, decision 5) removes what the
+	// API refuses: control characters and runs of white space.
+	title := cmp.Or(library.CleanTitle(info.Title), library.CleanTitle(nameTitle))
 	artist := cmp.Or(strings.TrimSpace(info.Artist), nameArtist)
 	nt := NewTrack{
-		Title: truncate(title, maxTitleLength), ArtistID: im.req.ArtistID,
+		Title: truncate(title, library.MaxTitleLength), ArtistID: im.req.ArtistID,
 		TypeID: im.req.TypeID, PlaylistIDs: im.req.PlaylistIDs, Analysis: a,
 	}
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)

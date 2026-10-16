@@ -125,6 +125,7 @@ type Track struct {
 	QualityIssues   []string   `json:"quality_issues" nullable:"false" enum:"format,sample_rate,channels,loudness,true_peak,low_bitrate,file_missing" doc:"Problems found by the last analysis against the broadcast standard (settings import.*). low_bitrate and file_missing cannot be fixed by a transcode."`
 	Fixes           []string   `json:"fixes" nullable:"false" enum:"loudness,optimize" doc:"Transcodes that remove at least one issue: the buttons Fix loudness and Optimize track (POST /api/tracks/transcode)."`
 	AnalyzedAt      *time.Time `json:"analyzed_at,omitempty" doc:"Absent until the file is analysed."`
+	ReviewedAt      *time.Time `json:"reviewed_at,omitempty" doc:"When the manager marked the track checked (POST /api/tracks/review); absent when it is not. A change of the title, the artist, the file path, or the file itself (a transcode, a replaced file) clears it."`
 }
 
 // TrackPage is a page of tracks in the requested order.
@@ -169,4 +170,46 @@ type TrackRefusal struct {
 	Code    string      `json:"code" enum:"track_in_use,track_has_history,track_not_found" doc:"Why the track was kept; the codes of DELETE /api/tracks/{id}."`
 	Title   string      `json:"title,omitempty" doc:"Title of the track; absent for track_not_found."`
 	UsedBy  []EntityRef `json:"used_by,omitempty" nullable:"false" doc:"Clocks whose filler pool holds the track (track_in_use)."`
+}
+
+// ReviewTracksBody is the body of POST /api/tracks/review.
+type ReviewTracksBody struct {
+	TrackIDs []uint64 `json:"track_ids" nullable:"false" minItems:"1" maxItems:"1000" uniqueItems:"true"`
+	Reviewed bool     `json:"reviewed" doc:"true marks the tracks reviewed (a track already reviewed keeps the time of its first mark); false clears the mark."`
+}
+
+// ReviewTracksResult lists the tracks whose mark was set or cleared.
+type ReviewTracksResult struct {
+	Updated  []uint64 `json:"updated" nullable:"false" doc:"Tracks marked or cleared, in request order."`
+	NotFound []uint64 `json:"not_found" nullable:"false" doc:"Tracks that do not exist, in request order."`
+}
+
+// RenameTracksBody is the body of POST /api/tracks/rename.
+type RenameTracksBody struct {
+	TrackIDs  []uint64 `json:"track_ids" nullable:"false" minItems:"1" maxItems:"1000" uniqueItems:"true"`
+	Find      string   `json:"find" minLength:"1" maxLength:"200" doc:"Text to find in the titles, literally (no pattern characters); not only white space."`
+	Replace   string   `json:"replace,omitempty" maxLength:"200" doc:"Text that replaces every occurrence; empty or absent removes it."`
+	MatchCase bool     `json:"match_case,omitempty" doc:"Match the case of find; by default the match ignores case."`
+	DryRun    bool     `json:"dry_run" doc:"true returns the preview and writes nothing; false writes the titles."`
+}
+
+// RenameTracksResult is the outcome of a rename, each list in request
+// order.
+type RenameTracksResult struct {
+	Changed   []TitleChange   `json:"changed" nullable:"false" doc:"Tracks whose title changes (dry run) or changed."`
+	Unchanged []uint64        `json:"unchanged" nullable:"false" doc:"Tracks whose title has no occurrence of find, or stays the same."`
+	Refused   []RenameRefusal `json:"refused" nullable:"false" doc:"Tracks left alone, with the reason."`
+}
+
+// TitleChange is a title a rename changes.
+type TitleChange struct {
+	TrackID  uint64 `json:"track_id"`
+	OldTitle string `json:"old_title"`
+	NewTitle string `json:"new_title"`
+}
+
+// RenameRefusal is a track a rename leaves alone.
+type RenameRefusal struct {
+	TrackID uint64 `json:"track_id"`
+	Code    string `json:"code" enum:"track_not_found,title_empty,title_too_long" doc:"title_empty: nothing would be left of the title; title_too_long: the title would be over 500 characters (it is not cut)."`
 }

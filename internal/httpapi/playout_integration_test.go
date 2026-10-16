@@ -189,8 +189,9 @@ func TestPlayoutPushesAndLogs(t *testing.T) {
 	f.clock.set(start.Add(-2 * time.Minute))
 	f.runPusher()
 	require.Eventually(t, func() bool { return len(f.liquidsoap.pushes(queue)) == 3 }, 10*time.Second, 20*time.Millisecond)
-	require.Equal(t, fmt.Sprintf(`annotate:item_id="%d":/media/music/`, items[0].ID),
-		f.liquidsoap.pushes(queue)[0][:len(fmt.Sprintf(`annotate:item_id="%d":/media/music/`, items[0].ID))])
+	pushed := f.liquidsoap.pushes(queue)[0]
+	require.True(t, strings.HasPrefix(pushed, fmt.Sprintf(`annotate:item_id="%d",title="%s",artist="":/media/music/`,
+		items[0].ID, items[0].Title)), pushed)
 	require.Equal(t, "0.", f.liquidsoap.variable("hour_shift"))
 	require.Equal(t, "1.", f.liquidsoap.variable("music_gain"))
 	plan := f.plan().Items[0]
@@ -298,7 +299,7 @@ func TestPlayoutEmergency(t *testing.T) {
 	a.exec(`INSERT INTO track_playlists (track_id, playlist_id) VALUES ($1, $2) RETURNING track_id`, track, pl.ID)
 	rep = a.call(http.MethodGet, "/api/playout/emergency/next", nil, nil)
 	require.Equal(t, http.StatusOK, rep.status)
-	require.Equal(t, fmt.Sprintf(`annotate:track_id="%d":/media/safe/s.mp3`, track), string(rep.body))
+	require.Equal(t, fmt.Sprintf(`annotate:track_id="%d",title="Safe",artist="":/media/safe/s.mp3`, track), string(rep.body))
 	require.Contains(t, rep.header.Get("Content-Type"), "text/plain")
 
 	at := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)

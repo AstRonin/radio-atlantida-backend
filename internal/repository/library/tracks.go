@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -52,6 +53,7 @@ type trackRow struct {
 	// scan arrays. The codes contain no comma (ck_tracks_quality_issues).
 	QualityIssues string
 	AnalyzedAt    *time.Time
+	ReviewedAt    *time.Time
 	// Total is count(*) OVER () in List; zero elsewhere.
 	Total int
 }
@@ -63,7 +65,7 @@ const trackSelect = `tr.id, tr.title, tr.artist_id, a.name AS artist_name, tr.du
        tr.format, tr.bitrate, tr.sample_rate, tr.quality_ok, tr.quality_notes,
        t.id AS type_id, t.code AS type_code, t.name AS type_name, tr.file_checksum, tr.created_at,
        tr.codec, tr.channels, tr.loudness_lufs, tr.true_peak_dbtp, tr.loudness_range_lu, tr.source_bitrate,
-       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at`
+       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at, tr.reviewed_at`
 
 const fromTracks = `
 FROM tracks tr
@@ -84,6 +86,7 @@ var trackSortKeys = map[library.TrackSort][]string{
 		"CASE WHEN tr.analyzed_at IS NULL THEN NULL WHEN cardinality(tr.quality_issues) = 0 THEN 0 ELSE 1 END",
 		"-cardinality(tr.quality_issues)",
 	},
+	library.SortReviewed: {"tr.reviewed_at"},
 }
 
 // trackOrder is the ORDER BY of f: the sort keys in f's direction, then
@@ -140,6 +143,13 @@ func trackWhere(f library.TrackFilter) (where []string, args []any) {
 	case library.QualityUnanalysed:
 		where = append(where, "tr.analyzed_at IS NULL")
 	}
+	switch {
+	case f.Reviewed == nil:
+	case *f.Reviewed:
+		where = append(where, "tr.reviewed_at IS NOT NULL")
+	default:
+		where = append(where, "tr.reviewed_at IS NULL")
+	}
 	return where, args
 }
 
@@ -172,7 +182,9 @@ func whereClause(where []string) string {
 // page (offset 29 950, limit 50): title 15 / 29 ms (desc the same), artist
 // 20 / 51 ms, type 17 / 43 ms, duration 15 / 20 ms, format 18 / 42 ms,
 // quality 19 / 40 ms. With playlist_id and q, by duration desc, offset 200:
-// 28 ms. The count alone: 7 ms.
+// 28 ms. The count alone: 7 ms. Phase 21, the same table with a third of the
+// tracks not reviewed: reviewed=false, first page 7 ms; sort reviewed desc,
+// last page 31 ms. No index on reviewed_at (the 50 ms rule of phase 20).
 func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Track, int, error) {
 	order, err := trackOrder(f)
 	if err != nil {
@@ -283,6 +295,9 @@ WHERE track_id IN ? ORDER BY rule_id`, ids).Scan(&rules).Error
 		if r.AnalyzedAt != nil {
 			t.AnalyzedAt = new(r.AnalyzedAt.UTC())
 		}
+		if r.ReviewedAt != nil {
+			t.ReviewedAt = new(r.ReviewedAt.UTC())
+		}
 		if r.ArtistID != nil && r.ArtistName != nil {
 			t.Artist = &library.ArtistRef{ID: *r.ArtistID, Name: *r.ArtistName}
 		}
@@ -349,9 +364,15 @@ func (s *Tracks) Create(ctx context.Context, in library.TrackInput) (uint64, err
 	return r.ID, nil
 }
 
-// Update changes the metadata of a track.
+// Update changes the metadata of a track. The reviewed mark is cleared in
+// the same statement when the title, the artist, or the file path changes:
+// the SET expressions see the stored row, so there is no read before the
+// write to race with.
 func (s *Tracks) Update(ctx context.Context, id uint64, in library.TrackInput) error {
-	res := s.g.WithContext(ctx).Table("tracks").Where("id = ?", id).Updates(trackColumns(in))
+	cols := trackColumns(in)
+	cols["reviewed_at"] = gorm.Expr(`CASE WHEN title IS DISTINCT FROM ? OR artist_id IS DISTINCT FROM ?
+  OR file_path IS DISTINCT FROM ? THEN NULL ELSE reviewed_at END`, in.Title, in.ArtistID, in.FilePath)
+	res := s.g.WithContext(ctx).Table("tracks").Where("id = ?", id).Updates(cols)
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("update track %d", id), res.Error)
 	}
@@ -492,4 +513,71 @@ ORDER BY track_id, n`, ids, limit).Scan(&users).Error
 		}
 	}
 	return out, nil
+}
+
+// SetReviewed sets the reviewed mark of the tracks of ids, keeping the time
+// of an existing mark, or clears it, and returns the IDs of the tracks that
+// exist. EXPLAIN ANALYZE, 30 000 tracks, 1 000 IDs: 15 ms.
+func (s *Tracks) SetReviewed(ctx context.Context, ids []uint64, reviewed bool) ([]uint64, error) {
+	var found []uint64
+	err := s.g.WithContext(ctx).Raw(`
+UPDATE tracks SET reviewed_at = CASE WHEN ? THEN COALESCE(reviewed_at, now()) END
+WHERE id IN ?
+RETURNING id`, reviewed, ids).Scan(&found).Error
+	if err != nil {
+		return nil, fmt.Errorf("update reviewed mark: %w", err)
+	}
+	return found, nil
+}
+
+// Titles returns the title of each track of ids that exists; forUpdate
+// locks the rows (in ID order, so two renames cannot deadlock).
+func (s *Tracks) Titles(ctx context.Context, ids []uint64, forUpdate bool) (map[uint64]string, error) {
+	sql := `SELECT id, title FROM tracks WHERE id IN ? ORDER BY id`
+	if forUpdate {
+		sql += ` FOR UPDATE`
+	}
+	var rows []struct {
+		ID    uint64
+		Title string
+	}
+	if err := s.g.WithContext(ctx).Raw(sql, ids).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("select titles: %w", err)
+	}
+	out := make(map[uint64]string, len(rows))
+	for _, r := range rows {
+		out[r.ID] = r.Title
+	}
+	return out, nil
+}
+
+// titleRow is one title of SetTitles, sent as JSON: one parameter for any
+// number of rows (GORM would expand a slice into a list).
+type titleRow struct {
+	ID    uint64 `json:"id"`
+	Title string `json:"title"`
+}
+
+// SetTitles writes the titles and clears the reviewed mark of those
+// tracks, in one statement.
+func (s *Tracks) SetTitles(ctx context.Context, titles map[uint64]string) error {
+	if len(titles) == 0 {
+		return nil
+	}
+	rows := make([]titleRow, 0, len(titles))
+	for id, title := range titles {
+		rows = append(rows, titleRow{ID: id, Title: title})
+	}
+	data, err := json.Marshal(rows)
+	if err != nil {
+		return fmt.Errorf("encode titles: %w", err)
+	}
+	err = s.g.WithContext(ctx).Exec(`
+UPDATE tracks t SET title = v.title, reviewed_at = NULL
+FROM jsonb_to_recordset(?::jsonb) AS v(id bigint, title text)
+WHERE t.id = v.id`, string(data)).Error
+	if err != nil {
+		return fmt.Errorf("update titles: %w", err)
+	}
+	return nil
 }

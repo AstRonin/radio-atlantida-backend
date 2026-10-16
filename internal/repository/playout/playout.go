@@ -43,6 +43,8 @@ type itemRow struct {
 	ID        uint64    `db:"id"`
 	TrackID   uint64    `db:"track_id"`
 	FilePath  string    `db:"file_path"`
+	Title     string    `db:"title"`
+	Artist    *string   `db:"artist_name"`
 	Start     time.Time `db:"planned_start_utc"`
 	InMS      int       `db:"planned_in_ms"`
 	OutMS     int       `db:"planned_out_ms"`
@@ -51,19 +53,25 @@ type itemRow struct {
 }
 
 func (r itemRow) domain() playout.Item {
-	return playout.Item{
-		ID: r.ID, TrackID: r.TrackID, FilePath: r.FilePath, Start: r.Start.UTC(), InMS: r.InMS, OutMS: r.OutMS,
+	it := playout.Item{
+		ID: r.ID, TrackID: r.TrackID, FilePath: r.FilePath, Title: r.Title, Start: r.Start.UTC(), InMS: r.InMS, OutMS: r.OutMS,
 		Truncated: r.Truncated, Queued: r.Queued,
 	}
+	if r.Artist != nil {
+		it.Artist = *r.Artist
+	}
+	return it
 }
 
 // Items returns the planned and queued items that start in [from, to), in
-// planned order (ix_scheduled_items_planned_start_utc).
+// planned order (ix_scheduled_items_planned_start_utc), with the title and
+// artist of their tracks for the stream metadata.
 func (s *Store) Items(ctx context.Context, from, to time.Time) ([]playout.Item, error) {
-	rows, err := s.q.Query(ctx, `SELECT si.id, si.track_id, t.file_path, si.planned_start_utc, si.planned_in_ms,
-       si.planned_out_ms, si.truncated, si.status = 'queued' AS queued
+	rows, err := s.q.Query(ctx, `SELECT si.id, si.track_id, t.file_path, t.title, a.name AS artist_name,
+       si.planned_start_utc, si.planned_in_ms, si.planned_out_ms, si.truncated, si.status = 'queued' AS queued
 FROM scheduled_items si
 JOIN tracks t ON t.id = si.track_id
+LEFT JOIN artists a ON a.id = t.artist_id
 WHERE si.planned_start_utc >= $1 AND si.planned_start_utc < $2 AND si.status IN ('planned', 'queued')
 ORDER BY si.planned_start_utc, si.id`, from, to)
 	if err != nil {

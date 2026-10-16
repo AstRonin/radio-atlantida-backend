@@ -49,6 +49,11 @@ type Track struct {
 	QualityIssues []QualityIssue
 	AnalyzedAt    *time.Time
 
+	// ReviewedAt is when the manager marked the track checked; nil when it
+	// is not. A change of the title, the artist, the file path, or the file
+	// itself clears it (docs/phase-21-plan.md §2, decision 8).
+	ReviewedAt *time.Time
+
 	// PlaylistIDs and PlayRuleIDs are in ID order.
 	PlaylistIDs []uint64
 	PlayRuleIDs []uint64
@@ -169,11 +174,14 @@ const (
 	// SortQuality: no issues, then with issues (more issues first), then
 	// never analysed (last in both directions).
 	SortQuality TrackSort = "quality"
+	// SortReviewed: by the time of the reviewed mark; tracks not reviewed
+	// last.
+	SortReviewed TrackSort = "reviewed"
 )
 
 // TrackSorts lists every sort key (for the API enum).
 func TrackSorts() []TrackSort {
-	return []TrackSort{SortTitle, SortArtist, SortType, SortDuration, SortFormat, SortQuality}
+	return []TrackSort{SortTitle, SortArtist, SortType, SortDuration, SortFormat, SortQuality, SortReviewed}
 }
 
 // TrackFilter selects tracks and the page of them. Zero fields do not
@@ -186,6 +194,9 @@ type TrackFilter struct {
 	Query string
 	// Quality is one of the Quality* filters, or empty.
 	Quality string
+	// Reviewed, when set, keeps only the tracks with (true) or without
+	// (false) the reviewed mark.
+	Reviewed *bool
 	// Sort is the sort key; empty is SortTitle.
 	Sort TrackSort
 	// Desc reverses the sort key; missing values stay last and ties stay
@@ -225,7 +236,9 @@ type TrackStore interface {
 	// Create adds a track without playlists. ErrFilePathTaken,
 	// ErrUnknownType, ErrUnknownArtist.
 	Create(ctx context.Context, in TrackInput) (uint64, error)
-	// Update changes the metadata of a track (not its playlists).
+	// Update changes the metadata of a track (not its playlists) and, in
+	// the same statement, clears its reviewed mark when the title, the
+	// artist, or the file path differs from the stored one.
 	// ErrTrackNotFound, ErrFilePathTaken, ErrUnknownType, ErrUnknownArtist.
 	Update(ctx context.Context, id uint64, in TrackInput) error
 	// SetPlaylists makes playlistIDs the playlists of the track.
@@ -247,6 +260,16 @@ type TrackStore interface {
 	// Blockers returns, for each track of ids that exists, its title and
 	// what refers to it (at most limit clocks).
 	Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]TrackBlockers, error)
+	// SetReviewed sets the reviewed mark of the tracks of ids (keeping the
+	// time of an existing mark) or clears it, and returns the IDs of the
+	// tracks that exist.
+	SetReviewed(ctx context.Context, ids []uint64, reviewed bool) ([]uint64, error)
+	// Titles returns the title of each track of ids that exists; forUpdate
+	// locks the rows until the transaction ends.
+	Titles(ctx context.Context, ids []uint64, forUpdate bool) (map[uint64]string, error)
+	// SetTitles writes the titles and clears the reviewed mark of those
+	// tracks, in one statement.
+	SetTitles(ctx context.Context, titles map[uint64]string) error
 }
 
 // TrackBlockers is what keeps a track from being deleted.
@@ -330,7 +353,8 @@ func (s *Service) CreateTrack(ctx context.Context, in TrackInput) (Track, error)
 	return s.tracks.Get(ctx, id)
 }
 
-// UpdateTrack replaces the metadata and the playlists of a track.
+// UpdateTrack replaces the metadata and the playlists of a track. A new
+// title, artist, or file path clears the reviewed mark.
 func (s *Service) UpdateTrack(ctx context.Context, id uint64, in TrackInput) (Track, error) {
 	in, err := s.prepareTrack(ctx, in)
 	if err != nil {
@@ -410,7 +434,7 @@ func (e *DeleteTracksError) Unwrap() error { return e.Err }
 // does not keep the others. It runs to the end when the caller goes away:
 // the manager may leave the page right after the click.
 func (s *Service) DeleteTracks(ctx context.Context, ids []uint64) (DeleteTracksResult, error) {
-	if err := checkDeleteTracks(ids); err != nil {
+	if err := checkTrackIDs(ids, MaxDeleteTracks); err != nil {
 		return DeleteTracksResult{}, err
 	}
 	ctx = context.WithoutCancel(ctx)
@@ -485,11 +509,50 @@ func (s *Service) deleteUnreferenced(ctx context.Context, ids []uint64) ([]uint6
 	}
 }
 
-// checkDeleteTracks refuses an empty, too long, or repeating list; the
-// handler's schema does the same, this guards other callers.
-func checkDeleteTracks(ids []uint64) error {
-	if len(ids) == 0 || len(ids) > MaxDeleteTracks {
-		return validation.Field("track_ids", validation.Range, "must list 1 to %d tracks", MaxDeleteTracks)
+// MaxReviewTracks bounds one change of the reviewed mark, like a bulk
+// delete.
+const MaxReviewTracks = 1000
+
+// ReviewTracksResult is the outcome of a change of the reviewed mark, in
+// request order.
+type ReviewTracksResult struct {
+	Updated  []uint64
+	NotFound []uint64
+}
+
+// ReviewTracks sets the reviewed mark of the tracks (a track already
+// reviewed keeps the time of its first mark) or clears it, in one
+// statement.
+func (s *Service) ReviewTracks(ctx context.Context, ids []uint64, reviewed bool) (ReviewTracksResult, error) {
+	if err := checkTrackIDs(ids, MaxReviewTracks); err != nil {
+		return ReviewTracksResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	found, err := s.tracks.SetReviewed(ctx, ids, reviewed)
+	if err != nil {
+		return ReviewTracksResult{}, fmt.Errorf("set reviewed mark: %w", err)
+	}
+	exists := make(map[uint64]bool, len(found))
+	for _, id := range found {
+		exists[id] = true
+	}
+	res := ReviewTracksResult{Updated: []uint64{}, NotFound: []uint64{}}
+	for _, id := range ids {
+		if exists[id] {
+			res.Updated = append(res.Updated, id)
+		} else {
+			res.NotFound = append(res.NotFound, id)
+		}
+	}
+	return res, nil
+}
+
+// checkTrackIDs refuses an empty, too long, or repeating list of a bulk
+// request; the handler's schema does the same, this guards other callers.
+func checkTrackIDs(ids []uint64, maxIDs int) error {
+	if len(ids) == 0 || len(ids) > maxIDs {
+		return validation.Field("track_ids", validation.Range, "must list 1 to %d tracks", maxIDs)
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	for _, id := range ids {
@@ -545,10 +608,7 @@ func (s *Service) TrackAudio(ctx context.Context, id uint64) (Audio, error) {
 // runs before the transaction: reading the file is I/O.
 func (s *Service) prepareTrack(ctx context.Context, in TrackInput) (TrackInput, error) {
 	errs := &validation.Error{}
-	in.Title = strings.TrimSpace(in.Title)
-	if in.Title == "" {
-		errs.Add("title", validation.Required, "must not be blank")
-	}
+	in.Title = checkTitle(errs, "title", in.Title)
 	if err := media.ValidatePath(in.FilePath); err != nil {
 		errs.Add("file_path", validation.Format, "%s", err)
 	}

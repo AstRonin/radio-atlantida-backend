@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
@@ -308,17 +307,22 @@ func QueueName(h time.Time, loc *time.Location) string {
 }
 
 // RequestURI returns the request pushed for an item (§8.1): the file under
-// the media root, annotated with the item ID and, for a truncated item, the
-// out point and the fade that ends there.
+// the media root, annotated with the item ID, for a truncated item the out
+// point and the fade that ends there, and the library title and artist, so
+// the stream metadata is what the manager entered, never the file tags. The
+// artist is always sent: an empty one hides the artist tag of the file.
 func RequestURI(it Item, set Settings) string {
-	ann := []string{`item_id="` + strconv.FormatUint(it.ID, 10) + `"`}
+	ann := []liquidsoap.Pair{{Key: "item_id", Value: strconv.FormatUint(it.ID, 10)}}
 	if it.InMS > 0 {
-		ann = append(ann, `liq_cue_in="`+seconds(it.InMS)+`"`)
+		ann = append(ann, liquidsoap.Pair{Key: "liq_cue_in", Value: seconds(it.InMS)})
 	}
 	if it.Truncated {
-		ann = append(ann, `liq_cue_out="`+seconds(it.OutMS)+`"`, `liq_fade_out="`+seconds(set.FadeOutMS)+`"`)
+		ann = append(ann,
+			liquidsoap.Pair{Key: "liq_cue_out", Value: seconds(it.OutMS)},
+			liquidsoap.Pair{Key: "liq_fade_out", Value: seconds(set.FadeOutMS)})
 	}
-	return "annotate:" + strings.Join(ann, ",") + ":" + path.Join(set.MediaRoot, it.FilePath)
+	ann = append(ann, liquidsoap.Pair{Key: "title", Value: it.Title}, liquidsoap.Pair{Key: "artist", Value: it.Artist})
+	return liquidsoap.Annotate(path.Join(set.MediaRoot, it.FilePath), ann...)
 }
 
 func seconds(ms int) string {

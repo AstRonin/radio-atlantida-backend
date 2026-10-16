@@ -31,7 +31,8 @@ type listTracksInput struct {
 	PlaylistID uint64 `query:"playlist_id" minimum:"0" doc:"Only tracks in this playlist."`
 	Query      string `query:"q" maxLength:"200" doc:"Only tracks whose title or artist name contains this text (case-insensitive)."`
 	Quality    string `query:"quality" enum:"ok,issues,unanalysed" doc:"Only tracks analysed without issues, with issues, or never analysed."`
-	Sort       string `query:"sort" enum:"title,artist,type,duration,format,quality" default:"title" doc:"Sort key; ties are ordered by title and ID. Tracks without the value are last in both orders."`
+	Reviewed   string `query:"reviewed" enum:"true,false" doc:"Only tracks with (true) or without (false) the reviewed mark."`
+	Sort       string `query:"sort" enum:"title,artist,type,duration,format,quality,reviewed" default:"title" doc:"Sort key; ties are ordered by title and ID. Tracks without the value are last in both orders (reviewed: by the time of the mark, tracks not reviewed last)."`
 	Order      string `query:"order" enum:"asc,desc" default:"asc"`
 	Offset     int    `query:"offset" minimum:"0" maximum:"1000000" default:"0" doc:"Tracks to skip in the sorted list."`
 	Cursor     string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page; only in the default order (title, asc) and without offset."`
@@ -55,6 +56,22 @@ type deleteTracksOutput struct {
 	Body dto.DeleteTracksResult
 }
 
+type reviewTracksInput struct {
+	Body dto.ReviewTracksBody
+}
+
+type reviewTracksOutput struct {
+	Body dto.ReviewTracksResult
+}
+
+type renameTracksInput struct {
+	Body dto.RenameTracksBody
+}
+
+type renameTracksOutput struct {
+	Body dto.RenameTracksResult
+}
+
 // previewWriteDeadline replaces the server's write timeout for one preview
 // response. A paused player stops reading; when the deadline passes, the
 // connection closes and the player resumes with a Range request.
@@ -76,6 +93,9 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 			TypeID: in.TypeID, ArtistID: in.ArtistID, PlaylistID: in.PlaylistID,
 			Query: in.Query, Quality: in.Quality,
 			Sort: library.TrackSort(in.Sort), Desc: in.Order == "desc", Offset: in.Offset, Limit: in.Limit,
+		}
+		if in.Reviewed != "" {
+			f.Reviewed = new(in.Reviewed == "true")
 		}
 		if in.Cursor != "" {
 			c, err := decodeCursor(in.Cursor)
@@ -135,9 +155,12 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		Method:      http.MethodPut,
 		Path:        "/api/tracks/{id}",
 		Summary:     "Update a track",
-		Description: "Replaces the metadata and the playlists of a track. Optional fields left out are cleared, then metadata is read from the file where it exists.",
-		Tags:        tags,
-		Errors:      errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity),
+		Description: "Replaces the metadata and the playlists of a track. Optional fields left out are cleared, then metadata is read from the file where it exists. " +
+			"The title is trimmed and runs of white space become one space; control characters (line breaks, tabs) are refused (invalid_characters). " +
+			"A new title, artist, or file path clears the reviewed mark; playlists, type, notes, and the quality override do not. " +
+			"The title and artist go on air with requests pushed to Liquidsoap after the save; items already queued keep the old ones.",
+		Tags:   tags,
+		Errors: errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *updateTrackInput) (*trackOutput, error) {
 		t, err := svc.UpdateTrack(ctx, in.ID, trackInput(in.Body))
 		if err != nil {
@@ -179,6 +202,54 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 			}
 		}
 		return &deleteTracksOutput{Body: out}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "review-tracks",
+		Method:      http.MethodPost,
+		Path:        "/api/tracks/review",
+		Summary:     "Mark tracks reviewed",
+		Description: "Sets or clears the reviewed mark of several tracks in one statement. A track already reviewed keeps the time of its first mark. Tracks that do not exist are listed in not_found.",
+		Tags:        tags,
+		Errors:      errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *reviewTracksInput) (*reviewTracksOutput, error) {
+		res, err := svc.ReviewTracks(ctx, in.Body.TrackIDs, in.Body.Reviewed)
+		if err != nil {
+			return nil, err
+		}
+		return &reviewTracksOutput{Body: dto.ReviewTracksResult{Updated: res.Updated, NotFound: res.NotFound}}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "rename-tracks",
+		Method:      http.MethodPost,
+		Path:        "/api/tracks/rename",
+		Summary:     "Find and replace in titles",
+		Description: "Replaces every occurrence of find in the titles of the tracks (literal text; case ignored unless match_case), then trims the title and collapses runs of white space. " +
+			"With dry_run true it returns the preview and writes nothing; with false it writes the changed titles in one transaction, computed again from the stored titles, and clears their reviewed mark. " +
+			"A title that would become empty or longer than 500 characters is refused, not cut.",
+		Tags:   tags,
+		Errors: errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *renameTracksInput) (*renameTracksOutput, error) {
+		b := in.Body
+		res, err := svc.RenameTracks(ctx, library.RenameRequest{
+			TrackIDs: b.TrackIDs, Find: b.Find, Replace: b.Replace, MatchCase: b.MatchCase, DryRun: b.DryRun,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := dto.RenameTracksResult{
+			Changed:   make([]dto.TitleChange, len(res.Changed)),
+			Unchanged: res.Unchanged,
+			Refused:   make([]dto.RenameRefusal, len(res.Refused)),
+		}
+		for i, c := range res.Changed {
+			out.Changed[i] = dto.TitleChange{TrackID: c.TrackID, OldTitle: c.OldTitle, NewTitle: c.NewTitle}
+		}
+		for i, r := range res.Refused {
+			out.Refused[i] = dto.RenameRefusal{TrackID: r.TrackID, Code: string(renameRefusalCode(r.Err))}
+		}
+		return &renameTracksOutput{Body: out}, nil
 	})
 
 	register(api, log, huma.Operation{

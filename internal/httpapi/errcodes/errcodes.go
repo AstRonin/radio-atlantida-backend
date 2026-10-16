@@ -74,6 +74,12 @@ const (
 	// TrackFileNotFound: the track exists, but its file is missing under
 	// the media root.
 	TrackFileNotFound Problem = "track_file_not_found"
+	// TitleEmpty: a bulk rename would leave the track without a title, so
+	// the track keeps its title (refused[] of POST /api/tracks/rename).
+	TitleEmpty Problem = "title_empty"
+	// TitleTooLong: a bulk rename would make the title longer than 500
+	// characters; it is refused, not cut.
+	TitleTooLong Problem = "title_too_long"
 	// PlayRuleNotFound: no play rule has the requested ID.
 	PlayRuleNotFound Problem = "play_rule_not_found"
 	// PlayRuleInUse: the rule is applied to tracks or playlists; see
@@ -137,7 +143,7 @@ func Problems() []Problem {
 		PlaylistTypeNotFound, SystemTypeNotDeletable, PlaylistTypeInUse,
 		PlaylistNotFound, PlaylistInUse,
 		ArtistNotFound, ArtistInUse, ArtistHasHistory,
-		TrackNotFound, TrackInUse, TrackHasHistory, TrackFileNotFound,
+		TrackNotFound, TrackInUse, TrackHasHistory, TrackFileNotFound, TitleEmpty, TitleTooLong,
 		PlayRuleNotFound, PlayRuleInUse,
 		SeparationRuleNotFound,
 		ClockNotFound, ClockInUse, ClockHasHistory,
@@ -191,11 +197,17 @@ const (
 	// Blocked: the track breaks separation or a play rule at the time it
 	// would play.
 	Blocked Field = "blocked"
+	// InvalidCharacters: the text contains characters it must not have
+	// (control characters such as line breaks and tabs in a title).
+	InvalidCharacters Field = "invalid_characters"
 )
 
 // Fields lists every field error code, in declaration order.
 func Fields() []Field {
-	return []Field{Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit, Order, Blocked}
+	return []Field{
+		Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit,
+		Order, Blocked, InvalidCharacters,
+	}
 }
 
 const schemaPrefix = "#/components/schemas/"

@@ -177,6 +177,20 @@ func trackRefusalCode(err error) errcodes.Problem {
 	return errcodes.InternalError
 }
 
+// renameRefusalCode is the code of a track a bulk rename left alone.
+func renameRefusalCode(err error) errcodes.Problem {
+	switch {
+	case errors.Is(err, library.ErrTitleEmpty):
+		return errcodes.TitleEmpty
+	case errors.Is(err, library.ErrTitleTooLong):
+		return errcodes.TitleTooLong
+	case errors.Is(err, library.ErrTrackNotFound):
+		return errcodes.TrackNotFound
+	default:
+		return errcodes.InternalError
+	}
+}
+
 // inUseCodes map the refusals inside a library.InUseError.
 var inUseCodes = map[error]errcodes.Problem{
 	library.ErrTypeInUse:     errcodes.PlaylistTypeInUse,
@@ -198,6 +212,9 @@ var validationRuleCodes = map[validation.Rule]errcodes.Field{
 	validation.DoesNotFit: errcodes.DoesNotFit,
 	validation.Order:      errcodes.Order,
 	validation.Blocked:    errcodes.Blocked,
+	validation.Length:     errcodes.Length,
+
+	validation.InvalidCharacters: errcodes.InvalidCharacters,
 }
 
 // settingRuleCodes maps the rules of a refused setting value to field codes.

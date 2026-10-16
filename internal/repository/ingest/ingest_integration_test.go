@@ -247,3 +247,24 @@ VALUES ($1, $2, 'aired', $3, $3, $4, 180000, 0, $5)`, id, f.artist, started, end
 	require.NoError(t, err)
 	require.Equal(t, []uint64{queued, soon, onAir}, busy)
 }
+
+func TestSaveAnalysisClearsReviewedMarkOnNewChecksum(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	id := f.id(`INSERT INTO tracks (title, file_path, type_id, file_checksum, reviewed_at)
+VALUES ('Song', 'song.mp3', $1, 'sum-1', now()) RETURNING id`, f.music)
+	reviewed := func() bool {
+		t.Helper()
+		var ok bool
+		require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT reviewed_at IS NOT NULL FROM tracks WHERE id = $1`, id).Scan(&ok))
+		return ok
+	}
+
+	require.NoError(t, f.store.SaveAnalysis(ctx, id, analysis("song.mp3", "sum-1", library.IssueLoudness)))
+	require.True(t, reviewed(), "an analysis of the same file keeps the mark")
+
+	// A transcode (replace or .optimal copy) or a file replaced on disk.
+	require.NoError(t, f.store.SaveAnalysis(ctx, id, analysis("song.optimal.mp3", "sum-2")))
+	require.False(t, reviewed(), "a new checksum clears it")
+}

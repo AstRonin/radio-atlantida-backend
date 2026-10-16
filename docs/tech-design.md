@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-19)
+Status: Draft (v7-21)
 Last updated: 2026-10-16
 
 ## 1. Overview
@@ -138,6 +138,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **playlists**: id, name, type_id (FK to `playlist_types`), created_at.
 - **artists**: id, name. Used for artist separation rules.
 - **tracks**: id, title, artist_id, duration_ms, file_path (relative to the media root, see §8.7), format, bitrate, sample_rate, quality_ok (bool), quality_notes, type_id (FK to `playlist_types`), file_checksum, created_at.
+  - `reviewed_at` (timestamptz, nullable; v7-21, `docs/phase-21-plan.md` §2): when the manager marked the track checked, set and cleared only in bulk (`POST /api/tracks/review`). A change of the track's content clears it in the same statement: a new title, artist, or file path, and an analysis or transcode that stores a different `file_checksum`. Playlists, type, notes, the quality override, and play rules do not. It is separate from `quality_ok`.
   - Analysis columns (v7-14, `docs/phase-11-plan.md` §2): codec, channels, loudness_lufs, true_peak_dbtp, loudness_range_lu (EBU R128), source_bitrate (the lossy file a transcoded file was made from), quality_issues (`text[]` of `format`, `sample_rate`, `channels`, `loudness`, `true_peak`, `low_bitrate`, `file_missing`), analyzed_at. An analysis sets `quality_ok` to "no issues"; a manual value lasts until the next analysis. `file_checksum` is the SHA-256 of the file, indexed for the duplicate check of an import.
 - **track_playlists**: track_id, playlist_id (many-to-many). A track may belong to several playlists.
 - **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), default_filler_mode (nullable: `random`, `playlist`, or `artist`; null falls back to the global filler setting, §6.3), default_filler_playlist_id (nullable, FK to `playlists`; set only for `playlist`), default_filler_artist_id (nullable, FK to `artists`; set only for `artist`), updated_at. The default mode is chosen in the clock editor (§6.2). It applies when the filler pool is empty or a filler reminder expires (§7); `ask` and `pool` are not allowed here because they would fall back to themselves.
@@ -456,6 +457,17 @@ An analysis or transcode that reaches a track deleted after it started counts it
 
 `GET /api/tracks` also takes `sort` (`title` default, `artist`, `type`, `duration`, `format`, `quality`), `order` (`asc` default, `desc`), and `offset` (0 to 1,000,000), and its response carries `total`, the number of tracks matching the filters on every page. PostgreSQL sorts the whole filtered set; tracks without the value (no artist, no duration, no format, never analysed) are last in both orders, and ties are ordered by title and ID ascending. The `quality` order is: no issues, with issues (more issues first), never analysed. An offset past the end returns no items and the correct `total`. `cursor` and `next_cursor` work only in the default order (`title`, `asc`) and without `offset`; any other combination is a 422 on `query.cursor`.
 
+**Endpoints added in v7-21 (reviewed mark and bulk rename, `docs/phase-21-plan.md` §2)**
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /api/tracks/review` | Body: `track_ids` (1 to 1,000, unique), `reviewed`. Sets the reviewed mark (a track already reviewed keeps the time of its first mark) or clears it, in one statement. Returns 200 with `updated` and `not_found` (request order) |
+| `POST /api/tracks/rename` | Body: `track_ids` (1 to 1,000, unique), `find` (1 to 200 characters, literal, not only white space), `replace` (0 to 200), `match_case` (default false), `dry_run` (required). Replaces every occurrence of `find` in each title, then applies the title rule. `dry_run: true` returns the preview and writes nothing; `false` writes the changed titles in one transaction, computed again from the stored titles under a row lock, and clears their reviewed mark. Returns 200 with `changed` (`track_id`, `old_title`, `new_title`), `unchanged`, and `refused` (`track_id`, `code` `track_not_found`, `title_empty`, or `title_too_long`: refused, never cut) |
+
+`GET /api/tracks` also takes `reviewed` (`true` or `false`) and the sort key `reviewed` (by `reviewed_at`, tracks not reviewed last in both orders); track responses carry `reviewed_at`.
+
+**Title rule** (create, update, bulk rename, import): the title is trimmed and runs of white space become one space; control characters (line breaks, tabs) are refused on the API (field `title`, code `invalid_characters`) and removed on import; 1 to 500 characters after cleaning. A title saved on the API reaches the air with the requests pushed after the save (§8.1); items already in Liquidsoap's queues keep the title they were pushed with.
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |
@@ -714,7 +726,7 @@ For each item, Go sends:
 
 Liquidsoap performs the fade itself, so control-path latency does not affect it.
 
-**Implementation (v7-12, `docs/phase-9-plan.md` §2).** Liquidsoap has two request queues, `hour_0` and `hour_1`; each station hour is pushed into the queue of its parity, and a time switch in the script plays the queue of the current hour (§8.10). Each request is annotated with its `item_id` and, for a truncated item, `liq_cue_out` and `liq_fade_out`. The backend keeps `rotation.lookahead_items` items waiting in the queue of the hour on air, pushes the first items of the next hour `playout.prepush_minutes` before it starts, marks pushed items `queued`, and never pushes an item that is already more than 30 seconds late (no catch-up, §7.1).
+**Implementation (v7-12, `docs/phase-9-plan.md` §2).** Liquidsoap has two request queues, `hour_0` and `hour_1`; each station hour is pushed into the queue of its parity, and a time switch in the script plays the queue of the current hour (§8.10). Each request is annotated with its `item_id` and, for a truncated item, `liq_cue_out` and `liq_fade_out`. Since v7-21 (`docs/phase-21-plan.md` §2) every request, of a plan item or an emergency track, also carries the library `title` and `artist` (empty for a track without an artist), so the stream metadata is what the manager entered, never the tags of the file: an annotation wins over a tag, and an empty artist hides the artist tag (checked on the dev stack). Every value is quoted, with `\` and `"` escaped and control characters removed, by one helper (`liquidsoap.Annotate`). The backend keeps `rotation.lookahead_items` items waiting in the queue of the hour on air, pushes the first items of the next hour `playout.prepush_minutes` before it starts, marks pushed items `queued`, and never pushes an item that is already more than 30 seconds late (no catch-up, §7.1).
 
 ### 8.2 Emergency mode: request.dynamic
 
@@ -771,6 +783,7 @@ All Icecast and output parameters are settings, not code, so they can be changed
 - codec (for example MP3, AAC, or Ogg Vorbis), bitrate, sample rate, channels;
 - loudness target and limiter settings used by Liquidsoap;
 - stream name, description, and genre metadata;
+- the charset of the mount. Icecast 2.4 stores and serves the metadata of an MP3 stream in the mount's `<charset>`, ISO-8859-1 by default, so a title in Cyrillic or Armenian shows as `*` until the mount has `<charset>UTF-8</charset>`; Liquidsoap sends UTF-8 (v7-21, `docs/phase-21-plan.md` §7). This is Icecast configuration, not a backend setting;
 - HLS output on or off, if used later.
 
 The Docker Icecast service is a test server. Its connection is entered in the admin panel like any other setting, and switching to the production server is a settings change, not a code or file change. Only the Icecast source password stays in the environment.

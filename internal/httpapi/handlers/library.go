@@ -35,6 +35,8 @@ type Library interface {
 	UpdateTrack(ctx context.Context, id uint64, in library.TrackInput) (library.Track, error)
 	DeleteTrack(ctx context.Context, id uint64) error
 	DeleteTracks(ctx context.Context, ids []uint64) (library.DeleteTracksResult, error)
+	ReviewTracks(ctx context.Context, ids []uint64, reviewed bool) (library.ReviewTracksResult, error)
+	RenameTracks(ctx context.Context, req library.RenameRequest) (library.RenameResult, error)
 	TrackAudio(ctx context.Context, id uint64) (library.Audio, error)
 }
 
@@ -72,6 +74,7 @@ func trackDTO(t library.Track) dto.Track {
 		Codec: t.Codec, Channels: t.Channels, LoudnessLUFS: t.LoudnessLUFS, TruePeakDBTP: t.TruePeakDBTP,
 		LoudnessRangeLU: t.LoudnessRangeLU, SourceBitrate: t.SourceBitrate,
 		QualityIssues: make([]string, len(t.QualityIssues)), Fixes: []string{}, AnalyzedAt: t.AnalyzedAt,
+		ReviewedAt: t.ReviewedAt,
 	}
 	for i, q := range t.QualityIssues {
 		out.QualityIssues[i] = string(q)

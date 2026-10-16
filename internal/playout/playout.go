@@ -25,8 +25,12 @@ type Item struct {
 	ID       uint64
 	TrackID  uint64
 	FilePath string
-	Start    time.Time
-	InMS     int
+	// Title and Artist are the library's, sent to Liquidsoap as the stream
+	// metadata; Artist is empty for a track without an artist.
+	Title  string
+	Artist string
+	Start  time.Time
+	InMS   int
 	// OutMS is the out point, relative to the start of the track.
 	OutMS     int
 	Truncated bool

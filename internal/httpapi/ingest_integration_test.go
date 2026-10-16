@@ -165,7 +165,9 @@ func TestImportFolder(t *testing.T) {
 	require.NoError(t, err)
 
 	// Optimize the low track into a copy: everything but the bitrate of
-	// its source is fixed.
+	// its source is fixed. The new file clears the reviewed mark.
+	var reviewed dto.ReviewTracksResult
+	a.ok(http.StatusOK, http.MethodPost, "/api/tracks/review", map[string]any{"track_ids": []uint64{low.ID}, "reviewed": true}, &reviewed)
 	a.ok(http.StatusAccepted, http.MethodPost, "/api/tracks/transcode",
 		map[string]any{"track_ids": []uint64{low.ID}, "fix": "optimize", "output": "copy"}, &accepted)
 	op = a.waitOperation(&accepted.OperationID)
@@ -180,6 +182,8 @@ func TestImportFolder(t *testing.T) {
 	require.InDelta(t, 64000, *fixed.SourceBitrate, 2000, "the measured rate of the 64 kbps source")
 	require.Equal(t, []string{"low_bitrate"}, fixed.QualityIssues)
 	require.Empty(t, fixed.Fixes)
+	require.Nil(t, fixed.ReviewedAt, "a transcode clears the reviewed mark")
+	a.ok(http.StatusOK, http.MethodPost, "/api/tracks/review", map[string]any{"track_ids": []uint64{low.ID}, "reviewed": true}, &reviewed)
 	_, err = os.Stat(filepath.Join(a.mediaRoot, "music", "talk", "low.mp3"))
 	require.NoError(t, err, "the original stays next to the copy")
 	a.ok(http.StatusOK, http.MethodGet, "/api/import/files?folder=music/talk", nil, &files)
@@ -203,6 +207,8 @@ func TestImportFolder(t *testing.T) {
 	a.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/tracks/%d", id1.ID), nil, &id1)
 	require.Equal(t, []string{"file_missing"}, id1.QualityIssues)
 	require.Equal(t, "jingles/id1.mp3", id1.FilePath, "nothing else changes")
+	a.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/tracks/%d", low.ID), nil, &fixed)
+	require.NotNil(t, fixed.ReviewedAt, "an analysis of the unchanged file keeps the mark")
 
 	a.fieldError("track_ids", errcodes.UnknownID, http.MethodPost, "/api/tracks/transcode",
 		map[string]any{"track_ids": []uint64{999999}, "fix": "optimize", "output": "copy"})

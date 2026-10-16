@@ -126,12 +126,15 @@ func TestImportTitleAndArtist(t *testing.T) {
 	f.tools.audio("m/Tagged - Name Artist.mp3", "4", mp3Info("Tag Title", "Tag Artist"), nil)
 	f.tools.audio("m/Only Title - Name Artist.mp3", "5", mp3Info("Tag Title 2", ""), nil)
 	f.tools.audio("m/Name Title - Name Artist.mp3", "6", mp3Info("", "Tag Artist"), nil)
+	// The title rule removes what the API refuses.
+	f.tools.audio("m/broken.mp3", "7", mp3Info(" Broken\x00 \r\n tag\t  title ", ""), nil)
+	f.tools.audio("m/Two  spaces.mp3", "8", mp3Info("\x01", ""), nil)
 
 	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "m", TypeID: 1})
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder m: imported 6", summary)
+	require.Equal(t, "folder m: imported 8", summary)
 
 	type got struct{ title, artist string }
 	byPath := map[string]got{}
@@ -149,6 +152,8 @@ func TestImportTitleAndArtist(t *testing.T) {
 		"m/Tagged - Name Artist.mp3":     {"Tag Title", "Tag Artist"},
 		"m/Only Title - Name Artist.mp3": {"Tag Title 2", "Name Artist"},
 		"m/Name Title - Name Artist.mp3": {"Name Title", "Tag Artist"},
+		"m/broken.mp3":                   {"Broken tag title", ""},
+		"m/Two  spaces.mp3":              {"Two spaces", ""},
 	}, byPath)
 	require.Len(t, f.store.artists, 3, "DJ Ann created once for two files")
 }

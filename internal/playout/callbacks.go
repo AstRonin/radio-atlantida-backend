@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
+	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
@@ -305,5 +306,19 @@ func (s *Service) EmergencyNext(ctx context.Context) (string, bool, error) {
 	t := tracks[s.rnd.IntN(len(tracks))]
 	s.lastEmergency = t.ID
 	s.mu.Unlock()
-	return `annotate:track_id="` + strconv.FormatUint(t.ID, 10) + `":` + path.Join(set.MediaRoot, t.FilePath), true, nil
+	return EmergencyURI(t, set), true, nil
+}
+
+// EmergencyURI returns the request of an emergency track: the file under
+// the media root, annotated with the track ID and, as RequestURI, the
+// library title and artist.
+func EmergencyURI(t Track, set Settings) string {
+	artist := ""
+	if t.ArtistName != nil {
+		artist = *t.ArtistName
+	}
+	return liquidsoap.Annotate(path.Join(set.MediaRoot, t.FilePath),
+		liquidsoap.Pair{Key: "track_id", Value: strconv.FormatUint(t.ID, 10)},
+		liquidsoap.Pair{Key: "title", Value: t.Title},
+		liquidsoap.Pair{Key: "artist", Value: artist})
 }

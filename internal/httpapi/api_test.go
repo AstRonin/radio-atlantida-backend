@@ -304,7 +304,7 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/outages",
 		"/api/live/session", "/api/live/status", "/api/broadcast/status", "/api/air-window",
 		"/api/import", "/api/import/folders", "/api/import/files", "/api/tracks/analyse", "/api/tracks/transcode",
-		"/api/tracks/delete",
+		"/api/tracks/delete", "/api/tracks/review", "/api/tracks/rename",
 	} {
 		require.Contains(t, doc.Paths, p)
 	}

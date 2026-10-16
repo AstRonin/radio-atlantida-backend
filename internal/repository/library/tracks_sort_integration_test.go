@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -25,6 +26,7 @@ type sortRow struct {
 	format   *string // "" is stored and sorts as missing
 	analysed bool
 	issues   int
+	reviewed *int // hours after the fixture's base time
 }
 
 func (r sortRow) missing(s library.TrackSort) bool {
@@ -37,6 +39,8 @@ func (r sortRow) missing(s library.TrackSort) bool {
 		return r.format == nil || *r.format == ""
 	case library.SortQuality:
 		return !r.analysed
+	case library.SortReviewed:
+		return r.reviewed == nil
 	default:
 		return false
 	}
@@ -58,6 +62,8 @@ func compareKey(s library.TrackSort, a, b sortRow) int {
 	case library.SortQuality:
 		// No issues first, then more issues first.
 		return cmp.Or(cmp.Compare(min(a.issues, 1), min(b.issues, 1)), cmp.Compare(b.issues, a.issues))
+	case library.SortReviewed:
+		return cmp.Compare(*a.reviewed, *b.reviewed)
 	default:
 		return strings.Compare(a.title, b.title)
 	}
@@ -98,8 +104,9 @@ func expectedOrder(rows []sortRow, s library.TrackSort, desc bool) []uint64 {
 	return ids
 }
 
-// sortFixture adds 30 tracks with equal titles, missing artists, durations
-// and formats, and all three quality states.
+// sortFixture adds 30 tracks with equal titles, missing artists, durations,
+// formats, and reviewed marks, equal reviewed times, and all three quality
+// states.
 func sortFixture(t *testing.T, f *fixture) []sortRow {
 	t.Helper()
 	ctx := t.Context()
@@ -144,6 +151,9 @@ func sortFixture(t *testing.T, f *fixture) []sortRow {
 		if r.analysed && i%3 == 2 {
 			r.issues = i%4 + 1
 		}
+		if i%4 != 1 {
+			r.reviewed = new(i % 5)
+		}
 		id, err := f.tracks.Create(ctx, in)
 		require.NoError(t, err)
 		r.id = id
@@ -151,8 +161,12 @@ func sortFixture(t *testing.T, f *fixture) []sortRow {
 		if r.analysed {
 			analysedAt = "2026-10-01T00:00:00Z"
 		}
-		_, err = f.d.Pool.Exec(ctx, `UPDATE tracks SET format = $2, analyzed_at = $3, quality_issues = $4 WHERE id = $1`,
-			id, r.format, analysedAt, codes[:r.issues])
+		var reviewedAt any
+		if r.reviewed != nil {
+			reviewedAt = time.Date(2026, 10, 1, *r.reviewed, 0, 0, 0, time.UTC)
+		}
+		_, err = f.d.Pool.Exec(ctx, `UPDATE tracks SET format = $2, analyzed_at = $3, quality_issues = $4, reviewed_at = $5
+WHERE id = $1`, id, r.format, analysedAt, codes[:r.issues], reviewedAt)
 		require.NoError(t, err)
 		rows[i] = r
 	}

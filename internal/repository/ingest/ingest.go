@@ -261,14 +261,17 @@ func (s *Store) Unanalysed(ctx context.Context, limit int) ([]ingest.Track, erro
 
 // SaveAnalysis stores the analysis of a track and its file path.
 // quality_ok follows the issues: the manager's override lasts until the
-// next analysis.
+// next analysis. A new checksum (a transcode, a file replaced on disk)
+// clears the reviewed mark in the same statement; the SET expressions see
+// the stored checksum.
 func (s *Store) SaveAnalysis(ctx context.Context, id uint64, a ingest.Analysis) error {
 	m := a.Measurements
 	tag, err := s.q.Exec(ctx, `
 UPDATE tracks SET file_path = $2, file_checksum = $3, duration_ms = $4, format = $5, codec = $6, bitrate = $7,
                   sample_rate = $8, channels = $9, loudness_lufs = $10, true_peak_dbtp = $11,
                   loudness_range_lu = $12, source_bitrate = $13, quality_issues = $14,
-                  quality_ok = cardinality($14::text[]) = 0, analyzed_at = $15
+                  quality_ok = cardinality($14::text[]) = 0, analyzed_at = $15,
+                  reviewed_at = CASE WHEN file_checksum IS DISTINCT FROM $3 THEN NULL ELSE reviewed_at END
 WHERE id = $1`,
 		id, a.FilePath, a.Checksum, m.DurationMS, m.Format, m.Codec, m.Bitrate, m.SampleRate, m.Channels,
 		m.LoudnessLUFS, m.TruePeakDBTP, m.LoudnessRangeLU, m.SourceBitrate, codes(a.Issues), a.AnalyzedAt)

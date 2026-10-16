@@ -293,7 +293,7 @@ func newHarness(t *testing.T, items ...Item) *harness {
 
 // item: ID id, planned at h10 + offset, 3 minutes long.
 func item(id uint64, offset time.Duration) Item {
-	return Item{ID: id, TrackID: id, FilePath: "a/b.mp3", Start: h10.Add(offset), OutMS: 180000}
+	return Item{ID: id, TrackID: id, FilePath: "a/b.mp3", Title: "Song", Artist: "Band", Start: h10.Add(offset), OutMS: 180000}
 }
 
 func TestQueueNameAndHourShift(t *testing.T) {
@@ -325,12 +325,18 @@ func TestQueueNameAndHourShift(t *testing.T) {
 func TestRequestURI(t *testing.T) {
 	t.Parallel()
 	set := Settings{MediaRoot: "/media", FadeOutMS: 2500}
-	require.Equal(t, `annotate:item_id="7":/media/a/b.mp3`, RequestURI(item(7, 0), set))
+	require.Equal(t, `annotate:item_id="7",title="Song",artist="Band":/media/a/b.mp3`, RequestURI(item(7, 0), set))
 	it := item(8, 0)
 	it.Truncated, it.OutMS = true, 123456
-	require.Equal(t, `annotate:item_id="8",liq_cue_out="123.456",liq_fade_out="2.5":/media/a/b.mp3`, RequestURI(it, set))
+	require.Equal(t, `annotate:item_id="8",liq_cue_out="123.456",liq_fade_out="2.5",title="Song",artist="Band":/media/a/b.mp3`,
+		RequestURI(it, set))
 	it.InMS = 500
 	require.Contains(t, RequestURI(it, set), `liq_cue_in="0.5"`)
+
+	// A jingle without an artist: the empty artist hides the file's tag.
+	it = item(9, 0)
+	it.Title, it.Artist = `Station "ID"`, ""
+	require.Equal(t, `annotate:item_id="9",title="Station \"ID\"",artist="":/media/a/b.mp3`, RequestURI(it, set))
 }
 
 func TestPassFillsLookahead(t *testing.T) {
@@ -339,7 +345,7 @@ func TestPassFillsLookahead(t *testing.T) {
 	require.NoError(t, h.svc.pass(t.Context()))
 	require.Equal(t, []uint64{1, 2}, h.store.queued(), "lookahead 2")
 	require.Len(t, h.ctl.pushed["hour_0"], 2)
-	require.Equal(t, `annotate:item_id="1":/media/a/b.mp3`, h.ctl.pushed["hour_0"][0])
+	require.Equal(t, `annotate:item_id="1",title="Song",artist="Band":/media/a/b.mp3`, h.ctl.pushed["hour_0"][0])
 	require.Equal(t, "0.", h.ctl.vars[varHourShift])
 	require.Equal(t, "1.", h.ctl.vars[varMusicGain], "the setting on the first connect")
 
@@ -352,7 +358,7 @@ func TestPassFillsLookahead(t *testing.T) {
 	// Within the pre-push window the next hour fills its own queue.
 	h.now = h10.Add(56 * time.Minute)
 	require.NoError(t, h.svc.pass(t.Context()))
-	require.Equal(t, []string{`annotate:item_id="4":/media/a/b.mp3`}, h.ctl.pushed["hour_1"])
+	require.Equal(t, []string{`annotate:item_id="4",title="Song",artist="Band":/media/a/b.mp3`}, h.ctl.pushed["hour_1"])
 }
 
 func TestPassSkipsLateItems(t *testing.T) {
@@ -553,7 +559,7 @@ func TestEmergency(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok, "an empty playlist")
 
-	h.store.lists[9] = []Track{{ID: 1, FilePath: "e/1.mp3"}, {ID: 2, FilePath: "e/2.mp3"}}
+	h.store.lists[9] = []Track{{ID: 1, Title: "E1", ArtistName: new("Band"), FilePath: "e/1.mp3"}, {ID: 2, Title: "E2", FilePath: "e/2.mp3"}}
 	prev := ""
 	for range 10 {
 		uri, ok, err := h.svc.EmergencyNext(ctx)
@@ -562,7 +568,10 @@ func TestEmergency(t *testing.T) {
 		require.NotEqual(t, prev, uri, "never the same track twice in a row")
 		prev = uri
 	}
-	require.Contains(t, []string{`annotate:track_id="1":/media/e/1.mp3`, `annotate:track_id="2":/media/e/2.mp3`}, prev)
+	require.Contains(t, []string{
+		`annotate:track_id="1",title="E1",artist="Band":/media/e/1.mp3`,
+		`annotate:track_id="2",title="E2",artist="":/media/e/2.mp3`,
+	}, prev)
 
 	h.store.tracks[1] = Track{ID: 1, Title: "E1", DurationMS: new(20000)}
 	require.NoError(t, h.svc.Callback(ctx, Event{Kind: EventStart, Source: SourceEmergency, TrackID: new(uint64(1)), Time: h10}))
