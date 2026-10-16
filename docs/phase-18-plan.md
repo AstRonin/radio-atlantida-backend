@@ -20,7 +20,7 @@ This replaces the inbox model of phase 11 (inbox folder, library folder, files m
    - `new_files`: audio files that are not a track yet by path, and not the original of a transcoded copy (2.8).
 
    The root has the same two counts. The counts compare paths only, without reading the files, so they are cheap; a file that is new by path but has the checksum of an existing track is counted as new and reported as a duplicate by the import (2.7).
-5. **Files of one folder.** `GET /api/import/files?folder=music` lists the files in that folder and its subfolders, in path order, at most 1,000 (`more`). Each file has `path` (relative to the media root), `size`, `modified_at`, and `status`:
+5. **Files of one folder.** `GET /api/import/files?folder=music` lists the files in that folder and its subfolders, in path order, at most 2,000 (`more`). Each file has `path` (relative to the media root), `size`, `modified_at`, and `status`:
    - `new`: an import would take it;
    - `in_library`: a track has this path, with `track_id`;
    - `original`: the original of a transcoded copy (2.8), with the `track_id` of the copy's track;

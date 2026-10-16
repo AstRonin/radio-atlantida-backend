@@ -33,7 +33,7 @@ type ImportFile struct {
 // ImportFiles are the files of a folder and its subfolders.
 type ImportFiles struct {
 	Folder string       `json:"folder" doc:"The folder relative to the media root; empty for the media root."`
-	Items  []ImportFile `json:"items" nullable:"false" doc:"In path order, at most 1,000. Hidden files are not listed."`
+	Items  []ImportFile `json:"items" nullable:"false" doc:"In path order, at most 2,000. Hidden files are not listed."`
 	More   bool         `json:"more" doc:"The folder holds more files than listed."`
 }
 

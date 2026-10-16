@@ -15,7 +15,7 @@ const (
 	// decision 2).
 	maxFolders = 500
 	// maxFileListing bounds the file listing of one folder (decision 5).
-	maxFileListing = 1000
+	maxFileListing = 2000
 	// maxTreeFiles bounds the walk behind the folder counts. A station has
 	// about 800 files; the bound keeps a wrong MEDIA_ROOT (a whole disk)
 	// from filling the memory.
