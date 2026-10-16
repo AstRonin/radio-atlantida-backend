@@ -152,9 +152,14 @@ func TestReviewedFilterAndSort(t *testing.T) {
 }
 
 func newService(f *fixture) *library.Service {
-	return library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil,
+	return library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, noneOnAir{},
 		slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
 }
+
+// noneOnAir: nothing is on air.
+type noneOnAir struct{}
+
+func (noneOnAir) OnAirTrack() (uint64, bool) { return 0, false }
 
 func TestRenameTracks(t *testing.T) {
 	t.Parallel()

@@ -49,13 +49,16 @@ type itemRow struct {
 	InMS      int       `db:"planned_in_ms"`
 	OutMS     int       `db:"planned_out_ms"`
 	Truncated bool      `db:"truncated"`
+	Duration  *int      `db:"duration_ms"`
+	FadeInMS  int       `db:"fade_in_ms"`
+	FadeOutMS int       `db:"fade_out_ms"`
 	Queued    bool      `db:"queued"`
 }
 
 func (r itemRow) domain() playout.Item {
 	it := playout.Item{
 		ID: r.ID, TrackID: r.TrackID, FilePath: r.FilePath, Title: r.Title, Start: r.Start.UTC(), InMS: r.InMS, OutMS: r.OutMS,
-		Truncated: r.Truncated, Queued: r.Queued,
+		Truncated: r.Truncated, FileDurationMS: r.Duration, FadeInMS: r.FadeInMS, FadeOutMS: r.FadeOutMS, Queued: r.Queued,
 	}
 	if r.Artist != nil {
 		it.Artist = *r.Artist
@@ -64,11 +67,12 @@ func (r itemRow) domain() playout.Item {
 }
 
 // Items returns the planned and queued items that start in [from, to), in
-// planned order (ix_scheduled_items_planned_start_utc), with the title and
-// artist of their tracks for the stream metadata.
+// planned order (ix_scheduled_items_planned_start_utc), with the title,
+// artist, duration, and fades of their tracks for the request.
 func (s *Store) Items(ctx context.Context, from, to time.Time) ([]playout.Item, error) {
 	rows, err := s.q.Query(ctx, `SELECT si.id, si.track_id, t.file_path, t.title, a.name AS artist_name,
-       si.planned_start_utc, si.planned_in_ms, si.planned_out_ms, si.truncated, si.status = 'queued' AS queued
+       si.planned_start_utc, si.planned_in_ms, si.planned_out_ms, si.truncated, t.duration_ms, t.fade_in_ms, t.fade_out_ms,
+       si.status = 'queued' AS queued
 FROM scheduled_items si
 JOIN tracks t ON t.id = si.track_id
 LEFT JOIN artists a ON a.id = t.artist_id
@@ -123,10 +127,11 @@ func (s *Store) Start(ctx context.Context, itemID uint64, at time.Time) (bool, e
     WHERE id = $1 AND status IN ('planned', 'queued')
     RETURNING id, track_id, clock_id, grid_slot_id, planned_start_utc, planned_in_ms, planned_out_ms, truncated
 )
-INSERT INTO play_log (track_id, artist_id, status, planned_start_utc, started_at, planned_out_ms,
+INSERT INTO play_log (track_id, artist_id, status, planned_start_utc, started_at, planned_in_ms, planned_out_ms,
                       actual_duration_ms, truncated, source, clock_id, grid_slot_id, scheduled_item_id)
 SELECT m.track_id, t.artist_id, CASE WHEN m.truncated THEN 'truncated' ELSE 'aired' END, m.planned_start_utc, $2,
-       m.planned_out_ms, m.planned_out_ms - m.planned_in_ms, m.truncated, 'auto', m.clock_id, m.grid_slot_id, m.id
+       m.planned_in_ms, m.planned_out_ms, m.planned_out_ms - m.planned_in_ms, m.truncated, 'auto', m.clock_id,
+       m.grid_slot_id, m.id
 FROM moved m
 JOIN tracks t ON t.id = m.track_id
 ON CONFLICT (scheduled_item_id) WHERE scheduled_item_id IS NOT NULL DO NOTHING`, itemID, at)
@@ -137,14 +142,16 @@ ON CONFLICT (scheduled_item_id) WHERE scheduled_item_id IS NOT NULL DO NOTHING`,
 }
 
 // End records the end of a logged plan item whose end is not recorded yet.
-// The planner never sets an in point, so planned_out_ms is the planned
-// length. In SET, truncated is the value before the update.
+// The planned length is planned_out_ms - planned_in_ms; Liquidsoap counts
+// the elapsed time from the in point. In SET, truncated is the value before
+// the update.
 func (s *Store) End(ctx context.Context, itemID uint64, elapsedMS, cutMarginMS int) (bool, error) {
 	tag, err := s.q.Exec(ctx, `UPDATE play_log SET
     actual_duration_ms = $2::integer,
     ended_at = started_at + make_interval(secs => $2::integer / 1000.0),
-    status = CASE WHEN truncated OR $2::integer < planned_out_ms - $3::integer THEN 'truncated' ELSE 'aired' END,
-    truncated = truncated OR $2::integer < planned_out_ms - $3::integer
+    status = CASE WHEN truncated OR $2::integer < planned_out_ms - planned_in_ms - $3::integer
+                  THEN 'truncated' ELSE 'aired' END,
+    truncated = truncated OR $2::integer < planned_out_ms - planned_in_ms - $3::integer
 WHERE scheduled_item_id = $1 AND ended_at IS NULL AND status <> 'missed'`, itemID, elapsedMS, cutMarginMS)
 	if err != nil {
 		return false, fmt.Errorf("record end of item %d: %w", itemID, err)
@@ -184,6 +191,7 @@ type loggedRow struct {
 	Title      string    `db:"title"`
 	ArtistName *string   `db:"artist_name"`
 	StartedAt  time.Time `db:"started_at"`
+	InMS       int       `db:"planned_in_ms"`
 	OutMS      *int      `db:"planned_out_ms"`
 	Truncated  bool      `db:"truncated"`
 }
@@ -191,7 +199,7 @@ type loggedRow struct {
 func (r loggedRow) domain() playout.NowPlaying {
 	return playout.NowPlaying{
 		ItemID: new(r.ItemID), TrackID: r.TrackID, Title: r.Title, ArtistName: r.ArtistName,
-		Source: playout.SourcePlan, StartedAt: r.StartedAt.UTC(), OutMS: r.OutMS, Truncated: r.Truncated,
+		Source: playout.SourcePlan, StartedAt: r.StartedAt.UTC(), InMS: r.InMS, OutMS: r.OutMS, Truncated: r.Truncated,
 	}
 }
 
@@ -201,7 +209,7 @@ var errNotLogged = errors.New("item not logged")
 // (uq_play_log_scheduled_item_id).
 func (s *Store) Logged(ctx context.Context, itemID uint64) (playout.NowPlaying, bool, error) {
 	rows, err := s.q.Query(ctx, `SELECT pl.scheduled_item_id, pl.track_id, t.title, a.name AS artist_name,
-       pl.started_at, pl.planned_out_ms, pl.truncated
+       pl.started_at, pl.planned_in_ms, pl.planned_out_ms, pl.truncated
 FROM play_log pl
 JOIN tracks t ON t.id = pl.track_id
 LEFT JOIN artists a ON a.id = t.artist_id
@@ -225,13 +233,21 @@ type trackRow struct {
 	ArtistName *string `db:"artist_name"`
 	FilePath   string  `db:"file_path"`
 	DurationMS *int    `db:"duration_ms"`
+	CueInMS    int     `db:"cue_in_ms"`
+	CueOutMS   *int    `db:"cue_out_ms"`
+	FadeInMS   int     `db:"fade_in_ms"`
+	FadeOutMS  int     `db:"fade_out_ms"`
 }
 
 func (r trackRow) domain() playout.Track {
-	return playout.Track{ID: r.ID, Title: r.Title, ArtistName: r.ArtistName, FilePath: r.FilePath, DurationMS: r.DurationMS}
+	return playout.Track{
+		ID: r.ID, Title: r.Title, ArtistName: r.ArtistName, FilePath: r.FilePath, DurationMS: r.DurationMS,
+		CueInMS: r.CueInMS, CueOutMS: r.CueOutMS, FadeInMS: r.FadeInMS, FadeOutMS: r.FadeOutMS,
+	}
 }
 
-const trackColumns = `t.id, t.title, a.name AS artist_name, t.file_path, t.duration_ms`
+const trackColumns = `t.id, t.title, a.name AS artist_name, t.file_path, t.duration_ms,
+       t.cue_in_ms, t.cue_out_ms, t.fade_in_ms, t.fade_out_ms`
 
 // Track returns a track; false if there is none.
 func (s *Store) Track(ctx context.Context, id uint64) (playout.Track, bool, error) {
@@ -275,6 +291,7 @@ type queuedRow struct {
 	Title      string    `db:"title"`
 	ArtistName *string   `db:"artist_name"`
 	Start      time.Time `db:"planned_start_utc"`
+	InMS       int       `db:"planned_in_ms"`
 	OutMS      int       `db:"planned_out_ms"`
 	Truncated  bool      `db:"truncated"`
 }
@@ -282,7 +299,7 @@ type queuedRow struct {
 func (r queuedRow) domain() playout.QueuedItem {
 	return playout.QueuedItem{
 		ID: r.ID, TrackID: r.TrackID, Title: r.Title, ArtistName: r.ArtistName, Start: r.Start.UTC(),
-		OutMS: r.OutMS, Truncated: r.Truncated,
+		InMS: r.InMS, OutMS: r.OutMS, Truncated: r.Truncated,
 	}
 }
 
@@ -290,7 +307,7 @@ func (r queuedRow) domain() playout.QueuedItem {
 // (ix_scheduled_items_status_outage_id leads with the status).
 func (s *Store) Queued(ctx context.Context, limit int) ([]playout.QueuedItem, error) {
 	rows, err := s.q.Query(ctx, `SELECT si.id, si.track_id, t.title, a.name AS artist_name, si.planned_start_utc,
-       si.planned_out_ms, si.truncated
+       si.planned_in_ms, si.planned_out_ms, si.truncated
 FROM scheduled_items si
 JOIN tracks t ON t.id = si.track_id
 LEFT JOIN artists a ON a.id = t.artist_id

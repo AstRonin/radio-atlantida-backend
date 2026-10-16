@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -54,6 +55,14 @@ type trackRow struct {
 	QualityIssues string
 	AnalyzedAt    *time.Time
 	ReviewedAt    *time.Time
+
+	CueInMS   int  `gorm:"column:cue_in_ms"`
+	CueOutMS  *int `gorm:"column:cue_out_ms"`
+	FadeInMS  int  `gorm:"column:fade_in_ms"`
+	FadeOutMS int  `gorm:"column:fade_out_ms"`
+
+	NextPlannedAt *time.Time
+	Queued        bool
 	// Total is count(*) OVER () in List; zero elsewhere.
 	Total int
 }
@@ -65,12 +74,24 @@ const trackSelect = `tr.id, tr.title, tr.artist_id, a.name AS artist_name, tr.du
        tr.format, tr.bitrate, tr.sample_rate, tr.quality_ok, tr.quality_notes,
        t.id AS type_id, t.code AS type_code, t.name AS type_name, tr.file_checksum, tr.created_at,
        tr.codec, tr.channels, tr.loudness_lufs, tr.true_peak_dbtp, tr.loudness_range_lu, tr.source_bitrate,
-       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at, tr.reviewed_at`
+       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at, tr.reviewed_at,
+       tr.cue_in_ms, tr.cue_out_ms, tr.fade_in_ms, tr.fade_out_ms,
+       np.next_planned_at, COALESCE(np.queued, false) AS queued`
+
+// planUsage joins the plan use of each track: the earliest start of a
+// planned or queued item, and whether one is queued. scheduled_items holds
+// only the plan horizon (hundreds of rows), so it is aggregated once and
+// hash-joined; a subquery per track would probe the index for every track
+// of the library.
+const planUsage = `
+LEFT JOIN (SELECT si.track_id, min(si.planned_start_utc) AS next_planned_at, bool_or(si.status = 'queued') AS queued
+           FROM scheduled_items si WHERE si.status IN ('planned', 'queued')
+           GROUP BY si.track_id) np ON np.track_id = tr.id`
 
 const fromTracks = `
 FROM tracks tr
 JOIN playlist_types t ON t.id = tr.type_id
-LEFT JOIN artists a ON a.id = tr.artist_id`
+LEFT JOIN artists a ON a.id = tr.artist_id` + planUsage
 
 // trackSortKeys are the ORDER BY keys of each sort, fixed SQL: the sort
 // parameter never reaches the SQL text. Missing values are NULL (an empty
@@ -86,7 +107,8 @@ var trackSortKeys = map[library.TrackSort][]string{
 		"CASE WHEN tr.analyzed_at IS NULL THEN NULL WHEN cardinality(tr.quality_issues) = 0 THEN 0 ELSE 1 END",
 		"-cardinality(tr.quality_issues)",
 	},
-	library.SortReviewed: {"tr.reviewed_at"},
+	library.SortReviewed:    {"tr.reviewed_at"},
+	library.SortNextPlanned: {"np.next_planned_at"},
 }
 
 // trackOrder is the ORDER BY of f: the sort keys in f's direction, then
@@ -150,7 +172,24 @@ func trackWhere(f library.TrackFilter) (where []string, args []any) {
 	default:
 		where = append(where, "tr.reviewed_at IS NULL")
 	}
+	switch {
+	case f.InPlan == nil:
+	case *f.InPlan:
+		where = append(where, "np.track_id IS NOT NULL")
+	default:
+		where = append(where, "np.track_id IS NULL")
+	}
+	if f.InPlaylist != nil {
+		where = append(where, notIf(!*f.InPlaylist)+"EXISTS (SELECT 1 FROM track_playlists tp WHERE tp.track_id = tr.id)")
+	}
 	return where, args
+}
+
+func notIf(not bool) string {
+	if not {
+		return "NOT "
+	}
+	return ""
 }
 
 func whereClause(where []string) string {
@@ -185,6 +224,13 @@ func whereClause(where []string) string {
 // 28 ms. The count alone: 7 ms. Phase 21, the same table with a third of the
 // tracks not reviewed: reviewed=false, first page 7 ms; sort reviewed desc,
 // last page 31 ms. No index on reviewed_at (the 50 ms rule of phase 20).
+// Phase 22, 30 000 tracks with 32-character titles and a 48-hour plan (720
+// items), wall time of List: first page 21 ms, in_plan=true 11 ms,
+// in_playlist=false 14 ms; sort next_planned_at first page 18 ms, desc last
+// page 80 ms, of which the plan join (HashAggregate of the plan, Hash Left
+// Join) is 8 ms and the rest the title tie-break, as in the title order's
+// last page on the same table (72 ms). No index: the key is an aggregate of
+// the plan.
 func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Track, int, error) {
 	order, err := trackOrder(f)
 	if err != nil {
@@ -200,7 +246,7 @@ FROM (SELECT tr.id, count(*) OVER () AS total` + fromTracks + whereClause(where)
       ORDER BY ` + order + ` LIMIT ? OFFSET ?) p
 JOIN tracks tr ON tr.id = p.id
 JOIN playlist_types t ON t.id = tr.type_id
-LEFT JOIN artists a ON a.id = tr.artist_id
+LEFT JOIN artists a ON a.id = tr.artist_id` + planUsage + `
 ORDER BY ` + order
 	args = append(args, f.Limit, f.Offset)
 
@@ -298,6 +344,13 @@ WHERE track_id IN ? ORDER BY rule_id`, ids).Scan(&rules).Error
 		if r.ReviewedAt != nil {
 			t.ReviewedAt = new(r.ReviewedAt.UTC())
 		}
+		t.Cue = library.Cue{InMS: r.CueInMS, OutMS: r.CueOutMS, FadeInMS: r.FadeInMS, FadeOutMS: r.FadeOutMS}
+		if r.NextPlannedAt != nil {
+			t.NextPlannedAt = new(r.NextPlannedAt.UTC())
+		}
+		if r.Queued {
+			t.PlayoutState = library.PlayoutQueued
+		}
 		if r.ArtistID != nil && r.ArtistName != nil {
 			t.Artist = &library.ArtistRef{ID: *r.ArtistID, Name: *r.ArtistName}
 		}
@@ -364,14 +417,37 @@ func (s *Tracks) Create(ctx context.Context, in library.TrackInput) (uint64, err
 	return r.ID, nil
 }
 
+// cueInvalid is true when the stored cue of a track does not fit a file of
+// the duration given as the parameter (repeated four times, once per
+// placeholder): the rule of library.Cue.Check. A null duration keeps the
+// cue. A copy lives in internal/repository/ingest.
+const cueInvalid = `(?::integer IS NOT NULL AND (
+    ((cue_in_ms > 0 OR cue_out_ms IS NOT NULL)
+     AND (cue_in_ms >= ?::integer OR cue_out_ms > ?::integer OR COALESCE(cue_out_ms, ?::integer) - cue_in_ms < 5000))
+    OR fade_in_ms + fade_out_ms > COALESCE(cue_out_ms, ?::integer) - cue_in_ms))`
+
+// cueReset returns the SET expressions that reset the cue when it does not
+// fit a file of durationMS (docs/phase-22-plan.md decision 7).
+func cueReset(durationMS *int) map[string]any {
+	args := []any{durationMS, durationMS, durationMS, durationMS, durationMS}
+	return map[string]any{
+		"cue_in_ms":   gorm.Expr("CASE WHEN "+cueInvalid+" THEN 0 ELSE cue_in_ms END", args...),
+		"cue_out_ms":  gorm.Expr("CASE WHEN "+cueInvalid+" THEN NULL ELSE cue_out_ms END", args...),
+		"fade_in_ms":  gorm.Expr("CASE WHEN "+cueInvalid+" THEN 0 ELSE fade_in_ms END", args...),
+		"fade_out_ms": gorm.Expr("CASE WHEN "+cueInvalid+" THEN 0 ELSE fade_out_ms END", args...),
+	}
+}
+
 // Update changes the metadata of a track. The reviewed mark is cleared in
-// the same statement when the title, the artist, or the file path changes:
-// the SET expressions see the stored row, so there is no read before the
-// write to race with.
+// the same statement when the title, the artist, or the file path changes,
+// and the cue is reset when it does not fit the new duration: the SET
+// expressions see the stored row, so there is no read before the write to
+// race with.
 func (s *Tracks) Update(ctx context.Context, id uint64, in library.TrackInput) error {
 	cols := trackColumns(in)
 	cols["reviewed_at"] = gorm.Expr(`CASE WHEN title IS DISTINCT FROM ? OR artist_id IS DISTINCT FROM ?
   OR file_path IS DISTINCT FROM ? THEN NULL ELSE reviewed_at END`, in.Title, in.ArtistID, in.FilePath)
+	maps.Copy(cols, cueReset(in.DurationMS))
 	res := s.g.WithContext(ctx).Table("tracks").Where("id = ?", id).Updates(cols)
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("update track %d", id), res.Error)
@@ -580,4 +656,75 @@ WHERE t.id = v.id`, string(data)).Error
 		return fmt.Errorf("update titles: %w", err)
 	}
 	return nil
+}
+
+// CueState locks the track row until the transaction ends and returns its
+// duration, cue, and whether a plan item of it is queued
+// (ix_scheduled_items_track_id_planned_start_utc).
+func (s *Tracks) CueState(ctx context.Context, id uint64) (library.CueState, error) {
+	var rows []struct {
+		DurationMS *int `gorm:"column:duration_ms"`
+		CueInMS    int  `gorm:"column:cue_in_ms"`
+		CueOutMS   *int `gorm:"column:cue_out_ms"`
+		FadeInMS   int  `gorm:"column:fade_in_ms"`
+		FadeOutMS  int  `gorm:"column:fade_out_ms"`
+		Queued     bool
+	}
+	err := s.g.WithContext(ctx).Raw(`
+SELECT tr.duration_ms, tr.cue_in_ms, tr.cue_out_ms, tr.fade_in_ms, tr.fade_out_ms,
+       EXISTS (SELECT 1 FROM scheduled_items si WHERE si.track_id = tr.id AND si.status = 'queued') AS queued
+FROM tracks tr
+WHERE tr.id = ?
+FOR UPDATE OF tr`, id).Scan(&rows).Error
+	if err != nil {
+		return library.CueState{}, fmt.Errorf("lock track %d: %w", id, err)
+	}
+	if len(rows) == 0 {
+		return library.CueState{}, library.ErrTrackNotFound
+	}
+	r := rows[0]
+	return library.CueState{
+		DurationMS: r.DurationMS,
+		Cue:        library.Cue{InMS: r.CueInMS, OutMS: r.CueOutMS, FadeInMS: r.FadeInMS, FadeOutMS: r.FadeOutMS},
+		Queued:     r.Queued,
+	}, nil
+}
+
+// SetCue writes the cue of a track. ck_tracks_cue and ck_tracks_fades
+// guard the rules that need no duration.
+func (s *Tracks) SetCue(ctx context.Context, id uint64, c library.Cue) error {
+	res := s.g.WithContext(ctx).Exec(`
+UPDATE tracks SET cue_in_ms = ?, cue_out_ms = ?, fade_in_ms = ?, fade_out_ms = ? WHERE id = ?`,
+		c.InMS, c.OutMS, c.FadeInMS, c.FadeOutMS, id)
+	if res.Error != nil {
+		return fmt.Errorf("update cue of track %d: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return library.ErrTrackNotFound
+	}
+	return nil
+}
+
+// PlannedHours returns the range of the built plan hours that hold a
+// planned item of the track: plan_hours holds the plan horizon (48 rows at
+// most), each probed on ix_scheduled_items_track_id_planned_start_utc.
+func (s *Tracks) PlannedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
+	var r struct {
+		First *time.Time
+		Last  *time.Time
+	}
+	err := s.g.WithContext(ctx).Raw(`
+SELECT min(h.hour_start_utc) AS first, max(h.hour_start_utc) AS last
+FROM plan_hours h
+WHERE EXISTS (SELECT 1 FROM scheduled_items si
+              WHERE si.track_id = ? AND si.status = 'planned'
+                AND si.planned_start_utc >= h.hour_start_utc
+                AND si.planned_start_utc < h.hour_start_utc + interval '1 hour')`, id).Scan(&r).Error
+	if err != nil {
+		return nil, fmt.Errorf("select planned hours of track %d: %w", id, err)
+	}
+	if r.First == nil || r.Last == nil {
+		return nil, nil
+	}
+	return &library.HourRange{From: r.First.UTC(), To: r.Last.UTC().Add(time.Hour)}, nil
 }

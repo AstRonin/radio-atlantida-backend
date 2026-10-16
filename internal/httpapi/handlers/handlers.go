@@ -62,7 +62,7 @@ func Register(api huma.API, d Deps) {
 	registerPlaylistTypes(api, log, d.Library)
 	registerPlaylists(api, log, d.Library, d.PlayRules)
 	registerArtists(api, log, d.Library)
-	registerTracks(api, log, d.Library, d.PlayRules)
+	registerTracks(api, log, d.Library, d.PlayRules, d.Rotation, d.Ingest)
 	registerPlayRules(api, log, d.PlayRules)
 	registerSeparationRules(api, log, d.Separation)
 	registerClocks(api, log, d.Clocks, d.Rotation)

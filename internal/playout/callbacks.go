@@ -205,7 +205,8 @@ func (s *Service) emergencyStarted(ctx context.Context, trackID uint64, at time.
 	}
 	s.log.Warn("emergency track on air: the plan has nothing to play", "track_id", trackID, "title", t.Title)
 	s.setNowPlaying(&NowPlaying{
-		TrackID: t.ID, Title: t.Title, ArtistName: t.ArtistName, Source: SourceEmergency, StartedAt: at, OutMS: t.DurationMS,
+		TrackID: t.ID, Title: t.Title, ArtistName: t.ArtistName, Source: SourceEmergency, StartedAt: at,
+		InMS: t.CueInMS, OutMS: t.outMS(),
 	})
 	return nil
 }
@@ -245,7 +246,7 @@ func (s *Service) setNowPlaying(np *NowPlaying) {
 func nowPlayingData(np NowPlaying) ws.NowPlayingData {
 	return ws.NowPlayingData{
 		ItemID: np.ItemID, TrackID: np.TrackID, Title: np.Title, ArtistName: np.ArtistName, Source: np.Source,
-		StartedAt: np.StartedAt.UTC(), OutMS: np.OutMS, Truncated: np.Truncated,
+		StartedAt: np.StartedAt.UTC(), InMS: np.InMS, OutMS: np.OutMS, Truncated: np.Truncated,
 	}
 }
 
@@ -310,15 +311,26 @@ func (s *Service) EmergencyNext(ctx context.Context) (string, bool, error) {
 }
 
 // EmergencyURI returns the request of an emergency track: the file under
-// the media root, annotated with the track ID and, as RequestURI, the
-// library title and artist.
+// the media root, annotated with the track ID, its cue points and fades,
+// and, as RequestURI, the library title and artist.
 func EmergencyURI(t Track, set Settings) string {
 	artist := ""
 	if t.ArtistName != nil {
 		artist = *t.ArtistName
 	}
-	return liquidsoap.Annotate(path.Join(set.MediaRoot, t.FilePath),
-		liquidsoap.Pair{Key: "track_id", Value: strconv.FormatUint(t.ID, 10)},
-		liquidsoap.Pair{Key: "title", Value: t.Title},
-		liquidsoap.Pair{Key: "artist", Value: artist})
+	ann := []liquidsoap.Pair{{Key: "track_id", Value: strconv.FormatUint(t.ID, 10)}}
+	if t.CueInMS > 0 {
+		ann = append(ann, liquidsoap.Pair{Key: "liq_cue_in", Value: seconds(t.CueInMS)})
+	}
+	if t.CueOutMS != nil {
+		ann = append(ann, liquidsoap.Pair{Key: "liq_cue_out", Value: seconds(*t.CueOutMS)})
+	}
+	if t.FadeInMS > 0 {
+		ann = append(ann, liquidsoap.Pair{Key: "liq_fade_in", Value: seconds(t.FadeInMS)})
+	}
+	if t.FadeOutMS > 0 {
+		ann = append(ann, liquidsoap.Pair{Key: "liq_fade_out", Value: seconds(t.FadeOutMS)})
+	}
+	ann = append(ann, liquidsoap.Pair{Key: "title", Value: t.Title}, liquidsoap.Pair{Key: "artist", Value: artist})
+	return liquidsoap.Annotate(path.Join(set.MediaRoot, t.FilePath), ann...)
 }

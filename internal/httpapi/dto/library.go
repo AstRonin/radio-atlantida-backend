@@ -126,6 +126,38 @@ type Track struct {
 	Fixes           []string   `json:"fixes" nullable:"false" enum:"loudness,optimize" doc:"Transcodes that remove at least one issue: the buttons Fix loudness and Optimize track (POST /api/tracks/transcode)."`
 	AnalyzedAt      *time.Time `json:"analyzed_at,omitempty" doc:"Absent until the file is analysed."`
 	ReviewedAt      *time.Time `json:"reviewed_at,omitempty" doc:"When the manager marked the track checked (POST /api/tracks/review); absent when it is not. A change of the title, the artist, the file path, or the file itself (a transcode, a replaced file) clears it."`
+
+	CueInMS       int        `json:"cue_in_ms" minimum:"0" doc:"Start of the part that goes on air, from the start of the file (PUT /api/tracks/{id}/cue). 0: the start of the file."`
+	CueOutMS      *int       `json:"cue_out_ms,omitempty" doc:"End of the part that goes on air, from the start of the file; absent: the end of the file."`
+	FadeInMS      int        `json:"fade_in_ms" minimum:"0" maximum:"5000" doc:"Fade in at the cue in point; 0 is a hard cut."`
+	FadeOutMS     int        `json:"fade_out_ms" minimum:"0" maximum:"5000" doc:"Fade out ending at the cue out point; 0 is a hard cut. A track cut at the end of its segment fades out by liquidsoap.fade_out_ms instead."`
+	AirDurationMS *int       `json:"air_duration_ms,omitempty" doc:"Length on air: cue out (or the duration) minus cue in. The planner fits the track by it. Absent while the duration is unknown."`
+	NextPlannedAt *time.Time `json:"next_planned_at,omitempty" doc:"Earliest planned start of the track in the track plan (planned or queued items); absent when it is not planned."`
+	PlayoutState  string     `json:"playout_state,omitempty" enum:"on_air,queued" doc:"on_air: the track is on air; queued: a plan item of it waits in Liquidsoap's queue. Absent otherwise. The panel reloads on the playout and plan events."`
+}
+
+// TrackCueBody is the body of PUT /api/tracks/{id}/cue: the whole cue,
+// every field required.
+type TrackCueBody struct {
+	CueInMS   int  `json:"cue_in_ms" minimum:"0" maximum:"21600000" doc:"Start of the on-air part, from the start of the file; before the end of the file."`
+	CueOutMS  *int `json:"cue_out_ms" nullable:"true" minimum:"1" maximum:"21600000" doc:"End of the on-air part, after cue_in_ms and not past the end of the file; null: the end of the file. A cut must leave at least 5 s on air."`
+	FadeInMS  int  `json:"fade_in_ms" minimum:"0" maximum:"5000" doc:"Fade in at cue in; 0 is a hard cut. The panel proposes liquidsoap.cue_fade_in_ms."`
+	FadeOutMS int  `json:"fade_out_ms" minimum:"0" maximum:"5000" doc:"Fade out ending at cue out; 0 is a hard cut. The fades together must not be longer than the on-air part. The panel proposes liquidsoap.cue_fade_out_ms."`
+}
+
+// TrackCueResult is the response of PUT /api/tracks/{id}/cue.
+type TrackCueResult struct {
+	Track Track `json:"track"`
+	// BuildOperationID is absent when the cut did not change (fades only),
+	// the track is not planned, or the rebuild could not be started.
+	BuildOperationID *uint64 `json:"build_operation_id,omitempty" doc:"The clock_build operation that rebuilds the future hours holding a planned item of the track, so they use the new cut. Absent when only fades changed or the track is not planned."`
+}
+
+// TrackWaveform is the waveform of a track file.
+type TrackWaveform struct {
+	DurationMS int    `json:"duration_ms" minimum:"0" doc:"Length of the decoded audio."`
+	BucketMS   int    `json:"bucket_ms" minimum:"1" doc:"Length of one bucket."`
+	Peaks      []int8 `json:"peaks" nullable:"false" doc:"The min and max amplitude of every bucket of a mono mix, -127 to 127, flat: [min0, max0, min1, max1, ...]. The last bucket may be partial."`
 }
 
 // TrackPage is a page of tracks in the requested order.

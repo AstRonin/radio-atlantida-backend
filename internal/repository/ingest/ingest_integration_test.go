@@ -196,7 +196,8 @@ func TestAnalysisUpdates(t *testing.T) {
 	require.Empty(t, ts[0].Issues)
 	require.Nil(t, ts[0].AnalyzedAt)
 
-	require.NoError(t, f.store.SaveAnalysis(ctx, id, analysis("old.optimal.mp3", "sum-9", library.IssueChannels, library.IssueLowBitrate)))
+	_, err = f.store.SaveAnalysis(ctx, id, analysis("old.optimal.mp3", "sum-9", library.IssueChannels, library.IssueLowBitrate))
+	require.NoError(t, err)
 	ts, err = f.store.Tracks(ctx, []uint64{id})
 	require.NoError(t, err)
 	require.Equal(t, "old.optimal.mp3", ts[0].FilePath)
@@ -212,10 +213,12 @@ func TestAnalysisUpdates(t *testing.T) {
 	require.Equal(t, now.Add(time.Hour), *ts[0].AnalyzedAt)
 	require.Equal(t, -16.2, *ts[0].Measurements.LoudnessLUFS, "measurements stay")
 
-	require.ErrorIs(t, f.store.SaveAnalysis(ctx, 999999, analysis("z.mp3", "z")), library.ErrTrackNotFound)
+	_, err = f.store.SaveAnalysis(ctx, 999999, analysis("z.mp3", "z"))
+	require.ErrorIs(t, err, library.ErrTrackNotFound)
 	require.ErrorIs(t, f.store.MarkMissing(ctx, 999999, now), library.ErrTrackNotFound)
 	f.id(`INSERT INTO tracks (title, file_path, type_id) VALUES ('Other', 'other.mp3', $1) RETURNING id`, f.music)
-	require.ErrorIs(t, f.store.SaveAnalysis(ctx, id, analysis("other.mp3", "s")), library.ErrFilePathTaken)
+	_, err = f.store.SaveAnalysis(ctx, id, analysis("other.mp3", "s"))
+	require.ErrorIs(t, err, library.ErrFilePathTaken)
 }
 
 func TestBusy(t *testing.T) {
@@ -261,10 +264,95 @@ VALUES ('Song', 'song.mp3', $1, 'sum-1', now()) RETURNING id`, f.music)
 		return ok
 	}
 
-	require.NoError(t, f.store.SaveAnalysis(ctx, id, analysis("song.mp3", "sum-1", library.IssueLoudness)))
+	_, err := f.store.SaveAnalysis(ctx, id, analysis("song.mp3", "sum-1", library.IssueLoudness))
+	require.NoError(t, err)
 	require.True(t, reviewed(), "an analysis of the same file keeps the mark")
 
 	// A transcode (replace or .optimal copy) or a file replaced on disk.
-	require.NoError(t, f.store.SaveAnalysis(ctx, id, analysis("song.optimal.mp3", "sum-2")))
+	_, err = f.store.SaveAnalysis(ctx, id, analysis("song.optimal.mp3", "sum-2"))
+	require.NoError(t, err)
 	require.False(t, reviewed(), "a new checksum clears it")
+}
+
+// A new file keeps a cue that still fits and resets one that does not, in
+// the same statement; the same file keeps everything
+// (docs/phase-22-plan.md decision 7).
+func TestSaveAnalysisKeepsOrResetsTheCue(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	cue := func(id uint64) (in int, out *int, fadeIn, fadeOut int) {
+		t.Helper()
+		require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT cue_in_ms, cue_out_ms, fade_in_ms, fade_out_ms FROM tracks WHERE id = $1`, id).
+			Scan(&in, &out, &fadeIn, &fadeOut))
+		return in, out, fadeIn, fadeOut
+	}
+	track := func(path string, cueOut int) uint64 {
+		return f.id(`INSERT INTO tracks (title, file_path, type_id, file_checksum, duration_ms, cue_in_ms, cue_out_ms,
+                    fade_in_ms, fade_out_ms)
+VALUES ($1, $1, $2, 'sum-1', 200000, 5000, $3, 1000, 2000) RETURNING id`, path, f.music, cueOut)
+	}
+	fits, beyond, same := track("fits.mp3", 170000), track("beyond.mp3", 190000), track("same.mp3", 190000)
+
+	// The new files are 180 s long (analysis()).
+	reset, err := f.store.SaveAnalysis(ctx, fits, analysis("fits.mp3", "sum-2"))
+	require.NoError(t, err)
+	require.False(t, reset)
+	in, out, fadeIn, fadeOut := cue(fits)
+	require.Equal(t, []any{5000, 170000, 1000, 2000}, []any{in, *out, fadeIn, fadeOut})
+
+	reset, err = f.store.SaveAnalysis(ctx, beyond, analysis("beyond.mp3", "sum-2"))
+	require.NoError(t, err)
+	require.True(t, reset)
+	in, out, fadeIn, fadeOut = cue(beyond)
+	require.Equal(t, []any{0, (*int)(nil), 0, 0}, []any{in, out, fadeIn, fadeOut})
+
+	// The same checksum: nothing is reset, even if the duration was off.
+	reset, err = f.store.SaveAnalysis(ctx, same, analysis("same.mp3", "sum-1"))
+	require.NoError(t, err)
+	require.False(t, reset)
+	in, out, _, _ = cue(same)
+	require.Equal(t, 5000, in)
+	require.Equal(t, 190000, *out)
+
+	// A track without a cue is never reported reset, even when shorter
+	// than the 5 s minimum of a cut.
+	short := f.id(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('Jingle', 'jingle.mp3', $1, 3000) RETURNING id`, f.music)
+	a := analysis("jingle.mp3", "sum-3")
+	a.Measurements.DurationMS = new(3000)
+	reset, err = f.store.SaveAnalysis(ctx, short, a)
+	require.NoError(t, err)
+	require.False(t, reset)
+}
+
+func TestWaveformRows(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	id := f.id(`INSERT INTO tracks (title, file_path, type_id) VALUES ('Song', 'song.mp3', $1) RETURNING id`, f.music)
+
+	_, ok, err := f.store.Waveform(ctx, id)
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	w := ingest.Waveform{DurationMS: 100, BucketMS: 50, Peaks: []int8{-127, 127, -3, 4}, Checksum: "sum-1"}
+	require.NoError(t, f.store.SaveWaveform(ctx, id, w))
+	got, ok, err := f.store.Waveform(ctx, id)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, w, got)
+
+	// A new file replaces the row.
+	w2 := ingest.Waveform{DurationMS: 50, BucketMS: 50, Peaks: []int8{0, 0}, Checksum: "sum-2"}
+	require.NoError(t, f.store.SaveWaveform(ctx, id, w2))
+	got, _, err = f.store.Waveform(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, w2, got)
+
+	require.ErrorIs(t, f.store.SaveWaveform(ctx, 999999, w), library.ErrTrackNotFound)
+	// The row goes with its track.
+	f.exec(`DELETE FROM tracks WHERE id = $1`, id)
+	_, ok, err = f.store.Waveform(ctx, id)
+	require.NoError(t, err)
+	require.False(t, ok)
 }

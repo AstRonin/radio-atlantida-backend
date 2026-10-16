@@ -50,12 +50,17 @@ type fakeProber struct {
 
 func (f fakeProber) Probe(context.Context, string) (media.Info, error) { return f.info, f.err }
 
+// fakeOnAir names the track on air; zero is none.
+type fakeOnAir uint64
+
+func (f fakeOnAir) OnAirTrack() (uint64, bool) { return uint64(f), f != 0 }
+
 func newTrackService(tracks *fakeTracks, prober Prober, logs *bytes.Buffer) *Service {
-	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, prober, slog.New(slog.NewJSONHandler(logs, nil)))
+	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, prober, fakeOnAir(0), slog.New(slog.NewJSONHandler(logs, nil)))
 }
 
 func newTrackServiceOn(tracks TrackStore, logs *bytes.Buffer) *Service {
-	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, fakeProber{}, slog.New(slog.NewJSONHandler(logs, nil)))
+	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, fakeProber{}, fakeOnAir(0), slog.New(slog.NewJSONHandler(logs, nil)))
 }
 
 func TestCreateTrackFillsMetadataFromFile(t *testing.T) {
@@ -191,7 +196,7 @@ func (f *fakeTypes) Delete(context.Context, uint64) error {
 func TestDeleteSystemTypeIsRefused(t *testing.T) {
 	t.Parallel()
 	types := &fakeTypes{t: PlaylistType{ID: 1, Code: "music", IsSystem: true}}
-	svc := NewService(fakeTx{}, types, nil, nil, nil, nil, nil, slog.New(slog.DiscardHandler))
+	svc := NewService(fakeTx{}, types, nil, nil, nil, nil, nil, fakeOnAir(0), slog.New(slog.DiscardHandler))
 
 	require.ErrorIs(t, svc.DeleteType(t.Context(), 1), ErrSystemType)
 	require.False(t, types.deleted)

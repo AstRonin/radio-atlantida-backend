@@ -17,7 +17,8 @@ type TrackPlanItem struct {
 	DurationMS      int       `json:"duration_ms" doc:"Length of the track file."`
 	ElementID       *uint64   `json:"element_id,omitempty" doc:"The clock element it was planned for; absent for filler or a removed element."`
 	PlannedStartUTC time.Time `json:"planned_start_utc"`
-	PlannedOutMS    int       `json:"planned_out_ms" doc:"Out point from the start of the track; shorter than duration_ms when truncated."`
+	PlannedInMS     int       `json:"planned_in_ms" minimum:"0" doc:"In point from the start of the file (the track's cue in when it was planned)."`
+	PlannedOutMS    int       `json:"planned_out_ms" doc:"Out point from the start of the file; the length is planned_out_ms - planned_in_ms, shorter than the track's air_duration_ms when truncated."`
 	Truncated       bool      `json:"truncated" doc:"The track crosses its segment end; it fades out and ends there."`
 	Source          string    `json:"source" enum:"clock,filler_pool,filler_random,filler_playlist,filler_artist,filler_answer,reschedule"`
 	Status          string    `json:"status" enum:"planned,queued,aired,missed,replaced"`

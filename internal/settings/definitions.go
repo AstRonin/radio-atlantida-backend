@@ -114,13 +114,15 @@ var (
 	StreamGenre        = Key[string]{"stream.genre"}
 	StreamHLSEnabled   = Key[bool]{"stream.hls_enabled"}
 
-	LiquidsoapMusicGain   = Key[float64]{"liquidsoap.music_gain"}
-	LiquidsoapDuckGain    = Key[float64]{"liquidsoap.duck_gain"}
-	LiquidsoapFadeOutMS   = Key[int]{"liquidsoap.fade_out_ms"}
-	LiquidsoapHarborPort  = Key[int]{"liquidsoap.harbor_port"}
-	LiquidsoapControlHost = Key[string]{"liquidsoap.control_host"}
-	LiquidsoapControlPort = Key[int]{"liquidsoap.control_port"}
-	LiquidsoapMediaRoot   = Key[string]{"liquidsoap.media_root"}
+	LiquidsoapMusicGain    = Key[float64]{"liquidsoap.music_gain"}
+	LiquidsoapDuckGain     = Key[float64]{"liquidsoap.duck_gain"}
+	LiquidsoapFadeOutMS    = Key[int]{"liquidsoap.fade_out_ms"}
+	LiquidsoapCueFadeInMS  = Key[int]{"liquidsoap.cue_fade_in_ms"}
+	LiquidsoapCueFadeOutMS = Key[int]{"liquidsoap.cue_fade_out_ms"}
+	LiquidsoapHarborPort   = Key[int]{"liquidsoap.harbor_port"}
+	LiquidsoapControlHost  = Key[string]{"liquidsoap.control_host"}
+	LiquidsoapControlPort  = Key[int]{"liquidsoap.control_port"}
+	LiquidsoapMediaRoot    = Key[string]{"liquidsoap.media_root"}
 
 	RotationGridHorizonDays       = Key[int]{"rotation.grid_horizon_days"}
 	RotationPlanHorizonHours      = Key[int]{"rotation.plan_horizon_hours"}
@@ -226,6 +228,12 @@ func NewRegistry() *Registry {
 	r.add(numberDef(LiquidsoapDuckGain, "Music level under live voice: while the microphone is live, the music fades to this part of its level (§8.5).",
 		"", 0.2, 0, 1), ApplyImmediate, true)
 	r.add(intDef(LiquidsoapFadeOutMS, "Fade-out of a truncated track, ending at the segment end.", "ms", 2500, 2000, 3000), ApplyImmediate, true)
+	// Proposed by the cue editor of the panel; the backend never applies
+	// them on its own (docs/phase-22-plan.md decision 2).
+	r.add(intDef(LiquidsoapCueFadeInMS, "Fade in the cue editor proposes when the cue in point leaves the start of the file; 0 is a hard cut.",
+		"ms", 1000, 0, 5000), ApplyImmediate, true)
+	r.add(intDef(LiquidsoapCueFadeOutMS, "Fade out the cue editor proposes when the cue out point leaves the end of the file; 0 is a hard cut.",
+		"ms", 2000, 0, 5000), ApplyImmediate, true)
 	r.add(intDef(LiquidsoapHarborPort, "Harbor input port for live voice.", "", 8005, 1, 65535), ApplyReconnect, true)
 	r.add(stringDef(LiquidsoapControlHost, "Liquidsoap control host name or IP address.", "liquidsoap", 1, 253, validHost), ApplyReconnect, true)
 	r.add(intDef(LiquidsoapControlPort, "Liquidsoap control (telnet) port.", "", 1234, 1, 65535), ApplyReconnect, true)

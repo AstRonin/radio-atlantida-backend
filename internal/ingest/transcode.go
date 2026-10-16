@@ -76,7 +76,7 @@ func (s *Service) runTranscode(ctx context.Context, id uint64, req TranscodeRequ
 	}
 	t := newTally()
 	err = workerpool.ForEach(ctx, transcodeWorkers, ts, func(ctx context.Context, tr Track) error {
-		outcome := s.transcodeTrack(ctx, tr, req, set)
+		outcome := s.transcodeTrack(ctx, tr, req, set, t)
 		done := t.add(outcome, tr.FilePath, outcome == outcomeFailed)
 		s.ops.Progress(id, operations.KindTranscode, done, len(ts), tr.FilePath)
 		return ctx.Err()
@@ -89,8 +89,8 @@ func (s *Service) runTranscode(ctx context.Context, id uint64, req TranscodeRequ
 }
 
 // transcodeTrack fixes the file of one track and stores the analysis of
-// the new file.
-func (s *Service) transcodeTrack(ctx context.Context, tr Track, req TranscodeRequest, set Settings) string {
+// the new file; a reset cue is recorded in t.
+func (s *Service) transcodeTrack(ctx context.Context, tr Track, req TranscodeRequest, set Settings, t *tally) string {
 	if busy, err := s.busy(ctx, tr.ID, set); err != nil {
 		return s.trackFailed(ctx, tr, "check busy", err)
 	} else if busy {
@@ -166,8 +166,9 @@ func (s *Service) transcodeTrack(ctx context.Context, tr Track, req TranscodeReq
 	}
 	dctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	if err := s.store.SaveAnalysis(dctx, tr.ID, a); err != nil {
-		deleted := errors.Is(err, library.ErrTrackNotFound)
+	reset, serr := s.store.SaveAnalysis(dctx, tr.ID, a)
+	if serr != nil {
+		deleted := errors.Is(serr, library.ErrTrackNotFound)
 		switch {
 		case final != tr.FilePath:
 			s.removeTemp(ctx, final)
@@ -178,18 +179,19 @@ func (s *Service) transcodeTrack(ctx context.Context, tr Track, req TranscodeReq
 			// The original is replaced already; the next analysis reads
 			// the new file.
 			s.log.ErrorContext(ctx, "transcode: file replaced but its analysis not saved; run the analysis of the track",
-				"track_id", tr.ID, "file_path", final, logging.KeyError, err)
+				"track_id", tr.ID, "file_path", final, logging.KeyError, serr)
 		}
 		if deleted {
 			return s.trackDeleted(ctx, tr)
 		}
-		return s.trackFailed(ctx, tr, "save analysis", err)
+		return s.trackFailed(ctx, tr, "save analysis", serr)
 	}
 	if req.Output == OutputReplace && final != tr.FilePath {
 		if err := s.files.Remove(tr.FilePath); err != nil {
 			s.log.WarnContext(ctx, "transcode: original file not removed", "track_id", tr.ID, "file_path", tr.FilePath, logging.KeyError, err)
 		}
 	}
+	s.cueReset(ctx, tr, reset, t)
 	s.log.InfoContext(ctx, "track transcoded", "track_id", tr.ID, "fix", string(req.Fix), "from", tr.FilePath, "to", final)
 	return outcomeTranscoded
 }

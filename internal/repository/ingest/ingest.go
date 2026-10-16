@@ -259,29 +259,50 @@ func (s *Store) Unanalysed(ctx context.Context, limit int) ([]ingest.Track, erro
 	return ts, nil
 }
 
+// cueInvalid is true when the stored cue of tracks t does not fit a file of
+// $4 ms: the rule of library.Cue.Check, as in internal/repository/library.
+const cueInvalid = `(
+    ((t.cue_in_ms > 0 OR t.cue_out_ms IS NOT NULL)
+     AND (t.cue_in_ms >= $4 OR t.cue_out_ms > $4 OR COALESCE(t.cue_out_ms, $4) - t.cue_in_ms < 5000))
+    OR t.fade_in_ms + t.fade_out_ms > COALESCE(t.cue_out_ms, $4) - t.cue_in_ms)`
+
 // SaveAnalysis stores the analysis of a track and its file path.
 // quality_ok follows the issues: the manager's override lasts until the
 // next analysis. A new checksum (a transcode, a file replaced on disk)
-// clears the reviewed mark in the same statement; the SET expressions see
-// the stored checksum.
-func (s *Store) SaveAnalysis(ctx context.Context, id uint64, a ingest.Analysis) error {
+// clears the reviewed mark and resets a cue that does not fit the new
+// duration (docs/phase-22-plan.md decision 7), in the same statement; o
+// reads the stored row under its lock, so the result tells whether the cue
+// was reset.
+func (s *Store) SaveAnalysis(ctx context.Context, id uint64, a ingest.Analysis) (bool, error) {
 	m := a.Measurements
-	tag, err := s.q.Exec(ctx, `
-UPDATE tracks SET file_path = $2, file_checksum = $3, duration_ms = $4, format = $5, codec = $6, bitrate = $7,
+	var reset bool
+	err := s.q.QueryRow(ctx, `
+WITH o AS (
+    SELECT t.id, t.file_checksum IS DISTINCT FROM $3 AS new_file,
+           t.file_checksum IS DISTINCT FROM $3 AND $4::integer IS NOT NULL AND `+cueInvalid+` AS cue_reset
+    FROM tracks t WHERE t.id = $1 FOR UPDATE
+)
+UPDATE tracks t SET file_path = $2, file_checksum = $3, duration_ms = $4, format = $5, codec = $6, bitrate = $7,
                   sample_rate = $8, channels = $9, loudness_lufs = $10, true_peak_dbtp = $11,
                   loudness_range_lu = $12, source_bitrate = $13, quality_issues = $14,
                   quality_ok = cardinality($14::text[]) = 0, analyzed_at = $15,
-                  reviewed_at = CASE WHEN file_checksum IS DISTINCT FROM $3 THEN NULL ELSE reviewed_at END
-WHERE id = $1`,
+                  reviewed_at = CASE WHEN o.new_file THEN NULL ELSE t.reviewed_at END,
+                  cue_in_ms = CASE WHEN o.cue_reset THEN 0 ELSE t.cue_in_ms END,
+                  cue_out_ms = CASE WHEN o.cue_reset THEN NULL ELSE t.cue_out_ms END,
+                  fade_in_ms = CASE WHEN o.cue_reset THEN 0 ELSE t.fade_in_ms END,
+                  fade_out_ms = CASE WHEN o.cue_reset THEN 0 ELSE t.fade_out_ms END
+FROM o
+WHERE t.id = o.id
+RETURNING o.cue_reset`,
 		id, a.FilePath, a.Checksum, m.DurationMS, m.Format, m.Codec, m.Bitrate, m.SampleRate, m.Channels,
-		m.LoudnessLUFS, m.TruePeakDBTP, m.LoudnessRangeLU, m.SourceBitrate, codes(a.Issues), a.AnalyzedAt)
-	if err != nil {
-		return trackError(err, fmt.Sprintf("update track %d", id))
+		m.LoudnessLUFS, m.TruePeakDBTP, m.LoudnessRangeLU, m.SourceBitrate, codes(a.Issues), a.AnalyzedAt).Scan(&reset)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, library.ErrTrackNotFound
+	case err != nil:
+		return false, trackError(err, fmt.Sprintf("update track %d", id))
 	}
-	if tag.RowsAffected() == 0 {
-		return library.ErrTrackNotFound
-	}
-	return nil
+	return reset, nil
 }
 
 // MarkMissing records that the file of a track is missing.
@@ -322,6 +343,62 @@ ORDER BY 1`, ids, now, until)
 		return nil, fmt.Errorf("scan busy tracks: %w", err)
 	}
 	return busy, nil
+}
+
+type waveformRow struct {
+	Checksum   string `db:"file_checksum"`
+	BucketMS   int    `db:"bucket_ms"`
+	Peaks      []byte `db:"peaks"`
+	DurationMS int    `db:"duration_ms"`
+}
+
+func (r waveformRow) domain() ingest.Waveform {
+	peaks := make([]int8, len(r.Peaks))
+	for i, b := range r.Peaks {
+		peaks[i] = int8(b) //nolint:gosec // G115: the byte is a signed sample
+	}
+	return ingest.Waveform{DurationMS: r.DurationMS, BucketMS: r.BucketMS, Peaks: peaks, Checksum: r.Checksum}
+}
+
+var errNoWaveform = errors.New("no waveform")
+
+// Waveform returns the stored waveform of a track (pk_track_waveforms).
+func (s *Store) Waveform(ctx context.Context, trackID uint64) (ingest.Waveform, bool, error) {
+	rows, err := s.q.Query(ctx, `
+SELECT file_checksum, bucket_ms, peaks, duration_ms FROM track_waveforms WHERE track_id = $1`, trackID)
+	if err != nil {
+		return ingest.Waveform{}, false, fmt.Errorf("select waveform of track %d: %w", trackID, err)
+	}
+	w, err := db.CollectOne(rows, waveformRow.domain, errNoWaveform)
+	switch {
+	case errors.Is(err, errNoWaveform):
+		return ingest.Waveform{}, false, nil
+	case err != nil:
+		return ingest.Waveform{}, false, fmt.Errorf("scan waveform of track %d: %w", trackID, err)
+	}
+	return w, true, nil
+}
+
+// SaveWaveform stores the waveform of a track, replacing the one before.
+// A track deleted meanwhile fails fk_track_waveforms_track_id.
+func (s *Store) SaveWaveform(ctx context.Context, trackID uint64, w ingest.Waveform) error {
+	peaks := make([]byte, len(w.Peaks))
+	for i, p := range w.Peaks {
+		peaks[i] = byte(p) //nolint:gosec // G115: the signed sample is stored as its bits
+	}
+	_, err := s.q.Exec(ctx, `
+INSERT INTO track_waveforms (track_id, file_checksum, bucket_ms, peaks, duration_ms)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (track_id) DO UPDATE SET
+    file_checksum = EXCLUDED.file_checksum, bucket_ms = EXCLUDED.bucket_ms, peaks = EXCLUDED.peaks,
+    duration_ms = EXCLUDED.duration_ms, created_at = now()`, trackID, w.Checksum, w.BucketMS, peaks, w.DurationMS)
+	if ce, ok := db.AsConstraintError(err); ok && ce.Constraint == "fk_track_waveforms_track_id" {
+		return library.ErrTrackNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("store waveform of track %d: %w", trackID, err)
+	}
+	return nil
 }
 
 // codes returns the issue codes as text.

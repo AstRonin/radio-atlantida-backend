@@ -104,14 +104,22 @@ type Store interface {
 	// Unanalysed returns at most limit tracks never analysed, in ID order.
 	Unanalysed(ctx context.Context, limit int) ([]Track, error)
 	// SaveAnalysis stores the analysis of a track and its file path, and
-	// sets quality_ok. library.ErrTrackNotFound, ErrFilePathTaken.
-	SaveAnalysis(ctx context.Context, id uint64, a Analysis) error
+	// sets quality_ok. A new checksum resets a cue that does not fit the
+	// new duration; cueReset tells. library.ErrTrackNotFound,
+	// ErrFilePathTaken.
+	SaveAnalysis(ctx context.Context, id uint64, a Analysis) (cueReset bool, err error)
 	// MarkMissing records that the file of a track is missing: the
 	// file_missing issue alone, quality_ok false. The measurements stay.
 	MarkMissing(ctx context.Context, id uint64, at time.Time) error
 	// Busy returns the tracks of ids that are queued in Liquidsoap, on air
 	// at now, or planned to start before until.
 	Busy(ctx context.Context, ids []uint64, now, until time.Time) ([]uint64, error)
+	// Waveform returns the stored waveform of a track; false when there is
+	// none.
+	Waveform(ctx context.Context, trackID uint64) (Waveform, bool, error)
+	// SaveWaveform stores the waveform of a track, replacing the one
+	// before. library.ErrTrackNotFound.
+	SaveWaveform(ctx context.Context, trackID uint64, w Waveform) error
 }
 
 // TxRunner runs fn in one transaction (*db.DB).
@@ -135,11 +143,12 @@ type Prober interface {
 	Probe(ctx context.Context, rel string) (media.Info, error)
 }
 
-// Encoder measures and encodes files (*media.FFmpeg).
+// Encoder measures, encodes, and draws files (*media.FFmpeg).
 type Encoder interface {
 	Available() bool
 	Measure(ctx context.Context, rel string) (media.Loudness, error)
 	Encode(ctx context.Context, src, dst string, enc media.Encoding, norm *media.Normalize) error
+	Peaks(ctx context.Context, rel string, bucketMS int) ([]int8, int, error)
 }
 
 // Operations stores the operations and publishes their events
@@ -192,6 +201,8 @@ type Service struct {
 	// worker has finished it; it keeps the queue at one job.
 	running atomic.Bool
 	queue   chan job
+	// decodes holds a token per waveform decode running (waveformDecodes).
+	decodes chan struct{}
 }
 
 // NewService returns the service. log is the root logger; now is the
@@ -202,7 +213,7 @@ func NewService(tx TxRunner, store Store, files Files, prober Prober, ff Encoder
 	return &Service{
 		tx: tx, store: store, files: files, prober: prober, ff: ff, ops: ops, settings: settings,
 		log: logging.For(log, logging.ComponentMedia), now: now,
-		queue: make(chan job, 1),
+		queue: make(chan job, 1), decodes: make(chan struct{}, waveformDecodes),
 	}
 }
 
@@ -275,7 +286,10 @@ type tally struct {
 	mu     sync.Mutex
 	counts map[string]int
 	failed []string
-	done   int
+	// cueReset are the tracks whose cue did not fit the new file and was
+	// reset (docs/phase-22-plan.md decision 7).
+	cueReset []string
+	done     int
 }
 
 func newTally() *tally { return &tally{counts: map[string]int{}} }
@@ -293,8 +307,15 @@ func (t *tally) add(outcome, name string, failed bool) int {
 	return t.done
 }
 
+// resetCue records a track whose cue was reset; the summary names it.
+func (t *tally) resetCue(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cueReset = append(t.cueReset, name)
+}
+
 // summary words the counts in the order of outcomes, skipping zeros, and
-// names the first failed items.
+// names the first failed items and the tracks whose cue was reset.
 func (t *tally) summary(outcomes ...string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -314,6 +335,10 @@ func (t *tally) summary(outcomes ...string) string {
 	}
 	if len(t.failed) > 0 {
 		out += fmt.Sprintf("; failed: %v (see the log)", t.failed)
+	}
+	if len(t.cueReset) > 0 {
+		names := t.cueReset[:min(len(t.cueReset), maxFailedNames)]
+		out += fmt.Sprintf("; cue_reset %d: %v", len(t.cueReset), names)
 	}
 	return out
 }

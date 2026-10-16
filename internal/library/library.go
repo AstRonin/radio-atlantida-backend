@@ -111,16 +111,18 @@ type Service struct {
 	tracks    TrackStore
 	files     Files
 	prober    Prober
+	onAir     OnAir
 	log       *slog.Logger
 }
 
-// NewService returns the service. log is the root logger.
+// NewService returns the service. onAir tells which track is on air; log
+// is the root logger.
 func NewService(tx TxRunner, types TypeStore, playlists PlaylistStore, artists ArtistStore, tracks TrackStore,
-	files Files, prober Prober, log *slog.Logger,
+	files Files, prober Prober, onAir OnAir, log *slog.Logger,
 ) *Service {
 	return &Service{
 		tx: tx, types: types, playlists: playlists, artists: artists, tracks: tracks,
-		files: files, prober: prober,
+		files: files, prober: prober, onAir: onAir,
 		log: logging.For(log, logging.ComponentAPI),
 	}
 }

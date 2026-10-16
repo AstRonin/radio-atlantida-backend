@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
+	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
 )
 
@@ -32,7 +34,9 @@ type listTracksInput struct {
 	Query      string `query:"q" maxLength:"200" doc:"Only tracks whose title or artist name contains this text (case-insensitive)."`
 	Quality    string `query:"quality" enum:"ok,issues,unanalysed" doc:"Only tracks analysed without issues, with issues, or never analysed."`
 	Reviewed   string `query:"reviewed" enum:"true,false" doc:"Only tracks with (true) or without (false) the reviewed mark."`
-	Sort       string `query:"sort" enum:"title,artist,type,duration,format,quality,reviewed" default:"title" doc:"Sort key; ties are ordered by title and ID. Tracks without the value are last in both orders (reviewed: by the time of the mark, tracks not reviewed last)."`
+	InPlan     string `query:"in_plan" enum:"true,false" doc:"Only tracks with (true) or without (false) a planned or queued item in the track plan."`
+	InPlaylist string `query:"in_playlist" enum:"true,false" doc:"Only tracks in at least one playlist (true) or in none (false)."`
+	Sort       string `query:"sort" enum:"title,artist,type,duration,format,quality,reviewed,next_planned_at" default:"title" doc:"Sort key; ties are ordered by title and ID. Tracks without the value are last in both orders (reviewed: by the time of the mark, tracks not reviewed last; next_planned_at: tracks not in the plan last)."`
 	Order      string `query:"order" enum:"asc,desc" default:"asc"`
 	Offset     int    `query:"offset" minimum:"0" maximum:"1000000" default:"0" doc:"Tracks to skip in the sorted list."`
 	Cursor     string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page; only in the default order (title, asc) and without offset."`
@@ -64,6 +68,27 @@ type reviewTracksOutput struct {
 	Body dto.ReviewTracksResult
 }
 
+type setCueInput struct {
+	ID   uint64 `path:"id" minimum:"1"`
+	Body dto.TrackCueBody
+}
+
+type setCueOutput struct {
+	Body dto.TrackCueResult
+}
+
+type waveformInput struct {
+	ID          uint64 `path:"id" minimum:"1"`
+	IfNoneMatch string `header:"If-None-Match" doc:"The ETag of a waveform the client holds; 304 while it is current."`
+}
+
+type waveformOutput struct {
+	Status       int
+	ETag         string `header:"ETag" doc:"The checksum of the file the waveform was computed for; absent for a track never analysed."`
+	CacheControl string `header:"Cache-Control"`
+	Body         *dto.TrackWaveform
+}
+
 type renameTracksInput struct {
 	Body dto.RenameTracksBody
 }
@@ -77,7 +102,7 @@ type renameTracksOutput struct {
 // connection closes and the player resumes with a Range request.
 const previewWriteDeadline = 30 * time.Minute
 
-func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules) {
+func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules, rot Rotation, media Ingest) {
 	tags := []string{"Tracks"}
 
 	register(api, log, huma.Operation{
@@ -96,6 +121,12 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		}
 		if in.Reviewed != "" {
 			f.Reviewed = new(in.Reviewed == "true")
+		}
+		if in.InPlan != "" {
+			f.InPlan = new(in.InPlan == "true")
+		}
+		if in.InPlaylist != "" {
+			f.InPlaylist = new(in.InPlaylist == "true")
 		}
 		if in.Cursor != "" {
 			c, err := decodeCursor(in.Cursor)
@@ -268,6 +299,61 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		return &playRuleIDsOutput{Body: dto.PlayRuleIDs{RuleIDs: emptyIDs(ids)}}, nil
 	})
 
+	register(api, log, huma.Operation{
+		OperationID: "set-track-cue",
+		Method:      http.MethodPut,
+		Path:        "/api/tracks/{id}/cue",
+		Summary:     "Set the cue points of a track",
+		Description: "Sets the part of the file that goes on air (cue_in_ms to cue_out_ms) and the fades at those points; the file is not changed. " +
+			"A cut must leave at least 5 s on air (air_too_short), and the fades together must fit in it (fades_too_long). " +
+			"Refused for a track without a duration (track_not_analysed) and while a plan item of the track is queued in Liquidsoap or it is on air (track_on_air). " +
+			"When cue in or out changed, the future hours that hold a planned item of the track are rebuilt (build_operation_id); items already queued keep their cut. " +
+			"Fades only need no rebuild: they are read when a request is pushed. The reviewed mark is kept.",
+		Tags:   tags,
+		Errors: errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *setCueInput) (*setCueOutput, error) {
+		b := in.Body
+		res, err := svc.SetCue(ctx, in.ID, library.Cue{InMS: b.CueInMS, OutMS: b.CueOutMS, FadeInMS: b.FadeInMS, FadeOutMS: b.FadeOutMS})
+		if err != nil {
+			return nil, err
+		}
+		out := dto.TrackCueResult{Track: trackDTO(res.Track)}
+		if r := res.Rebuild; r != nil {
+			out.BuildOperationID = startRangeRebuild(ctx, log, rot, rotation.Range{From: r.From, To: r.To})
+		}
+		return &setCueOutput{Body: out}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "get-track-waveform",
+		Method:      http.MethodGet,
+		Path:        "/api/tracks/{id}/waveform",
+		Summary:     "Get the waveform of a track",
+		Description: "The min and max amplitude of every 50 ms of the track file, for the cue editor. Computed with ffmpeg on the first request and stored until the file changes (its checksum); " +
+			"the ETag is the checksum, so a client sends If-None-Match and gets 304 while it is current. " +
+			"A missing or unreadable file is waveform_unavailable; without ffmpeg, media_tools_unavailable.",
+		Tags: tags,
+		Responses: map[string]*huma.Response{
+			"304": {Description: "The waveform of If-None-Match is current."},
+		},
+		Errors: errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusServiceUnavailable),
+	}, func(ctx context.Context, in *waveformInput) (*waveformOutput, error) {
+		w, err := media.Waveform(ctx, in.ID)
+		if err != nil {
+			return nil, err
+		}
+		out := &waveformOutput{Status: http.StatusOK, CacheControl: "no-cache"}
+		if w.Checksum != "" {
+			out.ETag = `"` + w.Checksum + `"`
+			if etagMatches(in.IfNoneMatch, out.ETag) {
+				out.Status = http.StatusNotModified
+				return out, nil
+			}
+		}
+		out.Body = &dto.TrackWaveform{DurationMS: w.DurationMS, BucketMS: w.BucketMS, Peaks: w.Peaks}
+		return out, nil
+	})
+
 	audio := &huma.Response{
 		Description: "The audio file, or the requested range of it.",
 		Content:     map[string]*huma.MediaType{"audio/*": {Schema: &huma.Schema{Type: huma.TypeString, Format: "binary"}}},
@@ -302,6 +388,18 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 			http.ServeContent(w, r, a.Name, a.ModTime, a.File)
 		}}, nil
 	})
+}
+
+// etagMatches reports whether an If-None-Match header names etag (or is
+// "*"). Weak validators match too: the waveform is the same either way.
+func etagMatches(header, etag string) bool {
+	for c := range strings.SplitSeq(header, ",") {
+		c = strings.TrimPrefix(strings.TrimSpace(c), "W/")
+		if c == "*" || c == etag {
+			return true
+		}
+	}
+	return false
 }
 
 var errBadCursor = errors.New("cursor has no track ID")

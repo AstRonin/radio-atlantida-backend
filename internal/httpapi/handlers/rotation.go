@@ -154,6 +154,19 @@ func startRebuild(ctx context.Context, log *slog.Logger, svc Rotation) *uint64 {
 	return &id
 }
 
+// startRangeRebuild starts a clock_build operation that rebuilds the future
+// hours of r and returns its ID; nil when it could not be started (the
+// change itself is saved; the hours keep what they were planned with).
+func startRangeRebuild(ctx context.Context, log *slog.Logger, svc Rotation, r rotation.Range) *uint64 {
+	id, err := svc.RebuildRange(ctx, r)
+	if err != nil {
+		log.ErrorContext(ctx, "start plan rebuild failed",
+			logging.KeyRequestID, middleware.GetReqID(ctx), logging.KeyError, err)
+		return nil
+	}
+	return &id
+}
+
 func planHourDTO(h rotation.PlannedHour) dto.TrackPlanHour {
 	out := dto.TrackPlanHour{
 		HourStartUTC: h.Start.UTC(), Clock: dto.TrackPlanClock{ID: h.ClockID, Name: h.ClockName},
@@ -163,7 +176,7 @@ func planHourDTO(h rotation.PlannedHour) dto.TrackPlanHour {
 	for i, it := range h.Items {
 		out.Items[i] = dto.TrackPlanItem{
 			ID: it.ID, TrackID: it.TrackID, Title: it.Title, ArtistName: it.ArtistName, DurationMS: it.DurationMS,
-			ElementID: it.ElementID, PlannedStartUTC: it.Start.UTC(), PlannedOutMS: it.OutMS, Truncated: it.Truncated,
+			ElementID: it.ElementID, PlannedStartUTC: it.Start.UTC(), PlannedInMS: it.InMS, PlannedOutMS: it.OutMS, Truncated: it.Truncated,
 			Source: it.Source, Status: it.Status,
 		}
 	}

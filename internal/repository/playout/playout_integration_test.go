@@ -104,9 +104,19 @@ func TestItemsAndQueueMarks(t *testing.T) {
 	items, err := f.store.Items(ctx, hour, hour.Add(time.Hour))
 	require.NoError(t, err)
 	require.Equal(t, []playout.Item{
-		{ID: a, TrackID: f.tracks[0], FilePath: "t/0.mp3", Title: "T0", Artist: "A", Start: hour, OutMS: 180000},
-		{ID: b, TrackID: f.tracks[1], FilePath: "t/1.mp3", Title: "T1", Start: hour.Add(3 * time.Minute), OutMS: 15000, Truncated: true},
+		{ID: a, TrackID: f.tracks[0], FilePath: "t/0.mp3", Title: "T0", Artist: "A", Start: hour, OutMS: 180000, FileDurationMS: new(180000)},
+		{
+			ID: b, TrackID: f.tracks[1], FilePath: "t/1.mp3", Title: "T1", Start: hour.Add(3 * time.Minute), OutMS: 15000, Truncated: true,
+			FileDurationMS: new(20000),
+		},
 	}, items)
+
+	// The fades are the track's now; the cut is the item's.
+	f.exec(`UPDATE tracks SET cue_in_ms = 9000, fade_in_ms = 1000, fade_out_ms = 2000 WHERE id = $1`, f.tracks[0])
+	items, err = f.store.Items(ctx, hour, hour.Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, 0, items[0].InMS)
+	require.Equal(t, []int{1000, 2000}, []int{items[0].FadeInMS, items[0].FadeOutMS})
 
 	ok, err := f.store.MarkQueued(ctx, a)
 	require.NoError(t, err)
@@ -189,6 +199,25 @@ func TestStartAndEnd(t *testing.T) {
 	r = f.logged(`scheduled_item_id = $1`, cut)
 	require.Equal(t, "truncated", r.Status, "cut by the switch")
 	require.True(t, r.Truncated)
+
+	// An item with an in point: the planned length is out - in, and the
+	// in point moves to the play log.
+	inPoint := f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, source)
+VALUES ($1, $2, $3, 5000, 45000, 'clock') RETURNING id`, f.clock, f.tracks[0], hour.Add(9*time.Minute))
+	moved, err = f.store.Start(ctx, inPoint, started)
+	require.NoError(t, err)
+	require.True(t, moved)
+	require.Equal(t, 40000, f.logged(`scheduled_item_id = $1`, inPoint).Actual, "the planned length")
+	var in int
+	require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT planned_in_ms FROM play_log WHERE scheduled_item_id = $1`, inPoint).Scan(&in))
+	require.Equal(t, 5000, in)
+	np, _, err = f.store.Logged(ctx, inPoint)
+	require.NoError(t, err)
+	require.Equal(t, 5000, np.InMS)
+	require.Equal(t, 45000, *np.OutMS)
+	_, err = f.store.End(ctx, inPoint, 39500, 1000)
+	require.NoError(t, err)
+	require.Equal(t, "aired", f.logged(`scheduled_item_id = $1`, inPoint).Status, "40 s planned, 39.5 s played")
 
 	ended, err = f.store.End(ctx, 999999, 1000, 1000)
 	require.NoError(t, err)

@@ -290,7 +290,7 @@ func TestDeleteTracks(t *testing.T) {
 		played: {Title: "played", History: true},
 	}, blockers, "a clock once, in name order, at most limit; unknown IDs absent")
 
-	svc := library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, slog.New(slog.DiscardHandler))
+	svc := library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, noneOnAir{}, slog.New(slog.DiscardHandler))
 	res, err := svc.DeleteTracks(ctx, []uint64{free, pooled, played, planned, inserted, 9999})
 	require.NoError(t, err)
 	require.Equal(t, []uint64{free}, res.Deleted)

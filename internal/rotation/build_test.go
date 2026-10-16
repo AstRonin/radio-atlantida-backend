@@ -109,7 +109,7 @@ func codes(p HourPlan) []WarningCode {
 	return out
 }
 
-func end(it Item) int { return it.OffsetMS + it.OutMS }
+func end(it Item) int { return it.OffsetMS + it.OutMS - it.InMS }
 
 func TestBuildFillsTheHour(t *testing.T) {
 	t.Parallel()
@@ -389,4 +389,42 @@ func TestCheckerWindows(t *testing.T) {
 	require.False(t, c.separated(tr, hour10.Add(59*time.Minute)))
 	require.True(t, c.separated(tr, hour10.Add(time.Hour)), "an interval of exactly the separation passes")
 	require.False(t, c.separated(tr, hour10.Add(-59*time.Minute)), "a later play blocks too")
+}
+
+// A track with cue points is fitted by its length on air, and its item
+// carries the in and out points in the file (docs/phase-22-plan.md §3.2).
+func TestBuildUsesTheCut(t *testing.T) {
+	t.Parallel()
+	// Track 1: a 70 s file cut to 10 s ... 40 s, 30 s on air. Track 2: a
+	// 30 s file without a cut.
+	l := library(trackSpec{id: 1, duration: 30_000, playlist: music, artist: 1}, trackSpec{id: 2, duration: 50*mn + 30_000, playlist: extra, artist: 2})
+	l.Tracks[0].CueInMS = 10_000
+	el := flow(30_000, music)
+	el.DurationToleranceMS = 0
+	in := input(t, l, el, flow(59*mn+30_000, extra))
+	in.Settings.MinFillerGapMS = noFiller
+	p := Build(in)
+
+	require.Len(t, p.Items, 2)
+	require.Equal(t, Item{TrackID: 1, ElementID: new(uint64(1)), OffsetMS: 0, InMS: 10_000, OutMS: 40_000, Source: SourceClock}, p.Items[0])
+	require.Equal(t, 30_000, p.Items[1].OffsetMS, "the next item starts after the 30 s on air")
+	require.Zero(t, p.Items[1].InMS)
+}
+
+// A crossing track with a cue in point is cut at the segment end, counted
+// from its in point.
+func TestBuildCutsACrossingTrackFromItsCueIn(t *testing.T) {
+	t.Parallel()
+	l := library(trackSpec{id: 1, duration: 61 * mn, playlist: music, artist: 1})
+	l.Tracks[0].CueInMS = 5_000
+	in := input(t, l, flow(61*mn, music))
+	in.Settings.MinFillerGapMS = noFiller
+	p := Build(in)
+
+	require.Len(t, p.Items, 1)
+	it := p.Items[0]
+	require.True(t, it.Truncated)
+	require.Equal(t, 5_000, it.InMS)
+	require.Equal(t, 5_000+clocks.HourMS, it.OutMS)
+	require.Equal(t, clocks.HourMS, end(it))
 }

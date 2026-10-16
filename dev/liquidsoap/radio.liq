@@ -184,8 +184,10 @@ def hour_parity() =
 end
 
 # Request queues fed by the backend: `hour_<p>.push <uri>` over telnet. The
-# URI is annotated with item_id and, for a truncated item, liq_cue_out and
-# liq_fade_out (applied when the request is resolved, and by fade.out below).
+# URI is annotated with item_id; the track's cue points as liq_cue_in and
+# liq_cue_out (applied when the request is resolved); its fades as
+# liq_fade_in and liq_fade_out, or for a truncated item liq_cue_out and the
+# fade that ends there (applied by fade.in and fade.out below).
 hour_0 = reported("plan", request.queue(id="hour_0"))
 hour_1 = reported("plan", request.queue(id="hour_1"))
 
@@ -221,9 +223,47 @@ hours =
     [({hour_parity() == 0}, hour_0), ({hour_parity() == 1}, hour_1)]
   )
 
-# A truncated item fades out over liq_fade_out seconds, ending at its cue-out
-# point; other tracks are not faded.
-hours = fade.out(duration=0., override_duration="liq_fade_out", hours)
+# A track with liq_fade_in fades in over that many seconds from its cue-in
+# point; one with liq_fade_out (a truncated item, or a track's own fade
+# out) fades out over that many seconds, ending at its cue-out point. Other
+# tracks are not faded (docs/phase-22-plan.md).
+#
+# fade.out must be track_sensitive: in Liquidsoap 2.4 the default (false)
+# starts one fade on the first frame of the source and never resets it, so
+# the queues stay silent after the first fade. fade.in is not used: it reads
+# its override in on_metadata but starts in on_track, and for a track that
+# starts after the queue was empty the metadata comes second, so the fade
+# is lost. cue_fade_in takes the duration from the metadata on_track gives.
+def cue_fade_in(s) =
+  fade_length = ref(0.)
+  fade_start = ref(0.)
+  s.on_track(
+    synchronous=true,
+    fun (m) ->
+      begin
+        fade_length := float_of_string(default=0., m["liq_fade_in"])
+        fade_start := source.time(s)
+      end
+  )
+  amplify(
+    override=null,
+    fun () ->
+      if
+        fade_length() <= 0.
+      then
+        1.
+      else
+        min(1., max(0., (source.time(s) - fade_start()) / fade_length()))
+      end,
+    s
+  )
+end
+
+hours = cue_fade_in(hours)
+hours =
+  fade.out(
+    duration=0., override_duration="liq_fade_out", track_sensitive=true, hours
+  )
 
 # Emergency (§8.2, §8.6): when the hour queue has nothing to play, ask the
 # backend for a track of the emergency playlist. 204 or an error: nothing,
@@ -245,6 +285,17 @@ emergency =
   reported(
     "emergency",
     request.dynamic(id="emergency", retry_delay={5.}, next_emergency)
+  )
+
+# Emergency tracks carry the cue points and fades of their track, like plan
+# items.
+emergency = cue_fade_in(emergency)
+emergency =
+  fade.out(
+    duration=0.,
+    override_duration="liq_fade_out",
+    track_sensitive=true,
+    emergency
   )
 
 # Runtime music gain, changed by the backend: `var.set music_gain = 0.2`.

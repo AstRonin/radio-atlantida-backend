@@ -339,6 +339,57 @@ func TestRequestURI(t *testing.T) {
 	require.Equal(t, `annotate:item_id="9",title="Station \"ID\"",artist="":/media/a/b.mp3`, RequestURI(it, set))
 }
 
+// The cut and fades of a track (docs/phase-22-plan.md §3.2).
+func TestRequestURIWithCue(t *testing.T) {
+	t.Parallel()
+	set := Settings{MediaRoot: "/media", FadeOutMS: 2500}
+	const tail = `title="Song",artist="Band":/media/a/b.mp3`
+	at := func(in, out int, truncated bool, fadeIn, fadeOut int) Item {
+		it := item(7, 0)
+		it.InMS, it.OutMS, it.Truncated, it.FileDurationMS = in, out, truncated, new(180000)
+		it.FadeInMS, it.FadeOutMS = fadeIn, fadeOut
+		return it
+	}
+	tests := []struct {
+		name string
+		it   Item
+		want string
+	}{
+		{"no cue: the whole file", at(0, 180000, false, 0, 0), `annotate:item_id="7",` + tail},
+		{"cue in only", at(5000, 180000, false, 0, 0), `annotate:item_id="7",liq_cue_in="5.",` + tail},
+		{"cue out before the end", at(0, 170000, false, 0, 0), `annotate:item_id="7",liq_cue_out="170.",` + tail},
+		{
+			"truncated with a cue: the setting's fade",
+			at(5000, 65000, true, 1000, 2000),
+			`annotate:item_id="7",liq_cue_in="5.",liq_cue_out="65.",liq_fade_in="1.",liq_fade_out="2.5",` + tail,
+		},
+		{
+			"fades at the cue points",
+			at(5000, 170000, false, 1000, 2000),
+			`annotate:item_id="7",liq_cue_in="5.",liq_cue_out="170.",liq_fade_in="1.",liq_fade_out="2.",` + tail,
+		},
+		{"fades without a cut", at(0, 180000, false, 0, 1500), `annotate:item_id="7",liq_fade_out="1.5",` + tail},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, RequestURI(tt.it, set))
+		})
+	}
+}
+
+func TestEmergencyURIWithCue(t *testing.T) {
+	t.Parallel()
+	set := Settings{MediaRoot: "/media"}
+	tr := Track{ID: 3, Title: "Song", FilePath: "a/b.mp3", DurationMS: new(180000)}
+	require.Equal(t, `annotate:track_id="3",title="Song",artist="":/media/a/b.mp3`, EmergencyURI(tr, set))
+	tr.CueInMS, tr.CueOutMS, tr.FadeInMS, tr.FadeOutMS = 5000, new(45000), 1000, 2000
+	require.Equal(t,
+		`annotate:track_id="3",liq_cue_in="5.",liq_cue_out="45.",liq_fade_in="1.",liq_fade_out="2.",title="Song",artist="":/media/a/b.mp3`,
+		EmergencyURI(tr, set))
+	require.Equal(t, 45000, *tr.outMS())
+}
+
 func TestPassFillsLookahead(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, item(1, 0), item(2, 3*time.Minute), item(3, 6*time.Minute), item(4, 65*time.Minute))

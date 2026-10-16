@@ -76,3 +76,33 @@ func TestFFmpegMeasureAndEncode(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrSilent)
 }
+
+// The waveform of a real file: a mono tone at half scale (-6 dBFS) for
+// 2 s, then 1 s of silence.
+func TestFFmpegPeaks(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	root := t.TempDir()
+	//nolint:gosec // G204: fixed arguments and a path in a temp dir
+	gen := exec.CommandContext(t.Context(), "ffmpeg", "-hide_banner", "-nostdin", "-v", "error",
+		"-f", "lavfi", "-i", "aevalsrc=0.5*sin(2*PI*440*t):s=44100:d=2", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:d=1",
+		"-filter_complex", "[0][1]concat=n=2:v=0:a=1",
+		"-c:a", "libmp3lame", "-b:a", "192k", filepath.Join(root, "tone.mp3"))
+	out, err := gen.CombinedOutput()
+	require.NoError(t, err, string(out))
+	ff := NewFFmpeg(New(root))
+
+	peaks, duration, err := ff.Peaks(t.Context(), "tone.mp3", 50)
+	require.NoError(t, err)
+	require.InDelta(t, 3000, duration, 100)
+	require.InDelta(t, 2*60, len(peaks), 4)
+	// The tone peaks at half scale (-6 dBFS); the silence is flat.
+	require.InDelta(t, 63, peaks[21], 6)
+	require.InDelta(t, -63, peaks[20], 6)
+	require.Zero(t, peaks[len(peaks)-4])
+
+	_, _, err = ff.Peaks(t.Context(), "missing.mp3", 50)
+	require.ErrorIs(t, err, ErrFileNotFound)
+}

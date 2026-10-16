@@ -22,7 +22,8 @@ func New(q db.Querier) *Store { return &Store{q: q} }
 // playedSQL reads the last play log rows by the moment they were due. The
 // order is the expression of ix_play_log_sort_time.
 const playedSQL = `SELECT pl.id, pl.scheduled_item_id, pl.status, pl.source, pl.track_id, t.title, a.name AS artist_name,
-       pl.planned_start_utc, pl.started_at, pl.planned_out_ms, pl.actual_duration_ms, pl.resolution, pl.outage_id
+       pl.planned_start_utc, pl.started_at, pl.planned_in_ms, pl.planned_out_ms, pl.actual_duration_ms, pl.resolution,
+       pl.outage_id
 FROM play_log pl
 JOIN tracks t ON t.id = pl.track_id
 LEFT JOIN artists a ON a.id = t.artist_id
@@ -40,6 +41,7 @@ type playedRow struct {
 	ArtistName       *string    `db:"artist_name"`
 	PlannedStart     *time.Time `db:"planned_start_utc"`
 	StartedAt        *time.Time `db:"started_at"`
+	PlannedInMS      int        `db:"planned_in_ms"`
 	PlannedOutMS     *int       `db:"planned_out_ms"`
 	ActualDurationMS *int       `db:"actual_duration_ms"`
 	Resolution       *string    `db:"resolution"`
@@ -50,7 +52,8 @@ func (r playedRow) domain() airwindow.Played {
 	return airwindow.Played{
 		ID: r.ID, ScheduledItemID: r.ScheduledItemID, Status: r.Status, Source: r.Source, TrackID: r.TrackID,
 		Title: r.Title, ArtistName: r.ArtistName, PlannedStart: utcPtr(r.PlannedStart), StartedAt: utcPtr(r.StartedAt),
-		PlannedOutMS: r.PlannedOutMS, ActualDurationMS: r.ActualDurationMS, Resolution: r.Resolution, OutageID: r.OutageID,
+		PlannedInMS: r.PlannedInMS, PlannedOutMS: r.PlannedOutMS, ActualDurationMS: r.ActualDurationMS,
+		Resolution: r.Resolution, OutageID: r.OutageID,
 	}
 }
 

@@ -96,7 +96,7 @@ func (s *Service) runAnalyse(ctx context.Context, id uint64, req AnalyseRequest)
 	}
 	t := newTally()
 	err = workerpool.ForEach(ctx, analyseWorkers, ts, func(ctx context.Context, tr Track) error {
-		outcome := s.analyseTrack(ctx, tr, set.Standard, req.Force)
+		outcome := s.analyseTrack(ctx, tr, set.Standard, req.Force, t)
 		done := t.add(outcome, tr.FilePath, outcome == outcomeFailed)
 		s.ops.Progress(id, operations.KindAnalyse, done, len(ts), tr.FilePath)
 		return ctx.Err()
@@ -107,8 +107,9 @@ func (s *Service) runAnalyse(ctx context.Context, id uint64, req AnalyseRequest)
 	return t.summary(outcomeAnalysed, outcomeRechecked, outcomeMissing, outcomeDeleted, outcomeUnreadable, outcomeFailed), nil
 }
 
-// analyseTrack analyses the file of one track and stores the result.
-func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, force bool) string {
+// analyseTrack analyses the file of one track and stores the result; a
+// reset cue is recorded in t.
+func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, force bool, t *tally) string {
 	sum, err := s.files.Checksum(ctx, tr.FilePath)
 	switch {
 	case errors.Is(err, media.ErrFileNotFound), errors.Is(err, media.ErrInvalidPath):
@@ -154,13 +155,24 @@ func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, forc
 
 	dctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	if err := s.store.SaveAnalysis(dctx, tr.ID, a); err != nil {
+	reset, err := s.store.SaveAnalysis(dctx, tr.ID, a)
+	if err != nil {
 		if errors.Is(err, library.ErrTrackNotFound) {
 			return s.trackDeleted(ctx, tr)
 		}
 		return s.trackFailed(ctx, tr, "save analysis", err)
 	}
+	s.cueReset(ctx, tr, reset, t)
 	return outcome
+}
+
+// cueReset logs and records a track whose cue did not fit its new file.
+func (s *Service) cueReset(ctx context.Context, tr Track, reset bool, t *tally) {
+	if !reset {
+		return
+	}
+	s.log.WarnContext(ctx, "the cue of the track did not fit its new file and was reset", "track_id", tr.ID, "file_path", tr.FilePath)
+	t.resetCue(tr.FilePath)
 }
 
 // trackDeleted counts a track deleted from the library while the

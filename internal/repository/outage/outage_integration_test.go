@@ -128,10 +128,14 @@ func TestMarkMissed(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
 	before := f.item(-10*time.Minute, "planned") // ends 7 min before the outage
+	// An in point shortens the item: it ends before the outage starts.
+	cutShort := f.item(-4*time.Minute, "planned")
+	f.exec(`UPDATE scheduled_items SET planned_in_ms = 120000, planned_out_ms = 180000 WHERE id = $1`, cutShort)
 	overlap := f.item(-2*time.Minute, "planned") // runs into it
 	queued := f.item(2*time.Minute, "queued")    // inside
-	late := f.item(9*time.Minute, "planned")     // inside, but not before the cutoff
-	after := f.item(11*time.Minute, "planned")   // after the end
+	f.exec(`UPDATE scheduled_items SET planned_in_ms = 1000 WHERE id = $1`, queued)
+	late := f.item(9*time.Minute, "planned")   // inside, but not before the cutoff
+	after := f.item(11*time.Minute, "planned") // after the end
 	end := hour.Add(10 * time.Minute)
 	o, err := f.store.CreateOutage(ctx, outage.NewOutage{
 		StartedAt: hour, DetectedBy: outage.DetectedByLiquidsoapCallback, Component: outage.ComponentLiquidsoap,
@@ -142,7 +146,9 @@ func TestMarkMissed(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, 2, n)
-	require.Equal(t, 3, f.count(`SELECT count(*) FROM scheduled_items WHERE id = ANY($1)`, []uint64{before, late, after}))
+	require.Equal(t, 4, f.count(`SELECT count(*) FROM scheduled_items WHERE id = ANY($1)`, []uint64{before, cutShort, late, after}))
+	require.Equal(t, 1, f.count(`SELECT count(*) FROM play_log WHERE scheduled_item_id = $1 AND planned_in_ms = 1000`, queued),
+		"the in point moves with the missed item")
 	require.Zero(t, f.count(`SELECT count(*) FROM scheduled_items WHERE id = ANY($1)`, []uint64{overlap, queued}))
 	require.Equal(t, 2, f.count(`SELECT count(*) FROM play_log
 WHERE status = 'missed' AND resolution = 'open' AND outage_id = $1 AND started_at IS NULL

@@ -27,6 +27,7 @@ type sortRow struct {
 	analysed bool
 	issues   int
 	reviewed *int // hours after the fixture's base time
+	planned  *int // hours after the base time of the earliest plan item
 }
 
 func (r sortRow) missing(s library.TrackSort) bool {
@@ -41,6 +42,8 @@ func (r sortRow) missing(s library.TrackSort) bool {
 		return !r.analysed
 	case library.SortReviewed:
 		return r.reviewed == nil
+	case library.SortNextPlanned:
+		return r.planned == nil
 	default:
 		return false
 	}
@@ -64,6 +67,8 @@ func compareKey(s library.TrackSort, a, b sortRow) int {
 		return cmp.Or(cmp.Compare(min(a.issues, 1), min(b.issues, 1)), cmp.Compare(b.issues, a.issues))
 	case library.SortReviewed:
 		return cmp.Compare(*a.reviewed, *b.reviewed)
+	case library.SortNextPlanned:
+		return cmp.Compare(*a.planned, *b.planned)
 	default:
 		return strings.Compare(a.title, b.title)
 	}
@@ -105,8 +110,8 @@ func expectedOrder(rows []sortRow, s library.TrackSort, desc bool) []uint64 {
 }
 
 // sortFixture adds 30 tracks with equal titles, missing artists, durations,
-// formats, and reviewed marks, equal reviewed times, and all three quality
-// states.
+// formats, reviewed marks, and plan items, equal reviewed times and next
+// planned starts, and all three quality states.
 func sortFixture(t *testing.T, f *fixture) []sortRow {
 	t.Helper()
 	ctx := t.Context()
@@ -122,6 +127,7 @@ func sortFixture(t *testing.T, f *fixture) []sortRow {
 	for _, c := range library.QualityIssues() {
 		codes = append(codes, string(c))
 	}
+	clock := f.id(`INSERT INTO clocks (name) VALUES ('Sort') RETURNING id`)
 
 	rows := make([]sortRow, 30)
 	for i := range rows {
@@ -154,6 +160,9 @@ func sortFixture(t *testing.T, f *fixture) []sortRow {
 		if i%4 != 1 {
 			r.reviewed = new(i % 5)
 		}
+		if i%3 != 1 {
+			r.planned = new(i % 4)
+		}
 		id, err := f.tracks.Create(ctx, in)
 		require.NoError(t, err)
 		r.id = id
@@ -168,6 +177,14 @@ func sortFixture(t *testing.T, f *fixture) []sortRow {
 		_, err = f.d.Pool.Exec(ctx, `UPDATE tracks SET format = $2, analyzed_at = $3, quality_issues = $4, reviewed_at = $5
 WHERE id = $1`, id, r.format, analysedAt, codes[:r.issues], reviewedAt)
 		require.NoError(t, err)
+		if r.planned != nil {
+			// A queued item, and a later planned one that is not the next.
+			start := time.Date(2026, 10, 17, *r.planned, 0, 0, 0, time.UTC)
+			_, err = f.d.Pool.Exec(ctx, `INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
+VALUES ($1, $2, $3, 1000, 'clock', 'queued'), ($1, $2, $3::timestamptz + interval '20 hours', 1000, 'clock', 'planned')`,
+				clock, id, start)
+			require.NoError(t, err)
+		}
 		rows[i] = r
 	}
 	return rows

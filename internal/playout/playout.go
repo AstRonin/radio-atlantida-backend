@@ -30,10 +30,19 @@ type Item struct {
 	Title  string
 	Artist string
 	Start  time.Time
-	InMS   int
-	// OutMS is the out point, relative to the start of the track.
+	// InMS and OutMS are the in and out points the item was planned with,
+	// relative to the start of the file; it plays OutMS - InMS.
+	InMS      int
 	OutMS     int
 	Truncated bool
+	// FileDurationMS is the duration of the track file now; nil when it is
+	// unknown. An out point before it is sent as a cue out; an item that
+	// is not truncated plays to the end of a file of unknown length.
+	FileDurationMS *int
+	// FadeInMS and FadeOutMS are the track's fades at its cue points, read
+	// when the item is pushed (docs/phase-22-plan.md decision 4).
+	FadeInMS  int
+	FadeOutMS int
 	// Queued: pushed to Liquidsoap and not started yet.
 	Queued bool
 }
@@ -50,6 +59,24 @@ type Track struct {
 	ArtistName *string
 	FilePath   string
 	DurationMS *int
+	// The cue of the track (docs/phase-22-plan.md): CueOutMS nil is the
+	// end of the file.
+	CueInMS   int
+	CueOutMS  *int
+	FadeInMS  int
+	FadeOutMS int
+}
+
+// outMS is the out point of the track: its cue out, else its duration; nil
+// when neither is known.
+func (t Track) outMS() *int {
+	if t.CueOutMS != nil {
+		return new(*t.CueOutMS)
+	}
+	if t.DurationMS != nil {
+		return new(*t.DurationMS)
+	}
+	return nil
 }
 
 // Source of what plays.
@@ -67,8 +94,10 @@ type NowPlaying struct {
 	ArtistName *string
 	Source     string
 	StartedAt  time.Time
-	// OutMS is the planned out point (plan items) or the duration
-	// (emergency tracks, when known).
+	// InMS is the in point in the file; it plays OutMS - InMS.
+	InMS int
+	// OutMS is the planned out point (plan items) or the cue out or the
+	// duration (emergency tracks, when known), from the start of the file.
 	OutMS     *int
 	Truncated bool
 }
@@ -80,6 +109,7 @@ type QueuedItem struct {
 	Title      string
 	ArtistName *string
 	Start      time.Time
+	InMS       int
 	OutMS      int
 	Truncated  bool
 	// Queue is the Liquidsoap queue that holds it.
@@ -293,6 +323,17 @@ func (s *Service) NowPlaying() *NowPlaying {
 		return nil
 	}
 	return new(*s.nowPlaying)
+}
+
+// OnAirTrack returns the track on air, a plan item or an emergency track;
+// false between tracks, or before Liquidsoap reported one.
+func (s *Service) OnAirTrack() (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nowPlaying == nil {
+		return 0, false
+	}
+	return s.nowPlaying.TrackID, true
 }
 
 // Link returns the state of the Liquidsoap control link.

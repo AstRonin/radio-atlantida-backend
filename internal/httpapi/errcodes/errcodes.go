@@ -131,6 +131,15 @@ const (
 	LiveOfferInvalid Problem = "live_offer_invalid"
 	// LiveUnavailable: the live voice bridge could not open its UDP port.
 	LiveUnavailable Problem = "live_unavailable"
+	// TrackOnAir: the track is queued in Liquidsoap or on air, so its cue
+	// points are not changed now; try again when it has played.
+	TrackOnAir Problem = "track_on_air"
+	// TrackNotAnalysed: the track has no duration yet (analyse it first),
+	// so its cue points cannot be checked.
+	TrackNotAnalysed Problem = "track_not_analysed"
+	// WaveformUnavailable: the track file is missing or cannot be decoded,
+	// so it has no waveform.
+	WaveformUnavailable Problem = "waveform_unavailable"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -153,6 +162,7 @@ func Problems() []Problem {
 		MissedItemNotFound, MissedItemResolved,
 		MediaOperationRunning, MediaToolsUnavailable,
 		LiveSessionActive, LiveOfferInvalid, LiveUnavailable,
+		TrackOnAir, TrackNotAnalysed, WaveformUnavailable,
 	}
 }
 
@@ -200,13 +210,22 @@ const (
 	// InvalidCharacters: the text contains characters it must not have
 	// (control characters such as line breaks and tabs in a title).
 	InvalidCharacters Field = "invalid_characters"
+	// CueOrder: the cue out point is not after the cue in point.
+	CueOrder Field = "cue_order"
+	// CueBeyondEnd: the cue point is at or past the end of the file.
+	CueBeyondEnd Field = "cue_beyond_end"
+	// AirTooShort: the part between the cue points is shorter than 5 s.
+	AirTooShort Field = "air_too_short"
+	// FadesTooLong: the fade in and the fade out together are longer than
+	// the part between the cue points.
+	FadesTooLong Field = "fades_too_long"
 )
 
 // Fields lists every field error code, in declaration order.
 func Fields() []Field {
 	return []Field{
 		Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit,
-		Order, Blocked, InvalidCharacters,
+		Order, Blocked, InvalidCharacters, CueOrder, CueBeyondEnd, AirTooShort, FadesTooLong,
 	}
 }
 

@@ -126,10 +126,6 @@ func serve(ctx context.Context) error {
 	if !ff.Available() {
 		apiLog.Warn("ffmpeg not found on PATH: import, analysis, and transcoding are refused")
 	}
-	librarySvc := library.NewService(database,
-		libraryrepo.NewTypes(database), libraryrepo.NewPlaylists(database),
-		libraryrepo.NewArtists(database), libraryrepo.NewTracks(database),
-		mediaLib, prober, log)
 	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool))
 	separationSvc := separation.NewService(separationrepo.New(database), separationLimit(settingsSvc))
 	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
@@ -141,6 +137,11 @@ func serve(ctx context.Context) error {
 	// the outage detector's checks and outages.
 	broadcastState := broadcast.NewTracker(database, broadcastrepo.New(database.Pool), hub, log, time.Now)
 	playoutSvc := newPlayout(database, settingsSvc, hub, broadcastState, log)
+	// The library refuses a cue change of the track on air (playout).
+	librarySvc := library.NewService(database,
+		libraryrepo.NewTypes(database), libraryrepo.NewPlaylists(database),
+		libraryrepo.NewArtists(database), libraryrepo.NewTracks(database),
+		mediaLib, prober, playoutSvc, log)
 	airWindowSvc := airwindow.NewService(airwindowrepo.New(database.Pool), playoutSvc, airWindowSettings(settingsSvc), time.Now)
 	ingestSvc := ingest.NewService(database, ingestrepo.New(database.Pool), mediaLib, prober, ff, tracker,
 		ingestSettings(settingsSvc), log, time.Now)

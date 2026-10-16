@@ -93,7 +93,7 @@ func (s *Store) ReplaceHour(ctx context.Context, h rotation.PlanHour, items []ro
 	for i, it := range items {
 		rows[i] = []any{
 			h.GridSlotID, h.ClockID, it.TrackID, h.Start.Add(time.Duration(it.OffsetMS) * time.Millisecond),
-			it.OutMS, it.Truncated, string(it.Source), it.ElementID, it.PoolRowID, it.RescheduleOfID,
+			it.InMS, it.OutMS, it.Truncated, string(it.Source), it.ElementID, it.PoolRowID, it.RescheduleOfID,
 		}
 		if it.PoolRowID != nil {
 			used = append(used, *it.PoolRowID)
@@ -102,7 +102,7 @@ func (s *Store) ReplaceHour(ctx context.Context, h rotation.PlanHour, items []ro
 	if len(rows) > 0 {
 		_, err := s.q.CopyFrom(ctx, pgx.Identifier{"scheduled_items"}, []string{
 			"grid_slot_id", "clock_id", "track_id", "planned_start_utc",
-			"planned_out_ms", "truncated", "source", "clock_element_id", "filler_pool_id", "reschedule_of_id",
+			"planned_in_ms", "planned_out_ms", "truncated", "source", "clock_element_id", "filler_pool_id", "reschedule_of_id",
 		}, pgx.CopyFromRows(rows))
 		if err != nil {
 			return fmt.Errorf("insert planned items: %w", err)
@@ -156,6 +156,7 @@ type plannedItemRow struct {
 	DurationMS *int32    `db:"duration_ms"`
 	ElementID  *uint64   `db:"clock_element_id"`
 	Start      time.Time `db:"planned_start_utc"`
+	InMS       int32     `db:"planned_in_ms"`
 	OutMS      int32     `db:"planned_out_ms"`
 	Truncated  bool      `db:"truncated"`
 	Source     string    `db:"source"`
@@ -165,7 +166,7 @@ type plannedItemRow struct {
 func (r plannedItemRow) domain() rotation.PlannedItem {
 	out := rotation.PlannedItem{
 		ID: r.ID, TrackID: r.TrackID, Title: r.Title, ArtistName: r.ArtistName, ElementID: r.ElementID,
-		Start: r.Start.UTC(), OutMS: int(r.OutMS), Truncated: r.Truncated, Source: r.Source, Status: r.Status,
+		Start: r.Start.UTC(), InMS: int(r.InMS), OutMS: int(r.OutMS), Truncated: r.Truncated, Source: r.Source, Status: r.Status,
 	}
 	if r.DurationMS != nil {
 		out.DurationMS = int(*r.DurationMS)
@@ -199,7 +200,7 @@ ORDER BY h.hour_start_utc`, from, to)
 
 	rows, err = s.q.Query(ctx, `
 SELECT si.id, si.track_id, t.title, a.name AS artist_name, t.duration_ms, si.clock_element_id,
-       si.planned_start_utc, si.planned_out_ms, si.truncated, si.source, si.status
+       si.planned_start_utc, si.planned_in_ms, si.planned_out_ms, si.truncated, si.source, si.status
 FROM scheduled_items si
 JOIN tracks t ON t.id = si.track_id
 LEFT JOIN artists a ON a.id = t.artist_id

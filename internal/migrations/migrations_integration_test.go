@@ -43,7 +43,7 @@ func TestUpCreatesSchemaAndSeeds(t *testing.T) {
 		"clock_filler_pool", "clocks", "filler_requests", "grid_slots", "hour_inserts", "operations", "plan_hours",
 		"play_log", "play_rules", "playlist_play_rules", "playlist_types", "playlists",
 		"scheduled_items", "separation_rules", "settings", "track_play_rules",
-		"track_playlists", "tracks",
+		"track_playlists", "track_waveforms", "tracks",
 	}, tables)
 
 	var types string

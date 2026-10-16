@@ -155,13 +155,13 @@ func playoutStatusDTO(st playout.Status) dto.PlayoutStatus {
 	if np := st.NowPlaying; np != nil {
 		out.NowPlaying = &dto.NowPlaying{
 			ItemID: np.ItemID, TrackID: np.TrackID, Title: np.Title, ArtistName: np.ArtistName, Source: np.Source,
-			StartedAt: np.StartedAt, OutMS: np.OutMS, Truncated: np.Truncated,
+			StartedAt: np.StartedAt, InMS: np.InMS, OutMS: np.OutMS, Truncated: np.Truncated,
 		}
 	}
 	for i, q := range st.Queued {
 		out.Queued[i] = dto.PlayoutQueuedItem{
 			ID: q.ID, TrackID: q.TrackID, Title: q.Title, ArtistName: q.ArtistName, PlannedStartUTC: q.Start,
-			PlannedOutMS: q.OutMS, Truncated: q.Truncated, Queue: q.Queue,
+			PlannedInMS: q.InMS, PlannedOutMS: q.OutMS, Truncated: q.Truncated, Queue: q.Queue,
 		}
 	}
 	return out

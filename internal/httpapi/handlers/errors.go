@@ -135,6 +135,8 @@ var refusals = []refusal{
 	{library.ErrSystemType, http.StatusConflict, errcodes.SystemTypeNotDeletable},
 	{library.ErrArtistHasHistory, http.StatusConflict, errcodes.ArtistHasHistory},
 	{library.ErrTrackHasHistory, http.StatusConflict, errcodes.TrackHasHistory},
+	{library.ErrTrackOnAir, http.StatusConflict, errcodes.TrackOnAir},
+	{library.ErrTrackNotAnalysed, http.StatusConflict, errcodes.TrackNotAnalysed},
 	{playrules.ErrNotFound, http.StatusNotFound, errcodes.PlayRuleNotFound},
 	{playrules.ErrTrackNotFound, http.StatusNotFound, errcodes.TrackNotFound},
 	{playrules.ErrPlaylistNotFound, http.StatusNotFound, errcodes.PlaylistNotFound},
@@ -152,6 +154,7 @@ var refusals = []refusal{
 	{outage.ErrMissedResolved, http.StatusConflict, errcodes.MissedItemResolved},
 	{ingest.ErrRunning, http.StatusConflict, errcodes.MediaOperationRunning},
 	{ingest.ErrToolsUnavailable, http.StatusServiceUnavailable, errcodes.MediaToolsUnavailable},
+	{ingest.ErrWaveformUnavailable, http.StatusConflict, errcodes.WaveformUnavailable},
 	{live.ErrSessionActive, http.StatusConflict, errcodes.LiveSessionActive},
 	{live.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiveUnavailable},
 }
@@ -215,6 +218,10 @@ var validationRuleCodes = map[validation.Rule]errcodes.Field{
 	validation.Length:     errcodes.Length,
 
 	validation.InvalidCharacters: errcodes.InvalidCharacters,
+	validation.CueOrder:          errcodes.CueOrder,
+	validation.CueBeyondEnd:      errcodes.CueBeyondEnd,
+	validation.AirTooShort:       errcodes.AirTooShort,
+	validation.FadesTooLong:      errcodes.FadesTooLong,
 }
 
 // settingRuleCodes maps the rules of a refused setting value to field codes.

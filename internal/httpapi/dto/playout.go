@@ -39,7 +39,8 @@ type NowPlaying struct {
 	ArtistName *string   `json:"artist_name,omitempty"`
 	Source     string    `json:"source" enum:"plan,emergency"`
 	StartedAt  time.Time `json:"started_at"`
-	OutMS      *int      `json:"out_ms,omitempty" doc:"Planned out point (plan items) or duration (emergency tracks), in ms."`
+	InMS       int       `json:"in_ms" minimum:"0" doc:"In point in the file (the cue in), in ms; the track plays out_ms - in_ms."`
+	OutMS      *int      `json:"out_ms,omitempty" doc:"Out point in the file: planned (plan items), or the cue out or the duration (emergency tracks), in ms."`
 	Truncated  bool      `json:"truncated"`
 }
 
@@ -50,7 +51,8 @@ type PlayoutQueuedItem struct {
 	Title           string    `json:"title"`
 	ArtistName      *string   `json:"artist_name,omitempty"`
 	PlannedStartUTC time.Time `json:"planned_start_utc"`
-	PlannedOutMS    int       `json:"planned_out_ms"`
+	PlannedInMS     int       `json:"planned_in_ms" minimum:"0" doc:"In point from the start of the file."`
+	PlannedOutMS    int       `json:"planned_out_ms" doc:"Out point from the start of the file; the length is planned_out_ms - planned_in_ms."`
 	Truncated       bool      `json:"truncated"`
 	Queue           string    `json:"queue" enum:"hour_0,hour_1" doc:"The Liquidsoap queue of its hour."`
 }

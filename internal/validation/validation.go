@@ -44,6 +44,16 @@ const (
 	// InvalidCharacters: a text contains characters it must not have
 	// (control characters such as line breaks and tabs in a title).
 	InvalidCharacters Rule = "invalid_characters"
+	// CueOrder: a cue out point is not after the cue in point.
+	CueOrder Rule = "cue_order"
+	// CueBeyondEnd: a cue point is at or past the end of the file.
+	CueBeyondEnd Rule = "cue_beyond_end"
+	// AirTooShort: the part of a track between its cue points is shorter
+	// than the minimum on-air length.
+	AirTooShort Rule = "air_too_short"
+	// FadesTooLong: the fade in and the fade out together are longer than
+	// the on-air part of a track.
+	FadesTooLong Rule = "fades_too_long"
 )
 
 // FieldError is the error of one request field.

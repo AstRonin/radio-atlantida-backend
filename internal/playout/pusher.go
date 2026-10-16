@@ -307,19 +307,28 @@ func QueueName(h time.Time, loc *time.Location) string {
 }
 
 // RequestURI returns the request pushed for an item (§8.1): the file under
-// the media root, annotated with the item ID, for a truncated item the out
-// point and the fade that ends there, and the library title and artist, so
-// the stream metadata is what the manager entered, never the file tags. The
-// artist is always sent: an empty one hides the artist tag of the file.
+// the media root, annotated with the item ID; the in point; the out point
+// when the item is truncated or ends before the end of the file; the fades
+// (the track's own at its cue points, or the fade that ends a truncated
+// item); and the library title and artist, so the stream metadata is what
+// the manager entered, never the file tags. The artist is always sent: an
+// empty one hides the artist tag of the file.
 func RequestURI(it Item, set Settings) string {
 	ann := []liquidsoap.Pair{{Key: "item_id", Value: strconv.FormatUint(it.ID, 10)}}
 	if it.InMS > 0 {
 		ann = append(ann, liquidsoap.Pair{Key: "liq_cue_in", Value: seconds(it.InMS)})
 	}
-	if it.Truncated {
-		ann = append(ann,
-			liquidsoap.Pair{Key: "liq_cue_out", Value: seconds(it.OutMS)},
-			liquidsoap.Pair{Key: "liq_fade_out", Value: seconds(set.FadeOutMS)})
+	if it.Truncated || (it.FileDurationMS != nil && it.OutMS < *it.FileDurationMS) {
+		ann = append(ann, liquidsoap.Pair{Key: "liq_cue_out", Value: seconds(it.OutMS)})
+	}
+	if it.FadeInMS > 0 {
+		ann = append(ann, liquidsoap.Pair{Key: "liq_fade_in", Value: seconds(it.FadeInMS)})
+	}
+	switch {
+	case it.Truncated:
+		ann = append(ann, liquidsoap.Pair{Key: "liq_fade_out", Value: seconds(set.FadeOutMS)})
+	case it.FadeOutMS > 0:
+		ann = append(ann, liquidsoap.Pair{Key: "liq_fade_out", Value: seconds(it.FadeOutMS)})
 	}
 	ann = append(ann, liquidsoap.Pair{Key: "title", Value: it.Title}, liquidsoap.Pair{Key: "artist", Value: it.Artist})
 	return liquidsoap.Annotate(path.Join(set.MediaRoot, it.FilePath), ann...)

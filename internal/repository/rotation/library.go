@@ -44,14 +44,16 @@ func (s *Store) LockPlan(ctx context.Context) error {
 type trackRow struct {
 	ID          uint64   `db:"id"`
 	ArtistID    *uint64  `db:"artist_id"`
-	DurationMS  int32    `db:"duration_ms"`
+	AirMS       int32    `db:"air_ms"`
+	CueInMS     int32    `db:"cue_in_ms"`
 	PlaylistIDs []uint64 `db:"playlist_ids"`
 	RuleIDs     []uint64 `db:"rule_ids"`
 }
 
 func (r trackRow) domain() rotation.Track {
 	return rotation.Track{
-		ID: r.ID, ArtistID: r.ArtistID, DurationMS: int(r.DurationMS), PlaylistIDs: r.PlaylistIDs, RuleIDs: r.RuleIDs,
+		ID: r.ID, ArtistID: r.ArtistID, DurationMS: int(r.AirMS), CueInMS: int(r.CueInMS),
+		PlaylistIDs: r.PlaylistIDs, RuleIDs: r.RuleIDs,
 	}
 }
 
@@ -88,13 +90,16 @@ func (r ruleRow) domain() playrules.RuleInput {
 }
 
 // Library returns every track with a duration, in ID order, with its
-// playlists and the play rules of the track and of its playlists, and every
-// play rule. Tracks without a duration cannot be planned. The playlist and
+// length on air (between its cue points, docs/phase-22-plan.md), its
+// playlists, the play rules of the track and of its playlists, and every
+// play rule. Tracks without a duration cannot be planned, nor can a track
+// whose cue no longer fits its file (a duration entered by hand; an
+// analysis resets such a cue). The playlist and
 // rule lookups use pk_track_playlists, pk_track_play_rules, and
 // pk_playlist_play_rules.
 func (s *Store) Library(ctx context.Context) (rotation.Library, error) {
 	rows, err := s.q.Query(ctx, `
-SELECT t.id, t.artist_id, t.duration_ms,
+SELECT t.id, t.artist_id, COALESCE(t.cue_out_ms, t.duration_ms) - t.cue_in_ms AS air_ms, t.cue_in_ms,
        ARRAY(SELECT tp.playlist_id FROM track_playlists tp WHERE tp.track_id = t.id ORDER BY tp.playlist_id) AS playlist_ids,
        ARRAY(SELECT tr.rule_id FROM track_play_rules tr WHERE tr.track_id = t.id
              UNION
@@ -102,7 +107,8 @@ SELECT t.id, t.artist_id, t.duration_ms,
              JOIN playlist_play_rules pr ON pr.playlist_id = tp2.playlist_id
              WHERE tp2.track_id = t.id) AS rule_ids
 FROM tracks t
-WHERE t.duration_ms IS NOT NULL
+WHERE t.duration_ms IS NOT NULL AND COALESCE(t.cue_out_ms, t.duration_ms) > t.cue_in_ms
+  AND (t.cue_out_ms IS NULL OR t.cue_out_ms <= t.duration_ms)
 ORDER BY t.id`)
 	if err != nil {
 		return rotation.Library{}, fmt.Errorf("select library: %w", err)

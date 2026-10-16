@@ -15,7 +15,8 @@ type PlayHistoryEntry struct {
 	// planned.
 	PlannedStartUTC  *time.Time        `json:"planned_start_utc,omitempty"`
 	StartedAt        *time.Time        `json:"started_at,omitempty" doc:"Absent for missed items."`
-	PlannedOutMS     *int              `json:"planned_out_ms,omitempty"`
+	PlannedInMS      int               `json:"planned_in_ms" minimum:"0" doc:"In point the item was planned with, from the start of the file (its cue in); 0 for emergency tracks."`
+	PlannedOutMS     *int              `json:"planned_out_ms,omitempty" doc:"Out point from the start of the file; the planned length is planned_out_ms - planned_in_ms. Absent for emergency tracks."`
 	ActualDurationMS *int              `json:"actual_duration_ms,omitempty" doc:"How long it played; absent for missed items."`
 	Clock            *PlayHistoryClock `json:"clock,omitempty"`
 	Outage           *OutageRef        `json:"outage,omitempty" doc:"Missed items: the outage that kept them off the air."`

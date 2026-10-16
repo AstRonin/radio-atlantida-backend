@@ -13,7 +13,7 @@ import (
 // entrySelect reads play_log rows pl as entries of the played-tracks list.
 // sort_time is the expression of ix_play_log_sort_time.
 const entrySelect = `SELECT pl.id, pl.status, pl.source, pl.track_id, t.title, a.name AS artist_name,
-       pl.planned_start_utc, pl.started_at, pl.planned_out_ms, pl.actual_duration_ms,
+       pl.planned_start_utc, pl.started_at, pl.planned_in_ms, pl.planned_out_ms, pl.actual_duration_ms,
        pl.clock_id, c.name AS clock_name, pl.outage_id, o.component AS outage_component, o.reason AS outage_reason,
        pl.resolution, pl.resolved_at, pl.resolved_item_id,
        COALESCE(pl.started_at, pl.planned_start_utc) AS sort_time
@@ -32,6 +32,7 @@ type entryRow struct {
 	ArtistName       *string    `db:"artist_name"`
 	PlannedStart     *time.Time `db:"planned_start_utc"`
 	StartedAt        *time.Time `db:"started_at"`
+	PlannedInMS      int        `db:"planned_in_ms"`
 	PlannedOutMS     *int       `db:"planned_out_ms"`
 	ActualDurationMS *int       `db:"actual_duration_ms"`
 	ClockID          *uint64    `db:"clock_id"`
@@ -49,7 +50,8 @@ func (r entryRow) domain() outage.Entry {
 	e := outage.Entry{
 		ID: r.ID, Status: outage.Status(r.Status), Source: r.Source, TrackID: r.TrackID, Title: r.Title,
 		ArtistName: r.ArtistName, PlannedStart: utcPtr(r.PlannedStart), StartedAt: utcPtr(r.StartedAt),
-		PlannedOutMS: r.PlannedOutMS, ActualDurationMS: r.ActualDurationMS, ClockID: r.ClockID, ClockName: r.ClockName,
+		PlannedInMS: r.PlannedInMS, PlannedOutMS: r.PlannedOutMS, ActualDurationMS: r.ActualDurationMS,
+		ClockID: r.ClockID, ClockName: r.ClockName,
 		ResolvedAt: utcPtr(r.ResolvedAt), ResolvedItemID: r.ResolvedItemID, SortTime: r.SortTime.UTC(),
 	}
 	if r.OutageID != nil && r.OutageComponent != nil {

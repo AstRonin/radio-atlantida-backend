@@ -145,11 +145,11 @@ func (s *Store) MarkMissed(ctx context.Context, o outage.Outage, before time.Tim
     WHERE si.status IN ('planned', 'queued')
       AND si.planned_start_utc < LEAST($3::timestamptz, $4::timestamptz)
       AND `+itemEnd+` > $2
-    RETURNING si.id, si.track_id, si.clock_id, si.grid_slot_id, si.planned_start_utc, si.planned_out_ms
+    RETURNING si.id, si.track_id, si.clock_id, si.grid_slot_id, si.planned_start_utc, si.planned_in_ms, si.planned_out_ms
 )
-INSERT INTO play_log (track_id, artist_id, status, planned_start_utc, planned_out_ms, truncated, source,
+INSERT INTO play_log (track_id, artist_id, status, planned_start_utc, planned_in_ms, planned_out_ms, truncated, source,
                       clock_id, grid_slot_id, scheduled_item_id, outage_id, resolution)
-SELECT m.track_id, t.artist_id, 'missed', m.planned_start_utc, m.planned_out_ms, false, 'auto',
+SELECT m.track_id, t.artist_id, 'missed', m.planned_start_utc, m.planned_in_ms, m.planned_out_ms, false, 'auto',
        m.clock_id, m.grid_slot_id, m.id, $1, 'open'
 FROM moved m
 JOIN tracks t ON t.id = m.track_id

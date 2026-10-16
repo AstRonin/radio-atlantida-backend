@@ -115,7 +115,10 @@ type Entry struct {
 	// PlannedStart is nil for emergency tracks, which were never planned.
 	PlannedStart *time.Time
 	// StartedAt and ActualDurationMS are nil for missed items.
-	StartedAt        *time.Time
+	StartedAt *time.Time
+	// PlannedInMS and PlannedOutMS are the planned cut in the file; the
+	// planned length is their difference.
+	PlannedInMS      int
 	PlannedOutMS     *int
 	ActualDurationMS *int
 	ClockID          *uint64

@@ -54,10 +54,38 @@ type Track struct {
 	// itself clears it (docs/phase-21-plan.md §2, decision 8).
 	ReviewedAt *time.Time
 
+	// Cue is the part of the file that goes on air, with its fades
+	// (docs/phase-22-plan.md); the zero Cue is the whole file.
+	Cue Cue
+
+	// NextPlannedAt is the earliest start of a planned or queued item of
+	// the track; nil when it is not in the plan.
+	NextPlannedAt *time.Time
+	// PlayoutState is PlayoutOnAir, PlayoutQueued, or empty.
+	PlayoutState string
+
 	// PlaylistIDs and PlayRuleIDs are in ID order.
 	PlaylistIDs []uint64
 	PlayRuleIDs []uint64
 }
+
+// AirDurationMS is the length of the on-air part of the file; nil while the
+// duration is unknown.
+func (t Track) AirDurationMS() *int {
+	if t.DurationMS == nil {
+		return nil
+	}
+	return new(t.Cue.AirDurationMS(*t.DurationMS))
+}
+
+// Playout states of a track (Track.PlayoutState).
+const (
+	// PlayoutOnAir: the track is on air (a plan item or an emergency
+	// track).
+	PlayoutOnAir = "on_air"
+	// PlayoutQueued: a plan item of the track waits in a Liquidsoap queue.
+	PlayoutQueued = "queued"
+)
 
 // TrackInput is the editable part of a track. Nil metadata fields are read
 // from the file when it exists and ffprobe is available.
@@ -177,11 +205,14 @@ const (
 	// SortReviewed: by the time of the reviewed mark; tracks not reviewed
 	// last.
 	SortReviewed TrackSort = "reviewed"
+	// SortNextPlanned: by the next planned start; tracks not in the plan
+	// last.
+	SortNextPlanned TrackSort = "next_planned_at"
 )
 
 // TrackSorts lists every sort key (for the API enum).
 func TrackSorts() []TrackSort {
-	return []TrackSort{SortTitle, SortArtist, SortType, SortDuration, SortFormat, SortQuality, SortReviewed}
+	return []TrackSort{SortTitle, SortArtist, SortType, SortDuration, SortFormat, SortQuality, SortReviewed, SortNextPlanned}
 }
 
 // TrackFilter selects tracks and the page of them. Zero fields do not
@@ -197,6 +228,12 @@ type TrackFilter struct {
 	// Reviewed, when set, keeps only the tracks with (true) or without
 	// (false) the reviewed mark.
 	Reviewed *bool
+	// InPlan, when set, keeps only the tracks with (true) or without
+	// (false) a planned or queued item.
+	InPlan *bool
+	// InPlaylist, when set, keeps only the tracks in (true) or in no
+	// (false) playlist.
+	InPlaylist *bool
 	// Sort is the sort key; empty is SortTitle.
 	Sort TrackSort
 	// Desc reverses the sort key; missing values stay last and ties stay
@@ -270,6 +307,15 @@ type TrackStore interface {
 	// SetTitles writes the titles and clears the reviewed mark of those
 	// tracks, in one statement.
 	SetTitles(ctx context.Context, titles map[uint64]string) error
+	// CueState locks the track row until the transaction ends and returns
+	// its duration, cue, and whether a plan item of it is queued.
+	// ErrTrackNotFound.
+	CueState(ctx context.Context, id uint64) (CueState, error)
+	// SetCue writes the cue of a track; the reviewed mark stays.
+	SetCue(ctx context.Context, id uint64, c Cue) error
+	// PlannedHours returns the range of the built plan hours that hold a
+	// planned item of the track; nil when none does.
+	PlannedHours(ctx context.Context, id uint64) (*HourRange, error)
 }
 
 // TrackBlockers is what keeps a track from being deleted.
@@ -312,6 +358,7 @@ func (s *Service) ListTracks(ctx context.Context, f TrackFilter) (TrackPage, err
 	if err != nil {
 		return TrackPage{}, fmt.Errorf("list tracks: %w", err)
 	}
+	s.markOnAir(ts)
 	page := TrackPage{Items: ts, Total: total}
 	if len(ts) > limit {
 		page.Items = ts[:limit]
@@ -325,7 +372,27 @@ func (s *Service) ListTracks(ctx context.Context, f TrackFilter) (TrackPage, err
 func (s *Service) GetTrack(ctx context.Context, id uint64) (Track, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	return s.tracks.Get(ctx, id)
+	t, err := s.tracks.Get(ctx, id)
+	if err != nil {
+		return Track{}, err
+	}
+	ts := []Track{t}
+	s.markOnAir(ts)
+	return ts[0], nil
+}
+
+// markOnAir sets PlayoutOnAir on the track that is on air; the store sets
+// PlayoutQueued.
+func (s *Service) markOnAir(ts []Track) {
+	playing, ok := s.onAir.OnAirTrack()
+	if !ok {
+		return
+	}
+	for i := range ts {
+		if ts[i].ID == playing {
+			ts[i].PlayoutState = PlayoutOnAir
+		}
+	}
 }
 
 // CreateTrack registers a track by its path under MEDIA_ROOT. The file may

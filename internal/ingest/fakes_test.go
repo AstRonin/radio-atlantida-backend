@@ -171,6 +171,7 @@ type fakeTools struct {
 	encodes   []encodeCall
 	encodeErr error
 	missing   bool // Available reports false
+	peaks     int  // Peaks calls
 }
 
 type encodeCall struct {
@@ -261,6 +262,25 @@ func (ft *fakeTools) Encode(_ context.Context, src, dst string, enc media.Encodi
 	return nil
 }
 
+// Peaks returns one bucket per file content byte, its value the byte.
+func (ft *fakeTools) Peaks(_ context.Context, rel string, bucketMS int) ([]int8, int, error) {
+	c, ok := ft.files.get(rel)
+	if !ok {
+		return nil, 0, media.ErrFileNotFound
+	}
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.peaks++
+	if _, ok := ft.infos[c]; !ok {
+		return nil, 0, errors.New("no audio stream")
+	}
+	var out []int8
+	for _, b := range []byte(c) {
+		out = append(out, -int8(b&0x7f), int8(b&0x7f))
+	}
+	return out, len(c) * bucketMS, nil
+}
+
 func formatOfMuxer(m string) string {
 	switch m {
 	case "ipod":
@@ -286,6 +306,9 @@ type fakeStore struct {
 	// runs: the operation has read them, but storing its result finds
 	// them gone.
 	deletedMidRun map[uint64]bool
+	// cueResets are tracks whose cue SaveAnalysis reports reset.
+	cueResets map[uint64]bool
+	waveforms map[uint64]Waveform
 }
 
 type storedTrack struct {
@@ -297,7 +320,8 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		types: map[uint64]bool{1: true}, playlists: map[uint64]bool{10: true, 11: true},
 		artists: map[uint64]string{}, tracks: map[uint64]*storedTrack{}, busy: map[uint64]bool{}, nextID: 100,
-		deletedMidRun: map[uint64]bool{},
+		deletedMidRun: map[uint64]bool{}, cueResets: map[uint64]bool{},
+		waveforms: map[uint64]Waveform{},
 	}
 }
 
@@ -441,15 +465,32 @@ func (s *fakeStore) Unanalysed(_ context.Context, limit int) ([]Track, error) {
 	return out, nil
 }
 
-func (s *fakeStore) SaveAnalysis(_ context.Context, id uint64, a Analysis) error {
+func (s *fakeStore) SaveAnalysis(_ context.Context, id uint64, a Analysis) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.tracks[id]
 	if !ok || s.deletedMidRun[id] {
-		return library.ErrTrackNotFound
+		return false, library.ErrTrackNotFound
 	}
 	t.FilePath, t.Checksum, t.Measurements, t.Issues = a.FilePath, new(a.Checksum), a.Measurements, a.Issues
 	t.AnalyzedAt = new(a.AnalyzedAt)
+	return s.cueResets[id], nil
+}
+
+func (s *fakeStore) Waveform(_ context.Context, trackID uint64) (Waveform, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.waveforms[trackID]
+	return w, ok, nil
+}
+
+func (s *fakeStore) SaveWaveform(_ context.Context, trackID uint64, w Waveform) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tracks[trackID]; !ok {
+		return library.ErrTrackNotFound
+	}
+	s.waveforms[trackID] = w
 	return nil
 }
 

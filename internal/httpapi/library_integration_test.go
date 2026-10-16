@@ -123,9 +123,6 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	lib := media.New(root)
 	prober := media.NewProber(lib)
 	ff := media.NewFFmpeg(lib)
-	svc := library.NewService(d,
-		libraryrepo.NewTypes(d), libraryrepo.NewPlaylists(d), libraryrepo.NewArtists(d), libraryrepo.NewTracks(d),
-		lib, prober, log)
 	gridSvc := grid.NewService(d, gridrepo.New(d), func(context.Context) (grid.Settings, error) {
 		return grid.Settings{Location: stationTZ(t), HorizonDays: 30}, nil // setting defaults
 	}, time.Now)
@@ -170,6 +167,9 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 			MusicGain: 1, EmergencyPlaylistID: a.emergency.get(),
 		}, nil
 	}, hub, broadcastState, log, clock.now, rand.New(rand.NewPCG(1, 1))) //nolint:gosec // G404: emergency picks, not security
+	svc := library.NewService(d,
+		libraryrepo.NewTypes(d), libraryrepo.NewPlaylists(d), libraryrepo.NewArtists(d), libraryrepo.NewTracks(d),
+		lib, prober, a.playout, log)
 	settingsSvc, err := settings.NewService(settings.NewRegistry(), settingsrepo.New(d), config.Secrets{}.IsSet(), log, time.Now)
 	require.NoError(t, err)
 	// The counts are read on every request, as in serve.

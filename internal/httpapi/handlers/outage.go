@@ -188,7 +188,7 @@ func entriesDTO(es []outage.Entry) []dto.PlayHistoryEntry {
 func entryDTO(e outage.Entry) dto.PlayHistoryEntry {
 	out := dto.PlayHistoryEntry{
 		ID: e.ID, Status: string(e.Status), Source: e.Source, TrackID: e.TrackID, Title: e.Title, ArtistName: e.ArtistName,
-		PlannedStartUTC: e.PlannedStart, StartedAt: e.StartedAt, PlannedOutMS: e.PlannedOutMS,
+		PlannedStartUTC: e.PlannedStart, StartedAt: e.StartedAt, PlannedInMS: e.PlannedInMS, PlannedOutMS: e.PlannedOutMS,
 		ActualDurationMS: e.ActualDurationMS, ResolvedAt: e.ResolvedAt, ResolvedItemID: e.ResolvedItemID,
 	}
 	if e.ClockID != nil {

@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort), `docs/phase-21-plan.md` for Phase 21 (on-air titles, reviewed mark, bulk rename).
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort), `docs/phase-21-plan.md` for Phase 21 (on-air titles, reviewed mark, bulk rename), `docs/phase-22-plan.md` for Phase 22 (track cue points, waveform, usage marks).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -73,7 +73,7 @@ internal/
   retention/          retention rules (play log, operations); jobs schedules it
   workerpool/         bounded worker pool (Pool: fixed workers + bounded queue) and ForEach for batches
   validation/         validation.Error: per-field refusals of domain services (rule → field code in problemFor)
-  library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete; title rule, reviewed mark, bulk rename
+  library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete; title rule, reviewed mark, bulk rename; cue points and fades (SetCue, Cue.Check), usage marks (next planned, on air)
   playrules/          play rules (window, weekdays, min interval, max per hour) and their track/playlist targets
   separation/         separation rules (edit only; capped at the play log retention)
   clocks/             clock templates: Arrange/LayoutOf (segments, shortfall, fixed replacement, filler holders), WithInsert (one-time element of an hour), save flow, dry check warnings
@@ -84,8 +84,8 @@ internal/
   broadcast/          Tracker: derived broadcast state (connected, reconnecting, unreachable, unknown) from output reports, outages, mount checks, heartbeat; since stored on change (broadcast_state), broadcast.state events
   airwindow/          air window: last due items (aired, truncated, missed), the item on air, next plan items; pure Assemble, counts from settings (group air); read only
   outage/             Detector (Icecast mount, callback heartbeat, control link; open/close, marking missed, sweep of unaired items, startup reconcile), Journal replay, played-tracks list, missed items, outages
-  media/              MEDIA_ROOT: path rules, os.OpenInRoot (no escape, symlinks included), walk, folder tree, checksum, commit; ffprobe; ffmpeg (loudnorm measure, encode)
-  ingest/             import of a folder in place (folders and files with counts and statuses, title and artist from tags or the file name, originals of .optimal copies skipped), analysis against the broadcast standard (quality issues), transcodes (Fix loudness, Optimize; replace or .optimal copy); one media operation at a time on its worker
+  media/              MEDIA_ROOT: path rules, os.OpenInRoot (no escape, symlinks included), walk, folder tree, checksum, commit; ffprobe; ffmpeg (loudnorm measure, encode, waveform peaks)
+  ingest/             import of a folder in place (folders and files with counts and statuses, title and artist from tags or the file name, originals of .optimal copies skipped), analysis against the broadcast standard (quality issues), transcodes (Fix loudness, Optimize; replace or .optimal copy); one media operation at a time on its worker; cached track waveforms (beside the operations, two decodes at a time)
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
     operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
     library/ separation/                           (GORM; library: one store per aggregate)
@@ -96,7 +96,7 @@ internal/
     broadcast/                                     (pgx: the one broadcast_state row)
     airwindow/                                     (pgx: last play log rows by due time, next plan items)
     outage/                                        (pgx: outages, heartbeat, mark missed, drop stale, play history keyset, dismiss)
-    ingest/                                        (pgx: imported tracks, track paths under a folder, analysis columns, artist find-or-create, busy check)
+    ingest/                                        (pgx: imported tracks, track paths under a folder, analysis columns with the cue reset, artist find-or-create, busy check, waveforms)
   live/               live voice bridge: WebRTC (pion) on one UDP port, one session at a time (takeover), Opus relayed unchanged as Ogg/Opus to the Liquidsoap harbor (Icecast SOURCE); states and live.state events; no SQL
 api/                  generated openapi.json (not committed, not hand-edited)
 docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
@@ -175,13 +175,14 @@ docs/                 requirements, design, phase plans
 - Index every FK column used in joins or in-use checks. No speculative indexes.
 - Short transactions; no network calls inside. `READ COMMITTED`; `SELECT ... FOR UPDATE` for read-then-change; `FOR UPDATE SKIP LOCKED` for job claims. Singleton jobs take an advisory lock. Large deletes in batches. Every query has a context deadline (connections also set `statement_timeout`, `idle_in_transaction_session_timeout`).
 - Migrations: forward-only `.up.sql`, one logical change per file, never edit an applied one. Expand and contract. `CREATE INDEX CONCURRENTLY` in its own migration. Migrations seed only system rows; test data lives in fixtures.
+- **A schema change is applied, not only written.** When a change adds a migration (new or changed columns, tables, constraints, indexes), apply it to the dev database before running or checking anything: `make migrate` (or `docker compose -f docker-compose.dev.yml --profile app up --build`, whose `migrate` service runs first), then `make test-integration`. Every phase plan that changes the schema says so in its work, order of work, and "Done when".
 - GORM: `SkipDefaultTransaction: true`, `TranslateError: true`, no auto-migrate, `Omit(clause.Associations)` unless intended. pgx: `pgx.CollectRows`/`RowToStructByName`; `pgx.Batch`/`CopyFrom` for bulk.
 
 ## Dev stack notes
 
 - Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `grafana/grafana:13.2.3` (the OSS edition; `grafana/grafana-oss` is no longer published), `grafana/loki:3.7.8`, `grafana/alloy:v1.20.1`, `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
 - All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`hour_0.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
-- Liquidsoap has two hour queues, `hour_0` and `hour_1` (`hour_<p>.push <uri>`, `hour_<p>.queue`); a time switch plays the queue of the current station hour, using `hour_shift` set by the backend. Behind it, `request.dynamic` asks `BACKEND_EMERGENCY_URL` for emergency tracks, then a safety tone.
+- Liquidsoap has two hour queues, `hour_0` and `hour_1` (`hour_<p>.push <uri>`, `hour_<p>.queue`); a time switch plays the queue of the current station hour, using `hour_shift` set by the backend. Requests carry `liq_cue_in`/`liq_cue_out` and `liq_fade_in`/`liq_fade_out`; in Liquidsoap 2.4 `fade.out` must be `track_sensitive=true` (the default fades once and silences the source for good), and the fade in is the script's own `cue_fade_in` (see `docs/phase-22-plan.md` §10). Behind it, `request.dynamic` asks `BACKEND_EMERGENCY_URL` for emergency tracks, then a safety tone.
 - Liquidsoap writes the journal to `$PLAYOUT_JOURNAL_ROOT/journal-YYYY-MM-DD.jsonl` (`.dev/journal` in dev; one JSON line per track `start`/`end` and per Icecast `output` change, UTC; files older than 10 days deleted by the script) and POSTs the same line to `BACKEND_CALLBACK_URL` (`/api/playout/callback`). It also POSTs a `heartbeat` every 5 s (not journaled); without it the outage detector opens a `liquidsoap_callback` outage.
 - Live voice: the browser's WebRTC reaches the backend on one UDP port, `LIVE_UDP_ADDR` (default `127.0.0.1:8189`; the backend container listens on `0.0.0.0:8189`, published on `127.0.0.1:8189/udp`), and the answer offers `LIVE_PUBLIC_IPS` (the container sets `127.0.0.1`). The bridge sends to the harbor at `liquidsoap.control_host:liquidsoap.harbor_port`, mount `live`. The script ducks automation to `duck_gain` (setting `liquidsoap.duck_gain`) while the harbor has a source; its buffer is 0.3 s. Browsers allow the microphone only on `localhost` or HTTPS.
 - `PLAYOUT_JOURNAL_ROOT` is a required env var (host path, read-only for the backend), like `MEDIA_ROOT` and `LOG_ROOT`.

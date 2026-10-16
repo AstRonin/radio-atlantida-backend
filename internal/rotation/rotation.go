@@ -31,9 +31,13 @@ import (
 
 // Track is a library track that can be planned: it has a duration.
 type Track struct {
-	ID         uint64
-	ArtistID   *uint64
+	ID       uint64
+	ArtistID *uint64
+	// DurationMS is the length on air: from the cue in point to the cue
+	// out point (or the end of the file). The fit uses it.
 	DurationMS int
+	// CueInMS is where the on-air part starts in the file.
+	CueInMS int
 	// PlaylistIDs are the playlists that hold the track, in ID order.
 	PlaylistIDs []uint64
 	// RuleIDs are the play rules of the track and of all its playlists.
@@ -127,7 +131,9 @@ type Item struct {
 	ElementID *uint64
 	// OffsetMS is the planned start, from the start of the hour.
 	OffsetMS int
-	// OutMS is the out point from the start of the track (planned_out_ms).
+	// InMS and OutMS are the in and out points from the start of the file
+	// (planned_in_ms, planned_out_ms); the item plays OutMS - InMS.
+	InMS      int
 	OutMS     int
 	Truncated bool
 	Source    Source

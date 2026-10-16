@@ -100,10 +100,12 @@ type PlannedItem struct {
 	DurationMS int
 	ElementID  *uint64
 	Start      time.Time
-	OutMS      int
-	Truncated  bool
-	Source     string
-	Status     string
+	// InMS and OutMS are the in and out points from the start of the file.
+	InMS      int
+	OutMS     int
+	Truncated bool
+	Source    string
+	Status    string
 }
 
 // PlannedHour is a built hour with its items.

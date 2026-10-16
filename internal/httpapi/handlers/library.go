@@ -38,6 +38,7 @@ type Library interface {
 	ReviewTracks(ctx context.Context, ids []uint64, reviewed bool) (library.ReviewTracksResult, error)
 	RenameTracks(ctx context.Context, req library.RenameRequest) (library.RenameResult, error)
 	TrackAudio(ctx context.Context, id uint64) (library.Audio, error)
+	SetCue(ctx context.Context, id uint64, c library.Cue) (library.SetCueResult, error)
 }
 
 func typeRefDTO(t library.TypeRef) dto.TypeRef {
@@ -75,6 +76,12 @@ func trackDTO(t library.Track) dto.Track {
 		LoudnessRangeLU: t.LoudnessRangeLU, SourceBitrate: t.SourceBitrate,
 		QualityIssues: make([]string, len(t.QualityIssues)), Fixes: []string{}, AnalyzedAt: t.AnalyzedAt,
 		ReviewedAt: t.ReviewedAt,
+
+		CueInMS: t.Cue.InMS, CueOutMS: t.Cue.OutMS, FadeInMS: t.Cue.FadeInMS, FadeOutMS: t.Cue.FadeOutMS,
+		AirDurationMS: t.AirDurationMS(), PlayoutState: t.PlayoutState,
+	}
+	if t.NextPlannedAt != nil {
+		out.NextPlannedAt = new(t.NextPlannedAt.UTC())
 	}
 	for i, q := range t.QualityIssues {
 		out.QualityIssues[i] = string(q)

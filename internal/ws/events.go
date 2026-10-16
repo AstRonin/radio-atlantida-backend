@@ -155,7 +155,8 @@ type NowPlayingData struct {
 	ArtistName *string   `json:"artist_name,omitempty"`
 	Source     string    `json:"source" enum:"plan,emergency"`
 	StartedAt  time.Time `json:"started_at"`
-	OutMS      *int      `json:"out_ms,omitempty" doc:"Planned out point (plan items) or duration (emergency tracks), in ms."`
+	InMS       int       `json:"in_ms" minimum:"0" doc:"In point in the file (the cue in), in ms; the track plays out_ms - in_ms."`
+	OutMS      *int      `json:"out_ms,omitempty" doc:"Out point in the file: planned (plan items), or the cue out or the duration (emergency tracks), in ms."`
 	Truncated  bool      `json:"truncated" doc:"The plan cuts the track at out_ms with a fade-out."`
 }
 

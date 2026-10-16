@@ -114,6 +114,23 @@ func TestLibraryAndSeparation(t *testing.T) {
 	require.Equal(t, rotation.Separation{Track: 72 * time.Hour, Artist: 72 * time.Hour}, sep)
 }
 
+// The snapshot carries the length on air and the cue in point
+// (docs/phase-22-plan.md §3.2); a cue past the end of the file (a duration
+// entered by hand since) leaves the track out.
+func TestLibraryUsesTheCut(t *testing.T) {
+	f := newFixture(t)
+	f.exec(`UPDATE tracks SET cue_in_ms = 10000, cue_out_ms = 40000 WHERE id = $1`, f.tracks[0])
+	f.exec(`UPDATE tracks SET cue_in_ms = 2000 WHERE id = $1`, f.tracks[1])
+	f.exec(`UPDATE tracks SET cue_out_ms = duration_ms + 1000 WHERE id = $1`, f.tracks[2])
+	lib, err := f.store.Library(t.Context())
+	require.NoError(t, err)
+	require.Len(t, lib.Tracks, 2)
+	require.Equal(t, []int{30000, 10000}, []int{lib.Tracks[0].DurationMS, lib.Tracks[0].CueInMS})
+	var duration int
+	require.NoError(t, f.d.Pool.QueryRow(t.Context(), `SELECT duration_ms FROM tracks WHERE id = $1`, f.tracks[1]).Scan(&duration))
+	require.Equal(t, []int{duration - 2000, 2000}, []int{lib.Tracks[1].DurationMS, lib.Tracks[1].CueInMS})
+}
+
 func TestReplaceHourAndHistory(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
@@ -127,7 +144,7 @@ VALUES ($1, 'missed', $2, 180000, $3, $4, 'open')`, f.tracks[1], hour.Add(-2*tim
 	f.inTx(func(ctx context.Context, st rotation.Store) error {
 		return st.ReplaceHour(ctx, f.planHour(hour, nil), []rotation.Item{
 			{TrackID: f.tracks[1], ElementID: nil, OffsetMS: 0, OutMS: 200000, Source: rotation.SourceClock},
-			{TrackID: f.tracks[0], OffsetMS: 200000, OutMS: 100000, Truncated: true, Source: rotation.SourceFillerPool, PoolRowID: &f.pool[0]},
+			{TrackID: f.tracks[0], OffsetMS: 200000, InMS: 5000, OutMS: 100000, Truncated: true, Source: rotation.SourceFillerPool, PoolRowID: &f.pool[0]},
 		})
 	})
 	f.inTx(func(ctx context.Context, st rotation.Store) error {
@@ -157,6 +174,7 @@ VALUES ($1, 'missed', $2, 180000, $3, $4, 'open')`, f.tracks[1], hour.Add(-2*tim
 	require.Equal(t, "T0", it.Title)
 	require.Equal(t, "A", *it.ArtistName)
 	require.True(t, it.Truncated)
+	require.Equal(t, 5000, it.InMS)
 	require.Equal(t, 100000, it.OutMS)
 	require.Equal(t, 180000, it.DurationMS)
 	require.Equal(t, hour.Add(200*time.Second), it.Start)

@@ -415,6 +415,24 @@ func TestAnalyseUnknownTracks(t *testing.T) {
 	require.Contains(t, verr.Fields[0].Message, "[5 6]")
 }
 
+// A cue that does not fit the new file is reset by the store; the summary
+// names the track (docs/phase-22-plan.md decision 7).
+func TestAnalyseNamesResetCues(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("library/a.mp3", "A", mp3Info("", ""), loud(-16, -2))
+	f.tools.audio("library/b.mp3", "B", mp3Info("", ""), loud(-16, -2))
+	f.store.add(Track{ID: 1, FilePath: "library/a.mp3"})
+	f.store.add(Track{ID: 2, FilePath: "library/b.mp3"})
+	f.store.cueResets[2] = true
+
+	_, err := f.svc.Analyse(t.Context(), AnalyseRequest{TrackIDs: []uint64{1, 2}})
+	require.NoError(t, err)
+	summary, err := f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "analysed 2; cue_reset 1: [library/b.mp3]", summary)
+}
+
 // A track deleted while the analysis runs is skipped, not failed
 // (docs/phase-19-plan.md decision 8).
 func TestAnalyseTrackDeletedMeanwhile(t *testing.T) {

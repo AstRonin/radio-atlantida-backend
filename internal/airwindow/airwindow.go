@@ -63,6 +63,9 @@ type Played struct {
 	// item.
 	PlannedStart *time.Time
 	StartedAt    *time.Time
+	// PlannedInMS and PlannedOutMS are the planned cut in the file; the
+	// planned length is their difference.
+	PlannedInMS  int
 	PlannedOutMS *int
 	// ActualDurationMS is nil for a missed item.
 	ActualDurationMS *int
@@ -242,7 +245,7 @@ func playedRow(p Played) Row {
 		// Missed: the planned length.
 		r.Start = p.PlannedStart.UTC()
 		if p.PlannedOutMS != nil {
-			r.End = new(r.Start.Add(ms(*p.PlannedOutMS)))
+			r.End = new(r.Start.Add(ms(*p.PlannedOutMS - p.PlannedInMS)))
 		}
 	}
 	if p.Status == StatusMissed {
@@ -269,7 +272,7 @@ func nowRow(np playout.NowPlaying) Row {
 		InLiquidsoap: true,
 	}
 	if np.OutMS != nil {
-		r.End = new(r.Start.Add(ms(*np.OutMS)))
+		r.End = new(r.Start.Add(ms(*np.OutMS - np.InMS)))
 	}
 	return r
 }

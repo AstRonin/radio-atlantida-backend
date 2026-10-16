@@ -256,13 +256,16 @@ func (b *builder) allEligible(at time.Time, match func(Track) bool) []Track {
 // place adds a track at cursor under the crossing rule and returns the new
 // cursor and whether the segment is full.
 func (b *builder) place(t Track, elementID *uint64, cursor int, w window, src Source, poolRow *uint64) (int, bool) {
-	it := Item{TrackID: t.ID, ElementID: elementID, OffsetMS: cursor, OutMS: t.DurationMS, Source: src, PoolRowID: poolRow}
+	it := Item{
+		TrackID: t.ID, ElementID: elementID, OffsetMS: cursor, InMS: t.CueInMS, OutMS: t.CueInMS + t.DurationMS,
+		Source: src, PoolRowID: poolRow,
+	}
 	end, full := cursor+t.DurationMS, false
 	if end > w.latest {
 		if cursor >= w.target {
 			return cursor, true // removed: it would not play at all
 		}
-		it.OutMS, it.Truncated = w.target-cursor, true
+		it.OutMS, it.Truncated = t.CueInMS+w.target-cursor, true
 		end, full = w.target, true
 	}
 	b.plan.Items = append(b.plan.Items, it)
