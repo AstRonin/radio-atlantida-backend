@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -183,6 +184,87 @@ func TestDeleteTracksLimits(t *testing.T) {
 			require.Equal(t, "track_ids", verr.Fields[0].Field)
 			require.Equal(t, tt.rule, verr.Fields[0].Rule)
 			require.Zero(t, tracks.calls, "nothing deleted")
+		})
+	}
+}
+
+// fakeListTracks holds tracks in the order of every sort and records the
+// filter of the last List.
+type fakeListTracks struct {
+	TrackStore // unused methods panic
+	tracks     []Track
+	got        TrackFilter
+	calls      int
+}
+
+func newFakeListTracks(n uint64) *fakeListTracks {
+	f := &fakeListTracks{}
+	for id := range n {
+		f.tracks = append(f.tracks, Track{ID: id + 1, Title: fmt.Sprintf("t%02d", id)})
+	}
+	return f
+}
+
+func (f *fakeListTracks) List(_ context.Context, filter TrackFilter) ([]Track, int, error) {
+	f.got, f.calls = filter, f.calls+1
+	from := min(filter.Offset, len(f.tracks))
+	to := min(from+filter.Limit, len(f.tracks))
+	return slices.Clone(f.tracks[from:to]), len(f.tracks), nil
+}
+
+func TestListTracksPages(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		filter    TrackFilter
+		readLimit int
+		items     int
+		next      *TrackCursor
+	}{
+		{"default order reads one more for the cursor", TrackFilter{Limit: 5}, 6, 5, &TrackCursor{Title: "t04", ID: 5}},
+		{"title asc is the default order", TrackFilter{Sort: SortTitle, Offset: 10, Limit: 5}, 6, 2, nil},
+		{"last page in the default order", TrackFilter{Offset: 7, Limit: 5}, 6, 5, nil},
+		{"no cursor in another sort", TrackFilter{Sort: SortDuration, Limit: 5}, 5, 5, nil},
+		{"no cursor in descending title", TrackFilter{Desc: true, Limit: 5}, 5, 5, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tracks := newFakeListTracks(12)
+			page, err := newTrackServiceOn(tracks, &bytes.Buffer{}).ListTracks(t.Context(), tt.filter)
+			require.NoError(t, err)
+			require.Equal(t, tt.readLimit, tracks.got.Limit)
+			require.Len(t, page.Items, tt.items)
+			require.Equal(t, tt.next, page.Next)
+			require.Equal(t, 12, page.Total)
+		})
+	}
+}
+
+func TestListTracksRefusals(t *testing.T) {
+	t.Parallel()
+	after := &TrackCursor{Title: "a", ID: 1}
+	tests := []struct {
+		name   string
+		filter TrackFilter
+		field  string
+	}{
+		{"cursor with another sort", TrackFilter{Sort: SortDuration, After: after, Limit: 5}, "query.cursor"},
+		{"cursor in descending order", TrackFilter{Desc: true, After: after, Limit: 5}, "query.cursor"},
+		{"cursor with offset", TrackFilter{Offset: 50, After: after, Limit: 5}, "query.cursor"},
+		{"unknown sort", TrackFilter{Sort: "bitrate", Limit: 5}, "query.sort"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tracks := newFakeListTracks(12)
+			_, err := newTrackServiceOn(tracks, &bytes.Buffer{}).ListTracks(t.Context(), tt.filter)
+			var verr *validation.Error
+			require.ErrorAs(t, err, &verr)
+			require.Len(t, verr.Fields, 1)
+			require.Equal(t, tt.field, verr.Fields[0].Field)
+			require.Equal(t, validation.Invalid, verr.Fields[0].Rule)
+			require.Zero(t, tracks.calls, "nothing read")
 		})
 	}
 }

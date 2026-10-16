@@ -31,7 +31,10 @@ type listTracksInput struct {
 	PlaylistID uint64 `query:"playlist_id" minimum:"0" doc:"Only tracks in this playlist."`
 	Query      string `query:"q" maxLength:"200" doc:"Only tracks whose title or artist name contains this text (case-insensitive)."`
 	Quality    string `query:"quality" enum:"ok,issues,unanalysed" doc:"Only tracks analysed without issues, with issues, or never analysed."`
-	Cursor     string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page."`
+	Sort       string `query:"sort" enum:"title,artist,type,duration,format,quality" default:"title" doc:"Sort key; ties are ordered by title and ID. Tracks without the value are last in both orders."`
+	Order      string `query:"order" enum:"asc,desc" default:"asc"`
+	Offset     int    `query:"offset" minimum:"0" maximum:"1000000" default:"0" doc:"Tracks to skip in the sorted list."`
+	Cursor     string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page; only in the default order (title, asc) and without offset."`
 	Limit      int    `query:"limit" minimum:"1" maximum:"500" default:"100"`
 }
 
@@ -65,13 +68,14 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		Method:      http.MethodGet,
 		Path:        "/api/tracks",
 		Summary:     "List tracks",
-		Description: "Tracks in title order, a page at a time: pass next_cursor as cursor for the next page. The filters combine.",
+		Description: "Tracks matching the filters, sorted by `sort` and `order` (ties by title and ID), a page at a time: read the next page with `offset`, or with `next_cursor` as `cursor` in the default title order. `total` counts every matching track. The filters combine.",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *listTracksInput) (*trackPageOutput, error) {
 		f := library.TrackFilter{
 			TypeID: in.TypeID, ArtistID: in.ArtistID, PlaylistID: in.PlaylistID,
-			Query: in.Query, Quality: in.Quality, Limit: in.Limit,
+			Query: in.Query, Quality: in.Quality,
+			Sort: library.TrackSort(in.Sort), Desc: in.Order == "desc", Offset: in.Offset, Limit: in.Limit,
 		}
 		if in.Cursor != "" {
 			c, err := decodeCursor(in.Cursor)
@@ -84,7 +88,7 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		if err != nil {
 			return nil, err
 		}
-		out := &trackPageOutput{Body: dto.TrackPage{Items: make([]dto.Track, 0, len(page.Items))}}
+		out := &trackPageOutput{Body: dto.TrackPage{Items: make([]dto.Track, 0, len(page.Items)), Total: page.Total}}
 		for _, t := range page.Items {
 			out.Body.Items = append(out.Body.Items, trackDTO(t))
 		}

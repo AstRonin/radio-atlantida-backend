@@ -452,6 +452,10 @@ Track responses carry the analysis columns, `quality_issues`, and `fixes` (the t
 
 An analysis or transcode that reaches a track deleted after it started counts it as `track deleted`, not as a failure.
 
+**Track list pages and sort (v7-20, `docs/phase-20-plan.md` §2)**
+
+`GET /api/tracks` also takes `sort` (`title` default, `artist`, `type`, `duration`, `format`, `quality`), `order` (`asc` default, `desc`), and `offset` (0 to 1,000,000), and its response carries `total`, the number of tracks matching the filters on every page. PostgreSQL sorts the whole filtered set; tracks without the value (no artist, no duration, no format, never analysed) are last in both orders, and ties are ordered by title and ID ascending. The `quality` order is: no issues, with issues (more issues first), never analysed. An offset past the end returns no items and the correct `total`. `cursor` and `next_cursor` work only in the default order (`title`, `asc`) and without `offset`; any other combination is a 422 on `query.cursor`.
+
 **Endpoints added in v7-8 (play rules and track preview)**
 
 | Method and path | Purpose |

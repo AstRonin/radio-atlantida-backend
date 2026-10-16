@@ -444,6 +444,23 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 	a.ok(http.StatusOK, http.MethodGet, "/api/tracks?q=a_h", nil, &filtered)
 	require.Equal(t, []string{"A_ha 50%"}, titles(filtered), "_ is literal")
 	a.fieldError("query.cursor", errcodes.Format, http.MethodGet, "/api/tracks?cursor=nonsense", nil)
+	require.Equal(t, 4, page1.Total, "total counts every match, not the page")
+
+	// Sort and offset pages: Song has the only duration, the others none.
+	var byDuration, rest, past dto.TrackPage
+	a.ok(http.StatusOK, http.MethodGet, "/api/tracks?sort=duration&order=desc&limit=1", nil, &byDuration)
+	require.Equal(t, []string{"Song"}, titles(byDuration))
+	require.Empty(t, byDuration.NextCursor, "no cursor outside the default order")
+	require.Equal(t, 4, byDuration.Total)
+	a.ok(http.StatusOK, http.MethodGet, "/api/tracks?sort=duration&order=desc&offset=1&limit=5", nil, &rest)
+	require.Equal(t, []string{"A_ha 50%", "b-side", "Jingle"}, titles(rest), "missing durations last, by title")
+	a.ok(http.StatusOK, http.MethodGet, "/api/tracks?sort=title&order=desc&offset=10", nil, &past)
+	require.Empty(t, past.Items)
+	require.Equal(t, 4, past.Total)
+	a.fieldError("query.sort", errcodes.Enum, http.MethodGet, "/api/tracks?sort=bitrate", nil)
+	a.fieldError("query.order", errcodes.Enum, http.MethodGet, "/api/tracks?order=up", nil)
+	a.fieldError("query.cursor", errcodes.Invalid, http.MethodGet, "/api/tracks?sort=artist&cursor="+page1.NextCursor, nil)
+	a.fieldError("query.cursor", errcodes.Invalid, http.MethodGet, "/api/tracks?offset=2&cursor="+page1.NextCursor, nil)
 
 	// Membership is set from the playlist side too.
 	var set dto.Playlist

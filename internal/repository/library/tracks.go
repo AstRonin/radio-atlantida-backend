@@ -52,32 +52,69 @@ type trackRow struct {
 	// scan arrays. The codes contain no comma (ck_tracks_quality_issues).
 	QualityIssues string
 	AnalyzedAt    *time.Time
+	// Total is count(*) OVER () in List; zero elsewhere.
+	Total int
 }
 
 const selectTracks = `
-SELECT tr.id, tr.title, tr.artist_id, a.name AS artist_name, tr.duration_ms, tr.file_path,
+SELECT ` + trackSelect + fromTracks
+
+const trackSelect = `tr.id, tr.title, tr.artist_id, a.name AS artist_name, tr.duration_ms, tr.file_path,
        tr.format, tr.bitrate, tr.sample_rate, tr.quality_ok, tr.quality_notes,
        t.id AS type_id, t.code AS type_code, t.name AS type_name, tr.file_checksum, tr.created_at,
        tr.codec, tr.channels, tr.loudness_lufs, tr.true_peak_dbtp, tr.loudness_range_lu, tr.source_bitrate,
-       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at
+       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at`
+
+const fromTracks = `
 FROM tracks tr
 JOIN playlist_types t ON t.id = tr.type_id
 LEFT JOIN artists a ON a.id = tr.artist_id`
 
-// List returns at most f.Limit tracks in (title, id) order after f.After.
-//
-// The library holds hundreds to tens of thousands of tracks; the keyset
-// condition and the filters run on a sequential scan of tracks with a
-// top-N sort, so no index on title is added (no speculative indexes).
-// EXPLAIN ANALYZE, PostgreSQL 17, 30 000 tracks, 2 000 artists, limit 101:
-// first page without filters 8.3 ms (Seq Scan tracks, hash joins, top-N
-// heapsort 48 kB); with playlist_id, q, and a cursor 3.3 ms (Bitmap Index
-// Scan on ix_track_playlists_playlist_id).
-func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Track, error) {
-	var (
-		where []string
-		args  []any
-	)
+// trackSortKeys are the ORDER BY keys of each sort, fixed SQL: the sort
+// parameter never reaches the SQL text. Missing values are NULL (an empty
+// format too), so NULLS LAST puts them last in both directions. Quality:
+// no issues 0, with issues 1 and more issues first, never analysed NULL.
+var trackSortKeys = map[library.TrackSort][]string{
+	library.SortTitle:    {"tr.title"},
+	library.SortArtist:   {"a.name"},
+	library.SortType:     {"t.name"},
+	library.SortDuration: {"tr.duration_ms"},
+	library.SortFormat:   {"NULLIF(tr.format, '')"},
+	library.SortQuality: {
+		"CASE WHEN tr.analyzed_at IS NULL THEN NULL WHEN cardinality(tr.quality_issues) = 0 THEN 0 ELSE 1 END",
+		"-cardinality(tr.quality_issues)",
+	},
+}
+
+// trackOrder is the ORDER BY of f: the sort keys in f's direction, then
+// title and ID ascending, so equal keys keep their place between pages.
+func trackOrder(f library.TrackFilter) (string, error) {
+	sort := f.Sort
+	if sort == "" {
+		sort = library.SortTitle
+	}
+	keys, ok := trackSortKeys[sort]
+	if !ok {
+		return "", fmt.Errorf("unknown track sort %q", sort)
+	}
+	dir := " ASC NULLS LAST"
+	if f.Desc {
+		dir = " DESC NULLS LAST"
+	}
+	order := make([]string, 0, len(keys)+2)
+	for _, k := range keys {
+		order = append(order, k+dir)
+	}
+	if sort != library.SortTitle {
+		order = append(order, "tr.title")
+	}
+	return strings.Join(append(order, "tr.id"), ", "), nil
+}
+
+// trackWhere is the WHERE of the filters of f (not the cursor), shared by
+// the page and the count so that they cannot drift. The conditions are
+// fixed strings; values go in args.
+func trackWhere(f library.TrackFilter) (where []string, args []any) {
 	if f.TypeID != 0 {
 		where = append(where, "tr.type_id = ?")
 		args = append(args, f.TypeID)
@@ -103,23 +140,86 @@ func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Tra
 	case library.QualityUnanalysed:
 		where = append(where, "tr.analyzed_at IS NULL")
 	}
+	return where, args
+}
+
+func whereClause(where []string) string {
+	if len(where) == 0 {
+		return ""
+	}
+	return " WHERE " + strings.Join(where, " AND ")
+}
+
+// List returns at most f.Limit tracks in the order of f, after f.After or
+// skipping f.Offset, and the number of tracks matching the filters.
+//
+// The inner query sorts only the IDs with their sort keys and counts the
+// matches (count(*) OVER (), computed before LIMIT and OFFSET); the outer
+// one reads the columns of the page rows alone. Sorting the full rows
+// instead doubles the time: every row is carried through the window and
+// the sort. A cursor narrows the WHERE and an offset past the end returns
+// no row, so then a second query counts (not in the same snapshot: a list
+// view accepts a total that is off by a concurrent import).
+//
+// The library holds hundreds to tens of thousands of tracks; the filters
+// run on a sequential scan of tracks with a sort (top-N heapsort for the
+// first pages). No index on a sort key is added: an index on (title, id)
+// was not chosen for the last page, and the artist and type keys come from
+// a join. The cost of the last page is the collation (en_US.utf8) of the
+// text keys.
+// EXPLAIN ANALYZE, PostgreSQL 17 in Docker Desktop on an Apple M1 Pro,
+// 30 000 tracks, 2 000 artists, no filter; first page (limit 101) / last
+// page (offset 29 950, limit 50): title 15 / 29 ms (desc the same), artist
+// 20 / 51 ms, type 17 / 43 ms, duration 15 / 20 ms, format 18 / 42 ms,
+// quality 19 / 40 ms. With playlist_id and q, by duration desc, offset 200:
+// 28 ms. The count alone: 7 ms.
+func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Track, int, error) {
+	order, err := trackOrder(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	where, args := trackWhere(f)
 	if f.After != nil {
 		where = append(where, "(tr.title, tr.id) > (?, ?)")
 		args = append(args, f.After.Title, f.After.ID)
 	}
-	sql := selectTracks
-	if len(where) > 0 {
-		// The conditions are fixed strings above; values go in args.
-		sql += " WHERE " + strings.Join(where, " AND ")
-	}
-	sql += " ORDER BY tr.title, tr.id LIMIT ?"
-	args = append(args, f.Limit)
+	sql := "SELECT " + trackSelect + `, p.total
+FROM (SELECT tr.id, count(*) OVER () AS total` + fromTracks + whereClause(where) + `
+      ORDER BY ` + order + ` LIMIT ? OFFSET ?) p
+JOIN tracks tr ON tr.id = p.id
+JOIN playlist_types t ON t.id = tr.type_id
+LEFT JOIN artists a ON a.id = tr.artist_id
+ORDER BY ` + order
+	args = append(args, f.Limit, f.Offset)
 
 	var rows []trackRow
-	if err := s.g.WithContext(ctx).Raw(sql, args...).Scan(&rows).Error; err != nil {
-		return nil, fmt.Errorf("select tracks: %w", err)
+	if err = s.g.WithContext(ctx).Raw(sql, args...).Scan(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf("select tracks: %w", err)
 	}
-	return s.withLinks(ctx, rows)
+	total := 0
+	if len(rows) > 0 {
+		total = rows[0].Total
+	}
+	if f.After != nil || (len(rows) == 0 && f.Offset > 0) {
+		if total, err = s.count(ctx, f); err != nil {
+			return nil, 0, err
+		}
+	}
+	ts, err := s.withLinks(ctx, rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ts, total, nil
+}
+
+// count returns the number of tracks matching the filters of f.
+func (s *Tracks) count(ctx context.Context, f library.TrackFilter) (int, error) {
+	where, args := trackWhere(f)
+	var n int
+	if err := s.g.WithContext(ctx).Raw("SELECT count(*)"+fromTracks+whereClause(where), args...).Scan(&n).Error; err != nil {
+		return 0, fmt.Errorf("count tracks: %w", err)
+	}
+	return n, nil
 }
 
 // Get returns one track, or library.ErrTrackNotFound.

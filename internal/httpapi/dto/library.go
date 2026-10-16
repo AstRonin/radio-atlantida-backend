@@ -127,10 +127,11 @@ type Track struct {
 	AnalyzedAt      *time.Time `json:"analyzed_at,omitempty" doc:"Absent until the file is analysed."`
 }
 
-// TrackPage is a page of tracks in title order.
+// TrackPage is a page of tracks in the requested order.
 type TrackPage struct {
 	Items      []Track `json:"items" nullable:"false"`
-	NextCursor string  `json:"next_cursor,omitempty" doc:"Pass as cursor to read the next page; absent on the last page."`
+	NextCursor string  `json:"next_cursor,omitempty" doc:"Pass as cursor to read the next page; set only in the default order (title, asc), absent on the last page."`
+	Total      int     `json:"total" minimum:"0" doc:"Tracks matching the filters, on every page."`
 }
 
 // TrackBody is the body of POST /api/tracks and PUT /api/tracks/{id}. PUT

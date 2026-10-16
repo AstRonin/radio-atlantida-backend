@@ -1,6 +1,6 @@
 # Phase 20 Plan — Track List Pages and Sort (radio-atlantida-backend)
 
-Status: Planned
+Status: Implemented
 Based on: `tech-design.md` (§6, track list), `docs/phase-11-plan.md` (quality filter), `docs/phase-19-plan.md` (bulk delete), frontend `docs/f18-library-pagination-sort-plan.md`
 Last updated: 2026-10-16
 
@@ -74,8 +74,8 @@ type TrackPage struct {
 
 `internal/repository/library/tracks.go`:
 
-- `List` builds `ORDER BY` from a `map[library.TrackSort]string` of fixed SQL keys plus the direction and the tie-breaker; `OFFSET ?` is added when `Offset > 0`; the select gets `count(*) OVER () AS total`.
-- `Count(ctx, f)` with the same `WHERE`: used only when `List` returns no rows and `Offset > 0`. The `WHERE` builder is moved into one function shared by both, so the filters cannot drift.
+- `List` builds `ORDER BY` from a `map[library.TrackSort][]string` of fixed SQL keys plus the direction and the tie-breaker. An inner query sorts only the IDs with `count(*) OVER () AS total`, `LIMIT ? OFFSET ?`; the outer one joins the columns of the page rows. Sorting the full rows took twice as long (§7).
+- A count with the same `WHERE` (unexported, called by `List` itself, so `List` returns the total): used when `List` returns no rows and `Offset > 0`, and with a cursor (the cursor narrows the `WHERE` of the window). The `WHERE` builder is one function shared by both, so the filters cannot drift.
 - The comment with the `EXPLAIN ANALYZE` figures is updated with the new measurements.
 
 ## 4. HTTP

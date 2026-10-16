@@ -146,7 +146,7 @@ func TestPlaylistTracksAndLock(t *testing.T) {
 			}
 			return ps.SetTracks(ctx, pop, ids)
 		}))
-		page, err := f.tracks.List(ctx, library.TrackFilter{PlaylistID: pop, Limit: 10})
+		page, _, err := f.tracks.List(ctx, library.TrackFilter{PlaylistID: pop, Limit: 10})
 		require.NoError(t, err)
 		out := []uint64{}
 		for _, tr := range page {
@@ -191,7 +191,7 @@ func TestTrackHistoryAndRollback(t *testing.T) {
 		return ts.SetPlaylists(ctx, id, []uint64{9999})
 	})
 	require.ErrorIs(t, err, library.ErrUnknownPlaylist)
-	page, err := f.tracks.List(ctx, library.TrackFilter{Query: "new", Limit: 10})
+	page, _, err := f.tracks.List(ctx, library.TrackFilter{Query: "new", Limit: 10})
 	require.NoError(t, err)
 	require.Empty(t, page)
 }
@@ -214,7 +214,7 @@ WHERE id = $1`, bad)
 	require.NoError(t, err)
 
 	ids := func(quality string) []uint64 {
-		page, lerr := f.tracks.List(ctx, library.TrackFilter{Quality: quality, Limit: 10})
+		page, _, lerr := f.tracks.List(ctx, library.TrackFilter{Quality: quality, Limit: 10})
 		require.NoError(t, lerr)
 		var out []uint64
 		for _, tr := range page {

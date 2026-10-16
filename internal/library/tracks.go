@@ -146,13 +146,38 @@ const (
 	QualityUnanalysed = "unanalysed"
 )
 
-// TrackCursor is the position after the last track of a page (title order).
+// TrackCursor is the position after the last track of a page in the
+// default order (title, id).
 type TrackCursor struct {
 	Title string
 	ID    uint64
 }
 
-// TrackFilter selects tracks. Zero fields do not filter.
+// TrackSort is a sort key of the track list. Ties are ordered by title and
+// ID.
+type TrackSort string
+
+// Sort keys of the track list (docs/phase-20-plan.md §2, decision 2).
+const (
+	SortTitle  TrackSort = "title"
+	SortArtist TrackSort = "artist"
+	SortType   TrackSort = "type"
+	// SortDuration: tracks without a duration last.
+	SortDuration TrackSort = "duration"
+	// SortFormat: tracks without a format last.
+	SortFormat TrackSort = "format"
+	// SortQuality: no issues, then with issues (more issues first), then
+	// never analysed (last in both directions).
+	SortQuality TrackSort = "quality"
+)
+
+// TrackSorts lists every sort key (for the API enum).
+func TrackSorts() []TrackSort {
+	return []TrackSort{SortTitle, SortArtist, SortType, SortDuration, SortFormat, SortQuality}
+}
+
+// TrackFilter selects tracks and the page of them. Zero fields do not
+// filter.
 type TrackFilter struct {
 	TypeID     uint64
 	ArtistID   uint64
@@ -161,24 +186,40 @@ type TrackFilter struct {
 	Query string
 	// Quality is one of the Quality* filters, or empty.
 	Quality string
-	After   *TrackCursor
-	Limit   int
+	// Sort is the sort key; empty is SortTitle.
+	Sort TrackSort
+	// Desc reverses the sort key; missing values stay last and ties stay
+	// in ascending title and ID order.
+	Desc bool
+	// Offset skips that many tracks of the sorted list.
+	Offset int
+	// After continues the default order after a cursor, with Offset 0.
+	After *TrackCursor
+	Limit int
 }
 
-// TrackPage is a page of tracks in title order. Next is set when more
-// tracks follow.
+// DefaultOrder reports whether f lists in ascending title order, the only
+// order a cursor works in.
+func (f TrackFilter) DefaultOrder() bool {
+	return (f.Sort == "" || f.Sort == SortTitle) && !f.Desc
+}
+
+// TrackPage is a page of tracks. Next is set in the default order when
+// more tracks follow; Total counts every track matching the filters.
 type TrackPage struct {
 	Items []Track
 	Next  *TrackCursor
+	Total int
 }
 
 // TrackStore persists tracks (internal/repository/library).
 type TrackStore interface {
 	// WithTx returns the store bound to tx.
 	WithTx(tx db.Tx) TrackStore
-	// List returns at most f.Limit tracks in (title, id) order after
-	// f.After.
-	List(ctx context.Context, f TrackFilter) ([]Track, error)
+	// List returns at most f.Limit tracks in the order of f, after f.After
+	// or skipping f.Offset, and the number of tracks matching the filters
+	// (After, Offset, and Limit aside).
+	List(ctx context.Context, f TrackFilter) ([]Track, int, error)
 	// Get returns one track, or ErrTrackNotFound.
 	Get(ctx context.Context, id uint64) (Track, error)
 	// Create adds a track without playlists. ErrFilePathTaken,
@@ -230,16 +271,25 @@ type Prober interface {
 
 // ListTracks returns a page of tracks.
 func (s *Service) ListTracks(ctx context.Context, f TrackFilter) (TrackPage, error) {
+	if !slices.Contains(TrackSorts(), cmp.Or(f.Sort, SortTitle)) {
+		return TrackPage{}, validation.Field("query.sort", validation.Invalid, "unknown sort key %q", f.Sort)
+	}
+	if f.After != nil && (!f.DefaultOrder() || f.Offset > 0) {
+		return TrackPage{}, validation.Field("query.cursor", validation.Invalid,
+			"a cursor works only with the default order and without offset")
+	}
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	limit := f.Limit
-	// One more row tells whether a next page exists.
-	f.Limit++
-	ts, err := s.tracks.List(ctx, f)
+	if f.DefaultOrder() {
+		// One more row tells whether a next page exists.
+		f.Limit++
+	}
+	ts, total, err := s.tracks.List(ctx, f)
 	if err != nil {
 		return TrackPage{}, fmt.Errorf("list tracks: %w", err)
 	}
-	page := TrackPage{Items: ts}
+	page := TrackPage{Items: ts, Total: total}
 	if len(ts) > limit {
 		page.Items = ts[:limit]
 		last := page.Items[limit-1]
