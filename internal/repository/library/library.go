@@ -34,11 +34,11 @@ var writeErrors = map[string]error{
 
 // historyConstraints are the foreign keys from the play log and the track
 // plan. A delete they refuse is refused for good (§4), not until the
-// manager edits something.
+// manager edits something. Clock inserts and one-time inserts refuse it
+// until they are removed (library.ErrInUse).
 var historyConstraints = map[string]error{
 	"fk_play_log_track_id":        library.ErrTrackHasHistory,
 	"fk_scheduled_items_track_id": library.ErrTrackHasHistory,
-	"fk_hour_inserts_track_id":    library.ErrTrackHasHistory,
 	"fk_play_log_artist_id":       library.ErrArtistHasHistory,
 }
 

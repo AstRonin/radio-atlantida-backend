@@ -51,7 +51,6 @@ type Deps struct {
 	Settings   handlers.Settings
 	Library    handlers.Library
 	PlayRules  handlers.PlayRules
-	Separation handlers.Separation
 	Clocks     handlers.Clocks
 	Grid       handlers.Grid
 	Rotation   handlers.Rotation
@@ -99,7 +98,7 @@ func NewRouter(d Deps) http.Handler {
 	api := newAPI(timed, r, d.Version)
 	handlers.Register(api, handlers.Deps{
 		Log: d.Log, Operations: d.Operations, Logs: d.Logs, Settings: d.Settings,
-		Library: d.Library, PlayRules: d.PlayRules, Separation: d.Separation,
+		Library: d.Library, PlayRules: d.PlayRules,
 		Clocks: d.Clocks, Grid: d.Grid, Rotation: d.Rotation, Playout: d.Playout, Outages: d.Outages, Ingest: d.Ingest, Live: d.Live,
 		Broadcast: d.Broadcast, AirWindow: d.AirWindow, Now: d.Now,
 	})

@@ -20,59 +20,25 @@ import (
 
 // Errors returned by the service.
 var (
-	ErrRequestNotFound = errors.New("filler request not found")
-	// ErrRequestClosed: the reminder was answered, defaulted, or expired.
-	ErrRequestClosed = errors.New("filler request is closed")
-	// ErrNotAnswerable: a pool_empty reminder is closed by refilling the
-	// pool, not by a track.
-	ErrNotAnswerable = errors.New("filler request is closed by refilling the pool")
-	// ErrHourStarted: the hour of the reminder is on air, over, or frozen
-	// for playout (PlanSettings.Freeze).
+	// ErrHourStarted: the hour is on air, over, or frozen for playout
+	// (PlanSettings.Freeze).
 	ErrHourStarted = errors.New("the hour has started")
+	// ErrInsertNotFound: no one-time insert has the ID.
+	ErrInsertNotFound = errors.New("hour insert not found")
 )
 
-// Reasons of a filler request (ck_filler_requests_reason).
-const (
-	ReasonShortClock = "short_clock"
-	ReasonPoolEmpty  = "pool_empty"
-)
-
-// RequestStatus is the state of a filler request.
-type RequestStatus string
-
-// Request states (ck_filler_requests_status).
-const (
-	RequestPending   RequestStatus = "pending"
-	RequestAnswered  RequestStatus = "answered"
-	RequestDefaulted RequestStatus = "defaulted"
-	RequestExpired   RequestStatus = "expired"
-)
-
-// FillerRequest is a filler reminder of one clock hour (§7).
-type FillerRequest struct {
-	ID        uint64
-	ClockID   uint64
-	ClockName string
-	HourStart time.Time
-	Reason    string
-	// Mode is the filler mode that asked: none, ask, or pool.
-	Mode          clocks.FillerMode
-	Status        RequestStatus
-	CreatedAt     time.Time
-	DeadlineAt    time.Time
-	AnswerTrackID *uint64
+// InsertError is the failure of an hour_insert or reschedule operation
+// whose insert cannot be placed whole in its hour. Nothing was changed.
+type InsertError struct {
+	Reason  RefusalReason
+	Message string
 }
 
-// NewRequest is a filler request to store.
-type NewRequest struct {
-	ClockID    uint64
-	HourStart  time.Time
-	Reason     string
-	Mode       clocks.FillerMode
-	Status     RequestStatus
-	CreatedAt  time.Time
-	DeadlineAt time.Time
-}
+func (e *InsertError) Error() string { return "the insert cannot be placed in that hour: " + e.Message }
+
+// FailureReason is the stable reason sent with the operation's failure
+// event.
+func (e *InsertError) FailureReason() string { return string(e.Reason) }
 
 // PlanHour records a built hour (plan_hours).
 type PlanHour struct {
@@ -82,8 +48,6 @@ type PlanHour struct {
 	GridSlotID     *uint64
 	Seed           int64
 	BuiltAt        time.Time
-	// FillerRequestID is the reminder of this build.
-	FillerRequestID *uint64
 }
 
 // current reports whether the hour was built from this version of c.
@@ -98,7 +62,6 @@ type PlannedItem struct {
 	Title      string
 	ArtistName *string
 	DurationMS int
-	ElementID  *uint64
 	Start      time.Time
 	// InMS and OutMS are the in and out points from the start of the file.
 	InMS      int
@@ -106,22 +69,22 @@ type PlannedItem struct {
 	Truncated bool
 	Source    string
 	Status    string
+	// InsertID is the template insert of an insert item; HourInsertID the
+	// one-time insert of an hour_insert or reschedule item.
+	InsertID     *uint64
+	HourInsertID *uint64
 }
 
-// PlannedHour is a built hour with its items.
+// PlannedHour is a built hour with its items and its one-time inserts.
 type PlannedHour struct {
 	PlanHour
 	ClockName string
 	Items     []PlannedItem
+	Inserts   []Insert
 }
 
-// RequestFilter selects filler requests; an empty status selects all.
-type RequestFilter struct {
-	Status RequestStatus
-	Limit  int
-}
-
-// Store persists the plan and the reminders (internal/repository/rotation).
+// Store persists the plan and the one-time inserts
+// (internal/repository/rotation).
 type Store interface {
 	// WithTx returns the store bound to tx.
 	WithTx(tx db.Tx) Store
@@ -130,8 +93,6 @@ type Store interface {
 	LockPlan(ctx context.Context) error
 	// Library returns the tracks with a duration and every play rule.
 	Library(ctx context.Context) (Library, error)
-	// Separation returns the longest interval of each scope.
-	Separation(ctx context.Context) (Separation, error)
 	// History returns the plays in [from, to): aired and truncated in the
 	// play log, planned and queued in the plan, except the planned items
 	// of the hour that starts at hourStart.
@@ -140,34 +101,13 @@ type Store interface {
 	PlanHours(ctx context.Context, from, to time.Time) ([]PlanHour, error)
 	// PlanHour returns one built hour; false if there is none.
 	PlanHour(ctx context.Context, start time.Time) (PlanHour, bool, error)
-	// Pool returns the unused rows of a clock's filler pool in order.
-	Pool(ctx context.Context, clockID uint64) ([]PoolRow, error)
-	// ReplaceHour replaces the planned items of the hour (releasing the pool
-	// rows they took) with items, marks their pool rows used, and stores h.
+	// ReplaceHour replaces the planned items of the hour with items and
+	// stores h.
 	ReplaceHour(ctx context.Context, h PlanHour, items []Item) error
 	// ClearHour deletes the planned items of the hour and its record.
 	ClearHour(ctx context.Context, start time.Time) error
-	// ExpirePending expires the pending requests of the hour.
-	ExpirePending(ctx context.Context, hourStart time.Time) error
-	// CreateRequest stores a request; false when a pending request of the
-	// clock hour exists already.
-	CreateRequest(ctx context.Context, r NewRequest) (uint64, bool, error)
-	// Request returns one request, or ErrRequestNotFound.
-	Request(ctx context.Context, id uint64) (FillerRequest, error)
-	// LockRequest returns one request locked until the transaction ends, or
-	// ErrRequestNotFound.
-	LockRequest(ctx context.Context, id uint64) (FillerRequest, error)
-	// SetRequestStatus closes a request.
-	SetRequestStatus(ctx context.Context, id uint64, status RequestStatus, answerTrackID *uint64) error
-	// DueRequests returns pending requests whose deadline is at or before
-	// at, at most limit, oldest deadline first.
-	DueRequests(ctx context.Context, at time.Time, limit int) ([]FillerRequest, error)
-	// Requests returns requests, newest hour first.
-	Requests(ctx context.Context, f RequestFilter) ([]FillerRequest, error)
-	// AnswerPoolEmpty answers the pending pool_empty requests of a clock.
-	AnswerPoolEmpty(ctx context.Context, clockID uint64) (int64, error)
 	// Plan returns the built hours that start in [from, to) with their
-	// items.
+	// items and one-time inserts.
 	Plan(ctx context.Context, from, to time.Time) ([]PlannedHour, error)
 
 	// Missed returns a missed item; outage.ErrMissedNotFound.
@@ -175,11 +115,13 @@ type Store interface {
 	// LockMissed returns a missed item locked for update;
 	// outage.ErrMissedNotFound.
 	LockMissed(ctx context.Context, id uint64) (MissedItem, error)
-	// Inserts returns the inserts of the hour, in ID order.
+	// Inserts returns the one-time inserts of the hour, in ID order.
 	Inserts(ctx context.Context, hourStart time.Time) ([]Insert, error)
-	// CreateInsert stores an insert and returns its ID.
+	// Insert returns one one-time insert; ErrInsertNotFound.
+	Insert(ctx context.Context, id uint64) (Insert, error)
+	// CreateInsert stores a one-time insert and returns its ID.
 	CreateInsert(ctx context.Context, ins Insert) (uint64, error)
-	// DeleteInsert deletes an insert.
+	// DeleteInsert deletes a one-time insert.
 	DeleteInsert(ctx context.Context, id uint64) error
 	// ReopenMissed sets a rescheduled missed item open again.
 	ReopenMissed(ctx context.Context, missedID uint64) error
@@ -188,9 +130,9 @@ type Store interface {
 	LinkRescheduled(ctx context.Context, missedID uint64, at time.Time) error
 }
 
-// ClockSource reads a clock with its layout (*clocks.Service).
+// ClockSource reads a clock (*clocks.Service).
 type ClockSource interface {
-	Get(ctx context.Context, id uint64) (clocks.View, error)
+	Get(ctx context.Context, id uint64) (clocks.Clock, error)
 }
 
 // GridSource resolves the grid to hours (*grid.Service).
@@ -213,17 +155,13 @@ type Publisher interface {
 type PlanSettings struct {
 	Location         *time.Location
 	PlanHorizonHours int
-	// ReminderDeadline is how long before its hour a reminder closes.
-	ReminderDeadline time.Duration
-	// Fallback is the global fallback filler mode (filler.fallback).
-	Fallback clocks.Filler
 	// Freeze is how long before its start an hour is frozen: playout may
 	// have pushed its first items to Liquidsoap (playout.prepush_minutes),
-	// so a built hour is no longer rebuilt, cleared, or answered.
+	// so a built hour is no longer rebuilt or cleared, and its one-time
+	// inserts are not changed.
 	Freeze time.Duration
-	// DefaultFixedToleranceMS is the start tolerance of a rescheduled item
-	// at a fixed minute when the request gives none
-	// (rotation.default_fixed_tolerance_ms).
+	// DefaultFixedToleranceMS is the start tolerance of a one-time insert
+	// when the request gives none (rotation.default_fixed_tolerance_ms).
 	DefaultFixedToleranceMS int
 	Build                   Settings
 }
@@ -248,13 +186,8 @@ const (
 	// hourTimeout bounds the transaction of one hour: reads, the build (CPU
 	// only), and the writes.
 	hourTimeout = 15 * time.Second
-	// dueBatch bounds the reminders resolved by one job run; the next run
-	// takes the rest.
-	dueBatch = 200
 	// MaxPlanDays bounds one plan request.
 	MaxPlanDays = 7
-	// requestListLimit bounds the reminders listed.
-	requestListLimit = 500
 )
 
 // Service keeps the track plan.
@@ -267,10 +200,9 @@ type Service struct {
 	ops      Operations
 	pub      Publisher
 	log      *slog.Logger // component rotation
-	fillLog  *slog.Logger // component filler
 	now      func() time.Time
-	// queue holds the clock_build operations waiting for the planner
-	// goroutine (Run); see planner.go.
+	// queue holds the operations waiting for the planner goroutine (Run);
+	// see planner.go.
 	queue chan rebuild
 }
 
@@ -280,8 +212,7 @@ func NewService(tx TxRunner, store Store, clockSrc ClockSource, gridSrc GridSour
 ) *Service {
 	return &Service{
 		tx: tx, store: store, clocks: clockSrc, grid: gridSrc, settings: settings, ops: ops, pub: pub,
-		log: logging.For(log, logging.ComponentRotation), fillLog: logging.For(log, logging.ComponentFiller),
-		now: now, queue: make(chan rebuild, rebuildQueue),
+		log: logging.For(log, logging.ComponentRotation), now: now, queue: make(chan rebuild, rebuildQueue),
 	}
 }
 
@@ -294,11 +225,11 @@ func (r Range) contains(t time.Time) bool { return !t.Before(r.From) && t.Before
 
 // SyncResult counts what a sync did.
 type SyncResult struct {
-	Built, Cleared, Warnings, Reminders int
+	Built, Cleared, Warnings int
 }
 
 func (r SyncResult) String() string {
-	return fmt.Sprintf("built %d hours, cleared %d, %d warnings, %d new reminders", r.Built, r.Cleared, r.Warnings, r.Reminders)
+	return fmt.Sprintf("built %d hours, cleared %d, %d warnings", r.Built, r.Cleared, r.Warnings)
 }
 
 // Sync brings the plan in step with the grid for the hours that start after
@@ -337,24 +268,24 @@ func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
 		planned[h.Start.Unix()] = h
 	}
 
-	views := map[uint64]*clocks.View{}
+	cache := map[uint64]*clocks.Clock{}
 	assigned := map[int64]bool{}
 	var errs []error
 	for _, h := range hours {
 		assigned[h.StartUTC.Unix()] = true
-		view, err := s.view(ctx, views, h.Clock.ID)
+		c, err := s.clock(ctx, cache, h.Clock.ID)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		if view == nil {
+		if c == nil {
 			continue // deleted since the grid was read
 		}
 		forced := slices.ContainsFunc(force, func(r Range) bool { return r.contains(h.StartUTC) })
-		if ph, ok := planned[h.StartUTC.Unix()]; ok && !forced && ph.current(view.Clock) {
+		if ph, ok := planned[h.StartUTC.Unix()]; ok && !forced && ph.current(*c) {
 			continue
 		}
-		out, err := s.build(ctx, hourJob{start: h.StartUTC, slotID: new(h.SlotID), view: *view, force: forced}, &lib, set)
+		out, err := s.build(ctx, hourJob{start: h.StartUTC, slotID: new(h.SlotID), clock: *c, force: forced}, &lib, set)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("build hour %s: %w", h.StartUTC.Format(time.RFC3339), err))
 			continue
@@ -362,7 +293,6 @@ func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
 		if !out.skipped {
 			res.Built++
 			res.Warnings += len(out.plan.Warnings)
-			res.Reminders += len(out.created)
 		}
 	}
 	for _, h := range built {
@@ -378,13 +308,12 @@ func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
 	return res, errors.Join(errs...)
 }
 
-// view returns the clock with its layout, cached per sync; nil if the clock
-// no longer exists.
-func (s *Service) view(ctx context.Context, cache map[uint64]*clocks.View, id uint64) (*clocks.View, error) {
-	if v, ok := cache[id]; ok {
-		return v, nil
+// clock returns the clock, cached per sync; nil if it no longer exists.
+func (s *Service) clock(ctx context.Context, cache map[uint64]*clocks.Clock, id uint64) (*clocks.Clock, error) {
+	if c, ok := cache[id]; ok {
+		return c, nil
 	}
-	v, err := s.clocks.Get(ctx, id)
+	c, err := s.clocks.Get(ctx, id)
 	switch {
 	case errors.Is(err, clocks.ErrNotFound):
 		cache[id] = nil
@@ -392,45 +321,30 @@ func (s *Service) view(ctx context.Context, cache map[uint64]*clocks.View, id ui
 	case err != nil:
 		return nil, fmt.Errorf("read clock %d: %w", id, err)
 	}
-	cache[id] = &v
-	return &v, nil
+	cache[id] = &c
+	return &c, nil
 }
-
-// buildKind says why an hour is built.
-type buildKind int
-
-const (
-	// buildFresh: the hour is missing, stale, or forced. Its pending
-	// reminders expire and new ones are created.
-	buildFresh buildKind = iota
-	// buildDefault: the reminder of the build reached its deadline; the
-	// waiting segments get the default mode. Same seed.
-	buildDefault
-	// buildAnswer: the operator answered the reminder. Same seed.
-	buildAnswer
-)
 
 // hourJob is one hour to build.
 type hourJob struct {
 	start  time.Time
 	slotID *uint64
-	view   clocks.View
-	kind   buildKind
-	// force rebuilds a fresh hour even when it is current.
+	clock  clocks.Clock
+	// force rebuilds the hour even when it is current.
 	force bool
-	// request is the reminder of a default or answer build.
-	request       FillerRequest
-	answerTrackID uint64
-	// reschedule stores this insert before the build and fails the build
-	// when it cannot be placed.
-	reschedule *RescheduleRequest
+	// add stores this one-time insert before the build and fails the build
+	// when it cannot be placed whole.
+	add *Insert
+	// remove deletes this one-time insert before the build.
+	remove *Insert
 }
 
 // hourOutcome is what a build wrote.
 type hourOutcome struct {
 	skipped bool
 	plan    HourPlan
-	created []FillerRequest
+	// placed is the item of the insert of add.
+	placed *Item
 }
 
 // build builds one hour in its own transaction and reports it.
@@ -445,7 +359,7 @@ func (s *Service) build(ctx context.Context, j hourJob, lib *Library, set PlanSe
 	if err != nil {
 		return hourOutcome{}, err
 	}
-	s.report(j, out)
+	s.report(j.start, j.clock, out)
 	return out, nil
 }
 
@@ -461,39 +375,26 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 		return hourOutcome{}, err
 	}
 	now := s.now().UTC()
-	c := j.view.Clock
+	c := j.clock
+	frozen := set.frozen(j.start, now)
 	switch {
-	case j.reschedule != nil && set.frozen(j.start, now):
+	case (j.add != nil || j.remove != nil) && frozen:
 		return hourOutcome{}, ErrHourStarted
-	case found && set.frozen(j.start, now) && j.kind == buildAnswer:
-		return hourOutcome{}, ErrHourStarted
-	case found && set.frozen(j.start, now):
+	case found && frozen:
 		// Its items may be in Liquidsoap's queue already.
 		return hourOutcome{skipped: true}, nil
-	case j.kind == buildFresh && !j.force && found && ph.current(c):
-		return hourOutcome{skipped: true}, nil
-	case j.kind != buildFresh && (!found || !ph.current(c) || ph.FillerRequestID == nil || *ph.FillerRequestID != j.request.ID):
-		// The hour was rebuilt since the reminder was made; the next sync
-		// handles it.
+	case !j.force && found && ph.current(c):
 		return hourOutcome{skipped: true}, nil
 	}
 
-	sep, err := st.Separation(ctx)
-	if err != nil {
-		return hourOutcome{}, err
+	var addedID uint64
+	if j.add != nil {
+		if addedID, err = s.storeInsert(ctx, st, *j.add); err != nil {
+			return hourOutcome{}, err
+		}
 	}
-	span := max(sep.Track, sep.Artist, lib.maxRuleInterval())
-	history, err := st.History(ctx, j.start.Add(-span), j.start.Add(time.Hour+span), j.start)
-	if err != nil {
-		return hourOutcome{}, err
-	}
-	pool, err := st.Pool(ctx, c.ID)
-	if err != nil {
-		return hourOutcome{}, err
-	}
-	var insertID uint64
-	if r := j.reschedule; r != nil {
-		if insertID, err = s.storeInsert(ctx, st, *r); err != nil {
+	if j.remove != nil {
+		if err = dropInserts(ctx, st, []Insert{*j.remove}); err != nil {
 			return hourOutcome{}, err
 		}
 	}
@@ -501,83 +402,32 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	if err != nil {
 		return hourOutcome{}, err
 	}
-	ih := applyInserts(c, j.view.Layout, inserts, lib)
-
-	deadline := j.start.Add(-set.ReminderDeadline)
+	span := lib.maxRuleInterval()
+	history, err := st.History(ctx, j.start.Add(-span), j.start.Add(time.Hour+span), j.start)
+	if err != nil {
+		return hourOutcome{}, err
+	}
 	in := HourInput{
-		Start: j.start, Location: set.Location, Clock: ih.clock, Layout: ih.layout, Pins: ih.pins,
-		DefaultFiller: set.Fallback, Library: lib, History: history, Separation: sep, Pool: pool,
+		Start: j.start, Location: set.Location, Clock: c, HourInserts: inserts, Library: lib, History: history,
 		Settings: set.Build, Seed: uint64(j.start.Unix()), //nolint:gosec // G115: hour starts are after 1970
 	}
-	if c.DefaultFiller != nil {
-		in.DefaultFiller = *c.DefaultFiller
+	plan := Build(in)
+	out := hourOutcome{plan: plan}
+	if addedID != 0 {
+		if r, ok := plan.Refused[addedID]; ok {
+			return hourOutcome{}, &InsertError{Reason: r.Reason, Message: r.Message}
+		}
+		i := slices.IndexFunc(plan.Items, func(it Item) bool { return it.HourInsertID != nil && *it.HourInsertID == addedID })
+		if i >= 0 {
+			out.placed = &plan.Items[i]
+		}
+	}
+	if err := settleInserts(ctx, st, inserts, &out.plan); err != nil {
+		return hourOutcome{}, err
 	}
 	next := PlanHour{
 		Start: j.start, ClockID: c.ID, ClockUpdatedAt: c.UpdatedAt, GridSlotID: j.slotID, BuiltAt: now,
-	}
-	switch j.kind {
-	case buildFresh:
-		if err := st.ExpirePending(ctx, j.start); err != nil {
-			return hourOutcome{}, err
-		}
-		if now.Before(deadline) {
-			in.Waiting = WaitAsk
-		} else {
-			in.Waiting = WaitDefault
-		}
-	case buildDefault, buildAnswer:
-		in.Seed = uint64(ph.Seed) //nolint:gosec // G115: seeds are stored from uint64 hour starts
-		in.Waiting = WaitDefault
-		if j.kind == buildAnswer {
-			in.Waiting, in.AnswerTrackID = WaitAnswer, j.answerTrackID
-		}
-		next.GridSlotID, next.FillerRequestID = ph.GridSlotID, ph.FillerRequestID
-	}
-	next.Seed = int64(in.Seed) //nolint:gosec // G115: the seed is an hour start in seconds
-
-	plan := Build(in)
-	if j.kind == buildAnswer && plan.AnswerRefused {
-		return hourOutcome{}, validation.Field("track_id", validation.Blocked,
-			"the track breaks separation or a play rule at that time, or has no duration")
-	}
-	if err := s.settleInserts(ctx, st, j, insertID, inserts, &ih, &plan); err != nil {
-		return hourOutcome{}, err
-	}
-
-	out := hourOutcome{plan: plan}
-	if j.kind == buildFresh {
-		if len(plan.Asked) > 0 {
-			r := NewRequest{
-				ClockID: c.ID, HourStart: j.start, Reason: ReasonShortClock, Mode: plan.AskMode,
-				Status: RequestPending, CreatedAt: now, DeadlineAt: deadline,
-			}
-			if in.Waiting == WaitDefault {
-				r.Status = RequestDefaulted // recorded; the default filled the hour at once
-			}
-			id, ok, err := st.CreateRequest(ctx, r)
-			if err != nil {
-				return hourOutcome{}, err
-			}
-			if ok {
-				next.FillerRequestID = &id
-				if r.Status == RequestPending {
-					out.created = append(out.created, requestOf(id, r, c.Name))
-				}
-			}
-		}
-		if plan.PoolEmpty && now.Before(deadline) {
-			r := NewRequest{
-				ClockID: c.ID, HourStart: j.start, Reason: ReasonPoolEmpty, Mode: clocks.FillerPool,
-				Status: RequestPending, CreatedAt: now, DeadlineAt: deadline,
-			}
-			id, ok, err := st.CreateRequest(ctx, r)
-			if err != nil {
-				return hourOutcome{}, err
-			}
-			if ok {
-				out.created = append(out.created, requestOf(id, r, c.Name))
-			}
-		}
+		Seed: int64(in.Seed), //nolint:gosec // G115: the seed is an hour start in seconds
 	}
 	if err := st.ReplaceHour(ctx, next, plan.Items); err != nil {
 		return hourOutcome{}, err
@@ -588,49 +438,51 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	return out, nil
 }
 
-func requestOf(id uint64, r NewRequest, clockName string) FillerRequest {
-	return FillerRequest{
-		ID: id, ClockID: r.ClockID, ClockName: clockName, HourStart: r.HourStart, Reason: r.Reason, Mode: r.Mode,
-		Status: r.Status, CreatedAt: r.CreatedAt, DeadlineAt: r.DeadlineAt,
+// settleInserts drops the one-time inserts a build could not place, with a
+// warning, and reopens their missed items, so the manager can reschedule
+// them again.
+func settleInserts(ctx context.Context, st Store, inserts []Insert, plan *HourPlan) error {
+	var drop []Insert
+	for _, ins := range inserts {
+		r, ok := plan.Refused[ins.ID]
+		if !ok {
+			continue
+		}
+		drop = append(drop, ins)
+		w := Warning{
+			Code: WarnHourInsertDropped, TrackID: new(ins.TrackID), HourInsertID: new(ins.ID),
+			Message: "the one-time insert cannot be placed and is removed: " + r.Message,
+		}
+		if ins.MissedID != nil {
+			w.Code, w.Message = WarnRescheduleDropped, "the rescheduled item cannot be placed and is removed; its missed item is open again: "+r.Message
+		}
+		plan.Warnings = append(plan.Warnings, w)
 	}
+	return dropInserts(ctx, st, drop)
 }
 
-// report logs the warnings of a build and sends its events.
-func (s *Service) report(j hourJob, out hourOutcome) {
-	if out.skipped {
-		return
-	}
-	for _, r := range out.created {
-		s.pub.Publish(ws.FillerRequestCreatedEvent{
-			Type: ws.EventFillerRequestCreated, Time: r.CreatedAt,
-			Data: ws.FillerRequestCreatedData{
-				ID: r.ID, ClockID: r.ClockID, ClockName: r.ClockName, HourStartUTC: r.HourStart,
-				Reason: r.Reason, DeadlineAt: r.DeadlineAt,
-			},
-		})
-	}
-	if len(out.plan.Warnings) == 0 {
+// report logs the warnings of a build and sends them to the panels.
+func (s *Service) report(start time.Time, c clocks.Clock, out hourOutcome) {
+	if out.skipped || len(out.plan.Warnings) == 0 {
 		return
 	}
 	data := ws.TrackPlanWarningData{
-		HourStartUTC: j.start, ClockID: j.view.Clock.ID, ClockName: j.view.Clock.Name,
+		HourStartUTC: start, ClockID: c.ID, ClockName: c.Name,
 		Warnings: make([]ws.TrackPlanWarning, len(out.plan.Warnings)),
 	}
 	for i, w := range out.plan.Warnings {
-		log := s.log
-		if w.filler() {
-			log = s.fillLog
-		}
-		log.Warn("track plan warning", "code", string(w.Code), "hour_start_utc", j.start,
-			"clock_id", j.view.Clock.ID, "message", w.Message)
+		s.log.Warn("track plan warning", "code", string(w.Code), "hour_start_utc", start, "clock_id", c.ID, "message", w.Message)
 		data.Warnings[i] = ws.TrackPlanWarning{
-			Code: string(w.Code), Message: w.Message, ElementIndex: w.Element, SegmentIndex: w.Segment, TrackID: w.TrackID,
+			Code: string(w.Code), Message: w.Message, PlaylistIndex: w.PlaylistIndex, InsertIndex: w.InsertIndex,
+			TrackID: w.TrackID, HourInsertID: w.HourInsertID,
 		}
 	}
 	s.pub.Publish(ws.TrackPlanWarningEvent{Type: ws.EventTrackPlanWarning, Time: s.now().UTC(), Data: data})
 }
 
-// clear removes a built hour that the grid no longer assigns.
+// clear removes a built hour that the grid no longer assigns. Its one-time
+// inserts no longer play: they are removed and their missed items open
+// again.
 func (s *Service) clear(ctx context.Context, start time.Time) error {
 	ctx, cancel := context.WithTimeout(ctx, hourTimeout)
 	defer cancel()
@@ -639,199 +491,25 @@ func (s *Service) clear(ctx context.Context, start time.Time) error {
 		if err := st.LockPlan(ctx); err != nil {
 			return err
 		}
-		if err := st.ExpirePending(ctx, start); err != nil {
-			return err
-		}
-		// The hour no longer plays: its rescheduled items are open again.
 		inserts, err := st.Inserts(ctx, start)
 		if err != nil {
 			return err
 		}
-		ids := make([]uint64, len(inserts))
-		for i, ins := range inserts {
-			ids[i] = ins.ID
-		}
-		if err := dropInserts(ctx, st, inserts, ids); err != nil {
+		if err := dropInserts(ctx, st, inserts); err != nil {
 			return err
 		}
 		if len(inserts) > 0 {
-			s.log.Warn("the grid no longer plays an hour with rescheduled items; their missed items are open again",
+			s.log.Warn("the grid no longer plays an hour with one-time inserts; they are removed and their missed items are open again",
 				"hour_start_utc", start, "count", len(inserts))
 		}
 		return st.ClearHour(ctx, start)
 	})
 }
 
-// RunJob is the plan job (§7): reminders whose deadline passed get the
-// default mode, then the plan is synced.
+// RunJob is the plan job (§7): the plan is synced to its horizon.
 func (s *Service) RunJob(ctx context.Context) (string, error) {
-	n, dueErr := s.resolveDue(ctx)
 	res, err := s.Sync(ctx, nil)
-	summary := fmt.Sprintf("%s; %d reminders defaulted", res, n)
-	return summary, errors.Join(dueErr, err)
-}
-
-// resolveDue defaults the pending reminders whose deadline passed and fills
-// their hours with the default mode.
-func (s *Service) resolveDue(ctx context.Context) (int, error) {
-	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	now := s.now().UTC()
-	due, err := s.store.DueRequests(rctx, now, dueBatch)
-	if err != nil {
-		return 0, fmt.Errorf("read due reminders: %w", err)
-	}
-	if len(due) == 0 {
-		return 0, nil
-	}
-	set, err := s.settings(rctx)
-	if err != nil {
-		return 0, fmt.Errorf("read rotation settings: %w", err)
-	}
-	lib, err := s.store.Library(rctx)
-	if err != nil {
-		return 0, fmt.Errorf("read library: %w", err)
-	}
-	views := map[uint64]*clocks.View{}
-	var errs []error
-	n := 0
-	for _, r := range due {
-		view, err := s.view(ctx, views, r.ClockID)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if err := s.closeDue(ctx, r, view, &lib, set); err != nil {
-			errs = append(errs, fmt.Errorf("default reminder %d: %w", r.ID, err))
-			continue
-		}
-		n++
-	}
-	return n, errors.Join(errs...)
-}
-
-// closeDue defaults one reminder and, for a future hour still built from it,
-// rebuilds the hour with the default mode.
-func (s *Service) closeDue(ctx context.Context, r FillerRequest, view *clocks.View, lib *Library, set PlanSettings) error {
-	ctx, cancel := context.WithTimeout(ctx, hourTimeout)
-	defer cancel()
-	var out hourOutcome
-	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		st := s.store.WithTx(tx)
-		if err := st.LockPlan(ctx); err != nil {
-			return err
-		}
-		req, err := st.LockRequest(ctx, r.ID)
-		if err != nil || req.Status != RequestPending {
-			return err
-		}
-		if err = st.SetRequestStatus(ctx, req.ID, RequestDefaulted, nil); err != nil {
-			return err
-		}
-		if req.Reason != ReasonShortClock || view == nil || set.frozen(req.HourStart, s.now()) {
-			return nil
-		}
-		out, err = s.buildTx(ctx, st, hourJob{start: req.HourStart, view: *view, kind: buildDefault, request: req}, lib, set)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	s.fillLog.Info("filler reminder defaulted", "request_id", r.ID, "clock_id", r.ClockID, "hour_start_utc", r.HourStart)
-	s.report(hourJob{start: r.HourStart, view: derefView(view)}, out)
-	return nil
-}
-
-func derefView(v *clocks.View) clocks.View {
-	if v == nil {
-		return clocks.View{}
-	}
-	return *v
-}
-
-// Answer answers a pending reminder with a track: the track fills the
-// first waiting segment of the hour, the default mode the others. A track
-// that breaks separation or a play rule at that time is refused.
-func (s *Service) Answer(ctx context.Context, id, trackID uint64) (FillerRequest, error) {
-	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	r, err := s.store.Request(rctx, id)
-	if err != nil {
-		return FillerRequest{}, err
-	}
-	set, err := s.settings(rctx)
-	if err != nil {
-		return FillerRequest{}, fmt.Errorf("read rotation settings: %w", err)
-	}
-	lib, err := s.store.Library(rctx)
-	if err != nil {
-		return FillerRequest{}, fmt.Errorf("read library: %w", err)
-	}
-	if _, ok := lib.track(trackID); !ok {
-		return FillerRequest{}, validation.Field("track_id", validation.UnknownID, "no track with a duration has ID %d", trackID)
-	}
-	view, err := s.view(ctx, map[uint64]*clocks.View{}, r.ClockID)
-	if err != nil {
-		return FillerRequest{}, err
-	}
-
-	wctx, cancel := context.WithTimeout(ctx, hourTimeout)
-	defer cancel()
-	var out hourOutcome
-	err = s.tx.WithTx(wctx, func(ctx context.Context, tx db.Tx) error {
-		st := s.store.WithTx(tx)
-		if lockErr := st.LockPlan(ctx); lockErr != nil {
-			return lockErr
-		}
-		req, txErr := st.LockRequest(ctx, id)
-		switch {
-		case txErr != nil:
-			return txErr
-		case req.Status != RequestPending:
-			return ErrRequestClosed
-		case req.Reason != ReasonShortClock:
-			return ErrNotAnswerable
-		case set.frozen(req.HourStart, s.now()):
-			return ErrHourStarted
-		}
-		if txErr = st.SetRequestStatus(ctx, id, RequestAnswered, &trackID); txErr != nil {
-			return txErr
-		}
-		if view == nil {
-			return nil
-		}
-		out, txErr = s.buildTx(ctx, st, hourJob{
-			start: req.HourStart, view: *view, kind: buildAnswer, request: req, answerTrackID: trackID,
-		}, &lib, set)
-		return txErr
-	})
-	if err != nil {
-		return FillerRequest{}, err
-	}
-	s.report(hourJob{start: r.HourStart, view: derefView(view)}, out)
-	return s.store.Request(rctx, id)
-}
-
-// PoolRefilled answers the pending pool_empty reminders of a clock after
-// its pool was refilled.
-func (s *Service) PoolRefilled(ctx context.Context, clockID uint64) error {
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	if _, err := s.store.AnswerPoolEmpty(ctx, clockID); err != nil {
-		return fmt.Errorf("answer pool reminders of clock %d: %w", clockID, err)
-	}
-	return nil
-}
-
-// Requests lists the reminders with the status; empty: all.
-func (s *Service) Requests(ctx context.Context, status RequestStatus) ([]FillerRequest, error) {
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	rs, err := s.store.Requests(ctx, RequestFilter{Status: status, Limit: requestListLimit})
-	if err != nil {
-		return nil, fmt.Errorf("list filler requests: %w", err)
-	}
-	return rs, nil
+	return res.String(), err
 }
 
 // checkRange refuses a range that is empty or longer than MaxPlanDays.
@@ -845,7 +523,8 @@ func checkRange(r Range) error {
 	return nil
 }
 
-// Plan returns the built hours that start in the range, with their items.
+// Plan returns the built hours that start in the range, with their items
+// and one-time inserts.
 func (s *Service) Plan(ctx context.Context, r Range) ([]PlannedHour, error) {
 	if err := checkRange(r); err != nil {
 		return nil, validationQuery(err)

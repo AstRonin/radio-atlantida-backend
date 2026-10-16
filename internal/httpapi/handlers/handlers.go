@@ -37,7 +37,6 @@ type Deps struct {
 	Settings   Settings
 	Library    Library
 	PlayRules  PlayRules
-	Separation Separation
 	Clocks     Clocks
 	Grid       Grid
 	Rotation   Rotation
@@ -60,11 +59,10 @@ func Register(api huma.API, d Deps) {
 	registerBroadcast(api, log, d.Now, d.Broadcast)
 	registerSettings(api, log, d.Settings)
 	registerPlaylistTypes(api, log, d.Library)
-	registerPlaylists(api, log, d.Library, d.PlayRules)
+	registerPlaylists(api, log, d.Library, d.PlayRules, d.Rotation)
 	registerArtists(api, log, d.Library)
 	registerTracks(api, log, d.Library, d.PlayRules, d.Rotation, d.Ingest)
 	registerPlayRules(api, log, d.PlayRules)
-	registerSeparationRules(api, log, d.Separation)
 	registerClocks(api, log, d.Clocks, d.Rotation)
 	registerGrid(api, log, d.Grid, d.Rotation)
 	registerRotation(api, log, d.Rotation)

@@ -26,7 +26,6 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
-	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
 )
@@ -140,14 +139,11 @@ var refusals = []refusal{
 	{playrules.ErrNotFound, http.StatusNotFound, errcodes.PlayRuleNotFound},
 	{playrules.ErrTrackNotFound, http.StatusNotFound, errcodes.TrackNotFound},
 	{playrules.ErrPlaylistNotFound, http.StatusNotFound, errcodes.PlaylistNotFound},
-	{separation.ErrNotFound, http.StatusNotFound, errcodes.SeparationRuleNotFound},
 	{clocks.ErrNotFound, http.StatusNotFound, errcodes.ClockNotFound},
 	{clocks.ErrHasHistory, http.StatusConflict, errcodes.ClockHasHistory},
 	{grid.ErrNotFound, http.StatusNotFound, errcodes.GridSlotNotFound},
 	{grid.ErrConflict, http.StatusConflict, errcodes.GridConflict},
-	{rotation.ErrRequestNotFound, http.StatusNotFound, errcodes.FillerRequestNotFound},
-	{rotation.ErrRequestClosed, http.StatusConflict, errcodes.FillerRequestClosed},
-	{rotation.ErrNotAnswerable, http.StatusConflict, errcodes.FillerRequestNotAnswerable},
+	{rotation.ErrInsertNotFound, http.StatusNotFound, errcodes.HourInsertNotFound},
 	{rotation.ErrHourStarted, http.StatusConflict, errcodes.HourStarted},
 	{playout.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiquidsoapUnavailable},
 	{outage.ErrMissedNotFound, http.StatusNotFound, errcodes.MissedItemNotFound},
@@ -222,6 +218,15 @@ var validationRuleCodes = map[validation.Rule]errcodes.Field{
 	validation.CueBeyondEnd:      errcodes.CueBeyondEnd,
 	validation.AirTooShort:       errcodes.AirTooShort,
 	validation.FadesTooLong:      errcodes.FadesTooLong,
+
+	validation.IntervalBeyondRetention: errcodes.IntervalBeyondRetention,
+	validation.FillPlaylistRequired:    errcodes.FillPlaylistRequired,
+	validation.FillWeightsPartial:      errcodes.FillWeightsPartial,
+	validation.ClockCountRequired:      errcodes.ClockCountRequired,
+	validation.ClockCountNotAllowed:    errcodes.ClockCountNotAllowed,
+	validation.FillWeightNotAllowed:    errcodes.FillWeightNotAllowed,
+	validation.InsertOffsetTaken:       errcodes.InsertOffsetTaken,
+	validation.InsertSourceRequired:    errcodes.InsertSourceRequired,
 }
 
 // settingRuleCodes maps the rules of a refused setting value to field codes.
@@ -234,6 +239,8 @@ var settingRuleCodes = map[settings.Rule]errcodes.Field{
 	settings.RuleRequired:     errcodes.Required,
 	settings.RuleUnknownField: errcodes.UnknownField,
 	settings.RuleInvalid:      errcodes.Invalid,
+
+	settings.RuleIntervalBeyondRetention: errcodes.IntervalBeyondRetention,
 }
 
 // NewHumaError builds the problem for errors raised by huma itself: request
@@ -297,7 +304,7 @@ func codeForStatus(status int) errcodes.Problem {
 }
 
 // bodyPrefix is stripped from field locations: the panel addresses body
-// fields by their own path (elements[2].fixed_minute). Query and path
+// fields by their own path (playlists[2].fill_weight). Query and path
 // parameters keep their prefix (query.limit).
 const bodyPrefix = "body."
 

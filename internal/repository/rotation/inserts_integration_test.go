@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 )
@@ -35,25 +34,36 @@ VALUES ($1, 'missed', $2, $3, 'open') RETURNING id`, f.tracks[2], hour.Add(-time
 		require.NoError(t, lockErr)
 		var createErr error
 		insertID, createErr = st.CreateInsert(ctx, rotation.Insert{
-			HourStart: target, TrackID: locked.TrackID, MissedID: &locked.ID, Placement: clocks.PlacementFixed,
-			FixedMinute: new(30), FixedToleranceMS: 60000,
+			HourStart: target, TrackID: locked.TrackID, MissedID: &locked.ID, Placement: rotation.PlacementFixed,
+			OffsetMS: new(30*60000 + 40000), ToleranceMS: 60000,
 		})
 		return createErr
 	})
 	ins, err := f.store.Inserts(ctx, target)
 	require.NoError(t, err)
-	require.Equal(t, []rotation.Insert{{
-		ID: insertID, HourStart: target, TrackID: f.tracks[2], MissedID: &missed, Placement: clocks.PlacementFixed,
-		FixedMinute: new(30), FixedToleranceMS: 60000,
-	}}, ins)
+	want := rotation.Insert{
+		ID: insertID, HourStart: target, TrackID: f.tracks[2], MissedID: &missed, Placement: rotation.PlacementFixed,
+		OffsetMS: new(30*60000 + 40000), ToleranceMS: 60000,
+	}
+	require.Equal(t, []rotation.Insert{want}, ins)
+	one, err := f.store.Insert(ctx, insertID)
+	require.NoError(t, err)
+	require.Equal(t, want, one)
+	_, err = f.store.Insert(ctx, 999999)
+	require.ErrorIs(t, err, rotation.ErrInsertNotFound)
 
 	// The build writes the reschedule item; the link resolves the missed row.
 	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		return st.ReplaceHour(ctx, f.planHour(target, nil), []rotation.Item{{
+		return st.ReplaceHour(ctx, f.planHour(target), []rotation.Item{{
 			TrackID: f.tracks[2], OffsetMS: 30 * 60000, OutMS: 30000, Source: rotation.SourceReschedule, RescheduleOfID: &missed,
+			HourInsertID: &insertID,
 		}})
 	})
 	require.NoError(t, f.store.LinkRescheduled(ctx, missed, hour))
+	plan, err := f.store.Plan(ctx, target, target.Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, []rotation.Insert{want}, plan[0].Inserts, "the plan lists the hour's one-time inserts")
+	require.Equal(t, insertID, *plan[0].Items[0].HourInsertID)
 	var resolution string
 	var resolvedAt time.Time
 	var itemID, planned uint64
@@ -65,7 +75,7 @@ VALUES ($1, 'missed', $2, $3, 'open') RETURNING id`, f.tracks[2], hour.Add(-time
 
 	// A rebuild links the new row and keeps the first resolution time.
 	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		return st.ReplaceHour(ctx, f.planHour(target, nil), []rotation.Item{{
+		return st.ReplaceHour(ctx, f.planHour(target), []rotation.Item{{
 			TrackID: f.tracks[2], OffsetMS: 31 * 60000, OutMS: 30000, Source: rotation.SourceReschedule, RescheduleOfID: &missed,
 		}})
 	})

@@ -1,18 +1,16 @@
-// Package clocks holds the clock templates (§4, §6.0, §7.2 of the design):
-// 60-minute structures of elements, each drawing a track from the union of
-// its playlists. Elements are placed in flow, at the start or the end of the
-// hour, or at a fixed minute; fixed elements split the hour into segments,
-// which are fitted separately.
+// Package clocks holds the clock templates (§4, §6.0, §7.2 of the design): a
+// clock is a set of playlists and timed inserts. Each playlist has a
+// placement rule (fill, spread, start, end, start_end, middle), stored on
+// the playlist and overridable per clock; a clock needs at least one fill
+// playlist. A timed insert plays a track, or a track drawn from a playlist,
+// at a time of the hour with seconds and a start tolerance. Rotation
+// (internal/rotation) lays out the hour from them; tracks of any length are
+// used.
 //
-// Saving a clock runs the dry check (§6.0): the layout on nominal durations,
-// refusals per field, the shortfall of each segment, and warnings. A short
-// segment needs a filler mode on its holder element; until every short
-// segment has one, the clock is incomplete and the panel asks for the
-// choice (save-with-filler or save-incomplete).
-//
-// Rebuilding planned hours after a change and reminders for incomplete
-// clocks belong to rotation (internal/rotation): the API starts a rebuild
-// after every save, and the planner sees the new updated_at.
+// Saving a clock is one step (§6.0): validate every field, store the clock
+// with its playlists and inserts in one transaction, and run the dry check
+// (warnings that never block). The API adds the sample hour, built by
+// rotation, and starts a rebuild of the clock's planned hours.
 //
 // Persistence goes through internal/repository/clocks.
 package clocks
@@ -42,154 +40,159 @@ var (
 var (
 	ErrNameTaken       = errors.New("clock name is taken")
 	ErrUnknownPlaylist = errors.New("unknown playlist")
-	ErrUnknownArtist   = errors.New("unknown artist")
 	ErrUnknownTrack    = errors.New("unknown track")
 )
 
-// Placement says where an element goes in the hour (§7.2).
-type Placement string
+// HourMS is the length of every clock (§4: length_seconds is fixed at 3600).
+const HourMS = 3_600_000
 
-// Placements.
+// Limits of the clock fields (§7.2).
 const (
-	PlacementFlow  Placement = "flow"
-	PlacementStart Placement = "start"
-	PlacementEnd   Placement = "end"
-	PlacementFixed Placement = "fixed"
+	// MaxOffsetMS is the latest start of an insert: 59:59.
+	MaxOffsetMS = HourMS - 1000
+	// MaxToleranceMS is the widest start tolerance of an insert.
+	MaxToleranceMS = 600_000
+	// MaxSpreadCount is the most tracks a spread playlist places.
+	MaxSpreadCount = 12
+	// MaxFillWeight is the largest share of a fill playlist.
+	MaxFillWeight = 100
 )
 
-// FillerMode is the source of filler for a short segment (§7).
-type FillerMode string
+// Rule is the placement rule of a playlist in clocks (§7.2).
+type Rule string
 
-// Filler modes. A clock's default mode is random, playlist, or artist.
+// Placement rules.
 const (
-	FillerNone     FillerMode = "none"
-	FillerAsk      FillerMode = "ask"
-	FillerRandom   FillerMode = "random"
-	FillerPlaylist FillerMode = "playlist"
-	FillerArtist   FillerMode = "artist"
-	FillerPool     FillerMode = "pool"
+	// RuleFill fills the time not taken by inserts and rule tracks.
+	RuleFill Rule = "fill"
+	// RuleSpread places a number of tracks spread over the hour.
+	RuleSpread Rule = "spread"
+	// RuleStart places the first track of the hour.
+	RuleStart Rule = "start"
+	// RuleEnd places the last track of the hour, ending at 60:00.
+	RuleEnd Rule = "end"
+	// RuleStartEnd places one track at the start and one at the end.
+	RuleStartEnd Rule = "start_end"
+	// RuleMiddle places a track that starts at about 30:00.
+	RuleMiddle Rule = "middle"
 )
 
-// Status of a clock.
-type Status string
-
-// Statuses.
-const (
-	StatusComplete   Status = "complete"
-	StatusIncomplete Status = "incomplete"
-)
-
-// Filler is a filler mode with its source: a playlist ID for playlist, an
-// artist ID for artist, nil otherwise.
-type Filler struct {
-	Mode     FillerMode
-	SourceID *uint64
+// Rules lists every placement rule.
+func Rules() []Rule {
+	return []Rule{RuleFill, RuleSpread, RuleStart, RuleEnd, RuleStartEnd, RuleMiddle}
 }
 
-// Element is one slot of a clock.
-type Element struct {
-	// ID is 0 for an element that is not stored yet.
-	ID          uint64
-	Placement   Placement
-	FixedMinute *int
-	// FixedToleranceMS applies to the start of a fixed element.
-	FixedToleranceMS    int
-	NominalDurationMS   int
-	DurationToleranceMS int
-	Filler              Filler
-	// PlaylistIDs: the track is chosen from the union of their tracks.
-	PlaylistIDs []uint64
-}
-
-// target is the target start of a fixed element within the hour.
-func (e Element) target() int {
-	if e.FixedMinute == nil {
-		return 0
+// Valid reports whether r is a placement rule.
+func (r Rule) Valid() bool {
+	switch r {
+	case RuleFill, RuleSpread, RuleStart, RuleEnd, RuleStartEnd, RuleMiddle:
+		return true
 	}
-	return *e.FixedMinute * minuteMS
+	return false
 }
 
-// earliest is the earliest start of a fixed element.
-func (e Element) earliest() int { return e.target() - e.FixedToleranceMS }
+// PlaylistRule is the placement rule a playlist carries itself.
+type PlaylistRule struct {
+	Rule Rule
+	// Count is set for spread only.
+	Count *int
+}
+
+// ClockPlaylist is a playlist of a clock.
+type ClockPlaylist struct {
+	PlaylistID uint64
+	// Rule and Count override the playlist's rule in this clock; nil keeps
+	// it. Count is set only with a spread override.
+	Rule  *Rule
+	Count *int
+	// FillWeight is the share of a fill playlist (1 to 100); either every
+	// fill playlist of a clock has one or none.
+	FillWeight *int
+	// Own is the playlist's own rule, read with the clock.
+	Own PlaylistRule
+}
+
+// EffectiveRule is the rule of the playlist in this clock: the override,
+// else the playlist's own.
+func (cp ClockPlaylist) EffectiveRule() Rule {
+	if cp.Rule != nil {
+		return *cp.Rule
+	}
+	return cp.Own.Rule
+}
+
+// EffectiveCount is the spread count of the playlist in this clock; nil
+// unless the effective rule is spread.
+func (cp ClockPlaylist) EffectiveCount() *int {
+	switch {
+	case cp.EffectiveRule() != RuleSpread:
+		return nil
+	case cp.Rule != nil:
+		return cp.Count
+	}
+	return cp.Own.Count
+}
+
+// Insert is a timed insert of the template: it plays in every hour of the
+// clock.
+type Insert struct {
+	// ID is 0 for an insert that is not stored yet.
+	ID          uint64
+	OffsetMS    int
+	ToleranceMS int
+	// Exactly one of TrackID and PlaylistID is set.
+	TrackID    *uint64
+	PlaylistID *uint64
+}
 
 // Clock is a 60-minute template.
 type Clock struct {
-	ID     uint64
-	Name   string
-	Status Status
-	// DefaultFiller applies when the pool is empty or a reminder expires;
-	// nil falls back to the global setting (§4, §6.3).
-	DefaultFiller *Filler
-	// Elements in position order.
-	Elements  []Element
+	ID   uint64
+	Name string
+	// Playlists in position order.
+	Playlists []ClockPlaylist
+	// Inserts by offset.
+	Inserts   []Insert
 	UpdatedAt time.Time
 }
 
 // Summary is a clock in the list.
 type Summary struct {
-	ID           uint64
-	Name         string
-	Status       Status
-	ElementCount int
-	UpdatedAt    time.Time
+	ID            uint64
+	Name          string
+	PlaylistCount int
+	InsertCount   int
+	UpdatedAt     time.Time
 }
 
-// ElementInput is an element of a save. Nil tolerances take the defaults
+// PlaylistInput is a playlist of a save.
+type PlaylistInput struct {
+	PlaylistID uint64
+	Rule       *Rule
+	Count      *int
+	FillWeight *int
+}
+
+// InsertInput is an insert of a save. A nil tolerance takes the default
 // from the settings.
-type ElementInput struct {
-	// ID names an existing element of the clock; 0 for a new one.
-	ID                  uint64
-	Placement           Placement
-	FixedMinute         *int
-	FixedToleranceMS    *int
-	NominalDurationMS   int
-	DurationToleranceMS *int
-	Filler              Filler
-	PlaylistIDs         []uint64
+type InsertInput struct {
+	OffsetMS    int
+	ToleranceMS *int
+	TrackID     *uint64
+	PlaylistID  *uint64
 }
 
 // Input is the editable part of a clock.
 type Input struct {
-	Name          string
-	DefaultFiller *Filler
-	Elements      []ElementInput
+	Name      string
+	Playlists []PlaylistInput
+	Inserts   []InsertInput
 }
 
-// SegmentChoice is the filler chosen for one segment in the dialog.
-type SegmentChoice struct {
-	Segment int
-	Filler  Filler
-}
-
-// FillerChoice is the answer of the filler dialog (§6.0).
-type FillerChoice struct {
-	Segments []SegmentChoice
-	// PoolTrackIDs, when not nil, replace the unused rows of the clock's
-	// filler pool, in this order.
-	PoolTrackIDs []uint64
-}
-
-// PoolEntry is a track of a clock's filler pool. Used rows stay as history.
-type PoolEntry struct {
-	TrackID  uint64
-	Title    string
-	Position int
-	UsedAt   *time.Time
-}
-
-// Result is a saved clock with its dry check.
+// Result is a saved clock with the warnings of its dry check.
 type Result struct {
 	Clock    Clock
-	Layout   Layout
 	Warnings []Warning
-	// Replaced are fixed elements removed by the save (§7.2).
-	Replaced []Element
-}
-
-// View is a clock with its layout.
-type View struct {
-	Clock  Clock
-	Layout Layout
 }
 
 // Ref names an entity that blocks a delete.
@@ -230,37 +233,35 @@ type Store interface {
 	WithTx(tx db.Tx) Store
 	// List returns every clock in name order.
 	List(ctx context.Context) ([]Summary, error)
-	// Get returns a clock with its elements, or ErrNotFound.
+	// Get returns a clock with its playlists and inserts, or ErrNotFound.
 	Get(ctx context.Context, id uint64) (Clock, error)
 	// Lock locks the clock row until the transaction ends. ErrNotFound.
 	Lock(ctx context.Context, id uint64) error
-	// Create adds a clock with its elements. ErrNameTaken,
-	// ErrUnknownPlaylist, ErrUnknownArtist.
+	// Create adds a clock with its playlists and inserts. ErrNameTaken,
+	// ErrUnknownPlaylist, ErrUnknownTrack.
 	Create(ctx context.Context, c Clock) (uint64, error)
-	// Update replaces the clock and its elements: elements with an ID are
-	// updated, those left out are deleted, new ones are added. ErrNotFound,
-	// ErrNameTaken, ErrUnknownPlaylist, ErrUnknownArtist.
+	// Update replaces the clock, its playlists, and its inserts (an insert
+	// at the offset of a stored one keeps its ID) and touches updated_at.
+	// ErrNotFound, ErrNameTaken, ErrUnknownPlaylist, ErrUnknownTrack.
 	Update(ctx context.Context, c Clock) error
 	// Delete removes a clock. ErrNotFound; ErrInUse while grid slots use
 	// it; ErrHasHistory.
 	Delete(ctx context.Context, id uint64) error
 	// Users returns the grid slots of the clock, at most limit.
 	Users(ctx context.Context, id uint64, limit int) ([]SlotRef, error)
-	// MissingPlaylists, MissingArtists, and MissingTracks return the IDs
-	// that do not exist.
-	MissingPlaylists(ctx context.Context, ids []uint64) ([]uint64, error)
-	MissingArtists(ctx context.Context, ids []uint64) ([]uint64, error)
-	// Pool returns the filler pool in position order.
-	Pool(ctx context.Context, clockID uint64) ([]PoolEntry, error)
-	// SetPool replaces the unused pool rows with trackIDs, in order, after
-	// the used ones. ErrUnknownTrack.
-	SetPool(ctx context.Context, clockID uint64, trackIDs []uint64) error
+	// PlaylistRules returns the own rule of each of the playlists that
+	// exists.
+	PlaylistRules(ctx context.Context, ids []uint64) (map[uint64]PlaylistRule, error)
+	// MissingTracks returns the IDs that are not tracks.
+	MissingTracks(ctx context.Context, ids []uint64) ([]uint64, error)
 }
 
-// Candidate is a track of an element's playlists, as the dry check sees it.
+// Candidate is a track of a playlist, as the dry check sees it.
 type Candidate struct {
-	TrackID    uint64
-	DurationMS *int
+	TrackID uint64
+	// AirMS is the length on air; nil when the track cannot be planned (no
+	// duration).
+	AirMS *int
 	// PlaylistIDs are the requested playlists that hold the track.
 	PlaylistIDs []uint64
 	// RuleIDs are the play rules of the track and of all its playlists.
@@ -271,14 +272,14 @@ type Candidate struct {
 type Candidates struct {
 	Tracks []Candidate
 	Rules  map[uint64]playrules.RuleInput
+	// PlaylistRules are the rule IDs attached to each requested playlist.
+	PlaylistRules map[uint64][]uint64
 }
 
 // CheckStore reads what the dry check needs (internal/repository/clocks).
 type CheckStore interface {
 	// Candidates returns the tracks of the playlists with their rules.
 	Candidates(ctx context.Context, playlistIDs []uint64) (Candidates, error)
-	// TrackSeparationHours returns the longest track separation interval.
-	TrackSeparationHours(ctx context.Context) (int, error)
 }
 
 // Hour is one hour of the grid.
@@ -296,9 +297,9 @@ type GridHours interface {
 
 // Settings are the settings the service reads.
 type Settings struct {
-	DurationToleranceMS int
-	FixedToleranceMS    int
-	GridHorizonDays     int
+	// FixedToleranceMS is the default start tolerance of a new insert.
+	FixedToleranceMS int
+	GridHorizonDays  int
 }
 
 // SettingsFunc reads the settings when a clock is saved.
@@ -341,17 +342,9 @@ func (s *Service) List(ctx context.Context) ([]Summary, error) {
 	return cs, nil
 }
 
-// Get returns a clock with its layout.
-func (s *Service) Get(ctx context.Context, id uint64) (View, error) {
+// Get returns a clock with its playlists and inserts.
+func (s *Service) Get(ctx context.Context, id uint64) (Clock, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	c, err := s.store.Get(ctx, id)
-	if err != nil {
-		return View{}, err
-	}
-	l, err := LayoutOf(c.Elements)
-	if err != nil {
-		return View{}, fmt.Errorf("layout of clock %d: %w", id, err)
-	}
-	return View{Clock: c, Layout: l}, nil
+	return s.store.Get(ctx, id)
 }

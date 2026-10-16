@@ -32,8 +32,8 @@ const (
 	// KindRetention is the nightly cleanup of the play log and of old
 	// operations.
 	KindRetention Kind = "retention"
-	// KindTrackPlan is the plan job: due filler reminders, then the track
-	// plan extended to its horizon (§7).
+	// KindTrackPlan is the plan job: the track plan extended to its
+	// horizon (§7).
 	KindTrackPlan Kind = "track_plan"
 	// KindClockBuild rebuilds the planned hours after a clock or grid
 	// change (§6.5, §7).
@@ -45,6 +45,9 @@ const (
 	KindPlayoutReconcile Kind = "playout_reconcile"
 	// KindReschedule places a missed item into a later hour (§7.1).
 	KindReschedule Kind = "reschedule"
+	// KindHourInsert adds a one-time insert to a planned hour, or removes
+	// one, and rebuilds the hour (§7.2).
+	KindHourInsert Kind = "hour_insert"
 	// KindImport imports the files of the inbox folder (phase 11).
 	KindImport Kind = "import"
 	// KindAnalyse analyses the files of tracks against the broadcast
@@ -58,7 +61,7 @@ const (
 func Kinds() []Kind {
 	return []Kind{
 		KindRetention, KindTrackPlan, KindClockBuild, KindMissedItems, KindPlayoutReconcile, KindReschedule,
-		KindImport, KindAnalyse, KindTranscode,
+		KindHourInsert, KindImport, KindAnalyse, KindTranscode,
 	}
 }
 
@@ -211,7 +214,7 @@ func (t *Tracker) Fail(ctx context.Context, id uint64, component logging.Compone
 		Type:        kind.FailedEvent(),
 		Time:        at,
 		OperationID: id,
-		Data:        ws.OperationFailedData{Kind: string(kind), Component: string(component), Error: msg},
+		Data:        ws.OperationFailedData{Kind: string(kind), Component: string(component), Error: msg, Reason: reasonOf(cause)},
 	})
 	return nil
 }
@@ -378,4 +381,19 @@ func truncate(s string, n int) string {
 		n--
 	}
 	return s[:n] + "…"
+}
+
+// Reasoned is a failure that carries a stable reason for the panel (the
+// refusal of a one-time insert: insert_does_not_fit, insert_blocked).
+type Reasoned interface {
+	error
+	FailureReason() string
+}
+
+// reasonOf returns the stable reason of a failure; nil for other errors.
+func reasonOf(err error) *string {
+	if r, ok := errors.AsType[Reasoned](err); ok {
+		return new(r.FailureReason())
+	}
+	return nil
 }

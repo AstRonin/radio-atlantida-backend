@@ -1,6 +1,6 @@
 // Package ws is the WebSocket hub at GET /api/ws. It broadcasts UI events
-// (operation outcomes, error alerts, and later now playing, outages, filler
-// requests) to every connected panel (§6, §6.5 of the design).
+// (operation outcomes, error alerts, now playing, outages, plan warnings)
+// to every connected panel (§6, §6.5 of the design).
 //
 // Every event is a JSON object with the envelope
 //

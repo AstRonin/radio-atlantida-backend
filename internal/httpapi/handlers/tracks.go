@@ -205,7 +205,7 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		Method:      http.MethodDelete,
 		Path:        "/api/tracks/{id}",
 		Summary:     "Delete a track",
-		Description: "Removes the track from the library (the file is not touched). Refused while a clock filler pool holds it (track_in_use, with used_by), and for a track with play history or in the track plan (track_has_history).",
+		Description: "Removes the track from the library (the file is not touched). Refused while a clock insert or a one-time insert of the plan uses it (track_in_use, with used_by), and for a track with play history or in the track plan (track_has_history).",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *idInput) (*struct{}, error) {

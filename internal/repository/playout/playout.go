@@ -118,9 +118,9 @@ WHERE planned_start_utc >= $1 AND planned_start_utc < $2 AND status = 'queued'`,
 // Start moves a planned or queued item to the play log (§4.1): one
 // statement deletes the plan row and inserts the log row, so it is atomic
 // without an explicit transaction. Until its end is recorded, the row
-// assumes the item plays its planned length. The artist is copied for
-// artist separation. A repeated start finds no plan row and changes
-// nothing; uq_play_log_scheduled_item_id guards the rest.
+// assumes the item plays its planned length. The artist is copied for the
+// artist interval of play rules. A repeated start finds no plan row and
+// changes nothing; uq_play_log_scheduled_item_id guards the rest.
 func (s *Store) Start(ctx context.Context, itemID uint64, at time.Time) (bool, error) {
 	tag, err := s.q.Exec(ctx, `WITH moved AS (
     DELETE FROM scheduled_items

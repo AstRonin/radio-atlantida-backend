@@ -54,8 +54,8 @@ type MissedItemList struct {
 type RescheduleBody struct {
 	TargetHourStartUTC time.Time `json:"target_hour_start_utc" doc:"Start of a future station hour within the track plan."`
 	Placement          string    `json:"placement" enum:"start,end,fixed"`
-	FixedMinute        *int      `json:"fixed_minute,omitempty" minimum:"0" maximum:"59" doc:"Required for placement fixed."`
-	FixedToleranceMS   *int      `json:"fixed_tolerance_ms,omitempty" minimum:"0" maximum:"600000" doc:"Start tolerance of a fixed placement; default rotation.default_fixed_tolerance_ms."`
+	OffsetMS           *int      `json:"offset_ms,omitempty" minimum:"0" maximum:"3599000" multipleOf:"1000" doc:"Target start of placement fixed, whole seconds; required for it."`
+	ToleranceMS        *int      `json:"tolerance_ms,omitempty" minimum:"0" maximum:"600000" doc:"Start tolerance of a fixed placement; default rotation.default_fixed_tolerance_ms."`
 }
 
 // Outage is a broadcast interruption (§7.1).

@@ -22,7 +22,6 @@ const (
 	ComponentAPI        Component = "api"
 	ComponentDB         Component = "db"
 	ComponentRotation   Component = "rotation"
-	ComponentFiller     Component = "filler"
 	ComponentLiquidsoap Component = "liquidsoap"
 	ComponentIcecast    Component = "icecast"
 	ComponentWebRTC     Component = "webrtc"

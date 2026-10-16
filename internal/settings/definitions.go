@@ -50,7 +50,6 @@ const (
 	GroupStream     Group = "stream"
 	GroupLiquidsoap Group = "liquidsoap"
 	GroupRotation   Group = "rotation"
-	GroupFiller     Group = "filler"
 	GroupOutage     Group = "outage"
 	GroupRetention  Group = "retention"
 	GroupPlayout    Group = "playout"
@@ -124,16 +123,11 @@ var (
 	LiquidsoapControlPort  = Key[int]{"liquidsoap.control_port"}
 	LiquidsoapMediaRoot    = Key[string]{"liquidsoap.media_root"}
 
-	RotationGridHorizonDays       = Key[int]{"rotation.grid_horizon_days"}
-	RotationPlanHorizonHours      = Key[int]{"rotation.plan_horizon_hours"}
-	RotationLookaheadItems        = Key[int]{"rotation.lookahead_items"}
-	RotationDurationToleranceMS   = Key[int]{"rotation.default_duration_tolerance_ms"}
-	RotationFixedToleranceMS      = Key[int]{"rotation.default_fixed_tolerance_ms"}
-	RotationMinFillerGapMS        = Key[int]{"rotation.min_filler_gap_ms"}
-	RotationMaxRelaxedToleranceMS = Key[int]{"rotation.max_relaxed_tolerance_ms"}
-
-	FillerFallbackKey             = Key[FillerFallback]{"filler.fallback"}
-	FillerReminderDeadlineMinutes = Key[int]{"filler.reminder_deadline_minutes"}
+	RotationGridHorizonDays  = Key[int]{"rotation.grid_horizon_days"}
+	RotationPlanHorizonHours = Key[int]{"rotation.plan_horizon_hours"}
+	RotationLookaheadItems   = Key[int]{"rotation.lookahead_items"}
+	RotationFixedToleranceMS = Key[int]{"rotation.default_fixed_tolerance_ms"}
+	RotationMinGapMS         = Key[int]{"rotation.min_gap_ms"}
 
 	OutageHeartbeatTimeoutSeconds = Key[int]{"outage.heartbeat_timeout_seconds"}
 	OutageIcecastCheckSeconds     = Key[int]{"outage.icecast_check_interval_seconds"}
@@ -164,28 +158,6 @@ const (
 	SecretIcecastSourcePassword     = "stream.icecast_source_password"
 	SecretLiquidsoapControlUser     = "liquidsoap.control_user"
 	SecretLiquidsoapControlPassword = "liquidsoap.control_password"
-)
-
-// FillerFallback is the global fallback filler mode: used when a clock has
-// no default filler mode of its own, for example when its pool is empty or
-// a filler reminder expires (§4, §7). ask and pool are not allowed, because
-// they would fall back to themselves.
-//
-// The source is not checked against the library here: a playlist or artist
-// deleted later leaves the fallback pointing at nothing, and the filler
-// treats it as random.
-type FillerFallback struct {
-	// Mode is random, playlist, or artist.
-	Mode string `json:"mode"`
-	// SourceID is the playlist (mode playlist) or artist (mode artist).
-	SourceID *uint64 `json:"source_id,omitempty"`
-}
-
-// Filler fallback modes.
-const (
-	FillerRandom   = "random"
-	FillerPlaylist = "playlist"
-	FillerArtist   = "artist"
 )
 
 // Registry holds the definitions, in a fixed order.
@@ -246,23 +218,18 @@ func NewRegistry() *Registry {
 	r.add(intDef(RotationGridHorizonDays, "How far ahead the grid can be planned.", "days", 30, 1, 30), ApplyImmediate, true)
 	r.add(intDef(RotationPlanHorizonHours, "How far ahead the track plan is kept.", "hours", 48, 24, 48), ApplyImmediate, true)
 	r.add(intDef(RotationLookaheadItems, "Items pushed to Liquidsoap ahead of the current one.", "", 3, 2, 3), ApplyImmediate, true)
-	r.add(intDef(RotationDurationToleranceMS, "Default duration tolerance of a new clock element.", "ms", 30000, 0, 600000), ApplyImmediate, false)
-	r.add(intDef(RotationFixedToleranceMS, "Default start tolerance of a new fixed clock element.", "ms", 60000, 0, 600000), ApplyImmediate, false)
-	r.add(intDef(RotationMinFillerGapMS, "Shortest gap in a segment that gets filler; a smaller gap is left.", "ms", 10000, 0, 120000), ApplyImmediate, true)
-	r.add(intDef(RotationMaxRelaxedToleranceMS, "Emergency: how far the duration tolerance of an element may be relaxed when no track fits.", "ms", 120000, 0, 600000), ApplyImmediate, true)
-
-	// Filler (§7).
-	r.add(fillerFallbackDef(), ApplyImmediate, true)
-	r.add(intDef(FillerReminderDeadlineMinutes, "Deadline of a filler reminder, before air time.", "minutes", 120, 5, 1440), ApplyImmediate, true)
+	r.add(intDef(RotationFixedToleranceMS, "Default start tolerance of a new timed insert.", "ms", 60000, 0, 600000), ApplyImmediate, false)
+	r.add(intDef(RotationMinGapMS, "Shortest gap between inserts that gets music; a smaller gap is left.", "ms", 10000, 0, 120000), ApplyImmediate, true)
 
 	// Outage detection (§7.1).
 	r.add(intDef(OutageHeartbeatTimeoutSeconds, "Liquidsoap callback and control link heartbeat timeout.", "seconds", 10, 2, 300), ApplyImmediate, false)
 	r.add(intDef(OutageIcecastCheckSeconds, "Icecast mount check interval.", "seconds", 5, 1, 300), ApplyImmediate, false)
 	r.add(intDef(OutageFailedChecks, "Consecutive failed checks before an outage is opened.", "", 2, 1, 10), ApplyImmediate, false)
 
-	// Retention (§4.1). The play log must cover the separation window
-	// (72 hours by default).
-	r.add(intDef(RetentionPlayLogDays, "Days aired history is kept. Open missed items are kept until resolved.", "days", 10, 3, 365), ApplyImmediate, false)
+	// Retention (§4.1). The play log must cover the longest interval of the
+	// play rules ("Music rotation": 72 hours by default); serve guards it.
+	r.add(intDef(RetentionPlayLogDays, "Days aired history is kept; at least the longest interval of the play rules. Open missed items are kept until resolved.",
+		"days", 10, 3, 365), ApplyImmediate, false)
 	r.add(intDef(RetentionLogDays, "Days application log files and finished operations are kept.", "days", 10, 1, 365), ApplyImmediate, false)
 
 	// Playout (§8.6).
@@ -476,44 +443,6 @@ func optionalIDDef(k Key[*uint64], desc string) *Definition {
 	}
 }
 
-func fillerFallbackDef() *Definition {
-	k := FillerFallbackKey
-	return &Definition{
-		Key: k.name, Type: TypeObject,
-		Description: `Global fallback filler mode, used when a clock has no default filler mode: ` +
-			`{"mode": "random"}, or {"mode": "playlist" or "artist", "source_id": <id>}.`,
-		Default: FillerFallback{Mode: FillerRandom},
-		parse: func(raw json.RawMessage) (any, error) {
-			var v struct {
-				Mode     *string `json:"mode"`
-				SourceID *uint64 `json:"source_id"`
-			}
-			if isNull(raw) || bytes.TrimSpace(raw)[0] != '{' {
-				return nil, invalid(k.name, RuleType, "must be an object")
-			}
-			if err := decodeStrict(raw, &v); err != nil {
-				if name, ok := unknownField(err); ok {
-					return nil, invalid(k.name, RuleUnknownField, "unknown property "+name)
-				}
-				return nil, invalid(k.name, RuleType, "mode must be a string and source_id an integer")
-			}
-			switch {
-			case v.Mode == nil:
-				return nil, invalid(k.name, RuleRequired, "mode is required")
-			case !slices.Contains([]string{FillerRandom, FillerPlaylist, FillerArtist}, *v.Mode):
-				return nil, invalid(k.name, RuleEnum, "mode must be one of random, playlist, artist")
-			case *v.Mode == FillerRandom && v.SourceID != nil:
-				return nil, invalid(k.name, RuleInvalid, "source_id is not allowed for mode random")
-			case *v.Mode != FillerRandom && v.SourceID == nil:
-				return nil, invalid(k.name, RuleRequired, "source_id is required for mode "+*v.Mode)
-			case v.SourceID != nil && *v.SourceID < 1:
-				return nil, invalid(k.name, RuleRange, "source_id must be 1 or more")
-			}
-			return FillerFallback{Mode: *v.Mode, SourceID: v.SourceID}, nil
-		},
-	}
-}
-
 // decodeStrict decodes exactly one JSON value without unknown properties.
 func decodeStrict(raw json.RawMessage, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -563,17 +492,6 @@ func decodeInt(key string, raw json.RawMessage) (int64, error) {
 
 func isNull(raw json.RawMessage) bool {
 	return len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null"
-}
-
-// unknownField extracts the property name from encoding/json's error for
-// DisallowUnknownFields.
-func unknownField(err error) (string, bool) {
-	const prefix = "json: unknown field "
-	msg := err.Error()
-	if !strings.HasPrefix(msg, prefix) {
-		return "", false
-	}
-	return strings.Trim(strings.TrimPrefix(msg, prefix), `"`), true
 }
 
 func invalid(key string, rule Rule, msg string) *InvalidValueError {

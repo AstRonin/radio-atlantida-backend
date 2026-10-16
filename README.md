@@ -64,7 +64,7 @@ Only these come from the environment (or `.env`, which never overrides variables
 
 ### Admin settings
 
-Every other setting (station timezone, stream output, Liquidsoap, rotation, filler, outage detection, retention, emergency playlist) is defined in code in `internal/settings` with a typed default, limits, and an apply mode (`immediate` or `reconnect`). Only values the manager saves are stored (table `settings`); an unsaved key reads as its default.
+Every other setting (station timezone, stream output, Liquidsoap, rotation, outage detection, retention, emergency playlist) is defined in code in `internal/settings` with a typed default, limits, and an apply mode (`immediate` or `reconnect`). Only values the manager saves are stored (table `settings`); an unsaved key reads as its default.
 
 ```sh
 curl localhost:8090/api/settings                       # every key: value, default, is_default, limits, apply
@@ -76,7 +76,7 @@ A refused value returns `422` with a field error on `value`. Every saved change 
 
 ### Library
 
-Playlist types, playlists, artists, tracks, play rules, and separation rules are edited through the API (`make openapi` writes the full contract to `api/openapi.json`):
+Playlist types, playlists (with their placement rule in clocks), artists, tracks, and play rules are edited through the API (`make openapi` writes the full contract to `api/openapi.json`):
 
 ```sh
 curl localhost:8090/api/playlist-types                       # music, jingle, news, segment + custom types
@@ -90,7 +90,7 @@ curl -o /dev/null -w '%{http_code}\n' -H 'Range: bytes=0-99' localhost:8090/api/
 - A track is registered by its path relative to `MEDIA_ROOT` (forward slashes, no `..`, no absolute paths). If the file exists and `ffprobe` is on `PATH`, duration, format, bitrate, and sample rate that were left out are read from it. The runtime image has ffprobe; on a development host without it the backend logs one warning at startup and stores the metadata as entered.
 - `GET /api/tracks/{id}/audio` streams the file for the panel's preview player (Range requests, no request timeout). It never reaches the air or the play log.
 - Deletes that would break something are refused with `409` and a stable code (`playlist_type_in_use`, `playlist_in_use`, `play_rule_in_use`, `track_has_history`, ...); `used_by` names the blocking playlists, tracks, or clocks.
-- A separation interval is at most the play log retention (`retention.play_log_days` × 24 hours), because separation is checked against aired history.
+- A play rule interval (track or artist) is at most the play log retention (`retention.play_log_days` in minutes), because it is checked against aired history; separation is the play rule "Music rotation".
 
 ## Make targets
 

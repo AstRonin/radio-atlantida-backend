@@ -30,6 +30,9 @@ func tod(s string) *TimeOfDay {
 	return &t
 }
 
+// testMaxInterval is a 10-day retention in minutes.
+const testMaxInterval = 10 * 1440
+
 func TestValidate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -54,11 +57,24 @@ func TestValidate(t *testing.T) {
 		{"weekday twice", RuleInput{Name: "Bad", Weekdays: []int{2, 2}}, "weekdays", validation.Invalid},
 		{"interval 0", RuleInput{Name: "Bad", MinIntervalMinutes: new(0)}, "min_interval_minutes", validation.Range},
 		{"per hour 0", RuleInput{Name: "Bad", MaxPerHour: new(0)}, "max_per_hour", validation.Range},
+		{"artist interval alone", RuleInput{Name: "Artists", ArtistMinIntervalMinutes: new(120)}, "-", ""},
+		{"artist interval 0", RuleInput{Name: "Bad", ArtistMinIntervalMinutes: new(0)}, "artist_min_interval_minutes", validation.Range},
+		{"interval at retention", RuleInput{Name: "Long", MinIntervalMinutes: new(testMaxInterval)}, "-", ""},
+		{
+			"interval beyond retention",
+			RuleInput{Name: "Long", MinIntervalMinutes: new(testMaxInterval + 1)},
+			"min_interval_minutes", validation.IntervalBeyondRetention,
+		},
+		{
+			"artist interval beyond retention",
+			RuleInput{Name: "Long", ArtistMinIntervalMinutes: new(testMaxInterval + 1)},
+			"artist_min_interval_minutes", validation.IntervalBeyondRetention,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Validate(tt.in)
+			_, err := Validate(tt.in, testMaxInterval)
 			if tt.field == "-" {
 				require.NoError(t, err)
 				return
@@ -73,7 +89,7 @@ func TestValidate(t *testing.T) {
 func TestValidateNormalises(t *testing.T) {
 	t.Parallel()
 	in := []int{7, 1, 3}
-	out, err := Validate(RuleInput{Name: " Weekend ", Weekdays: in, Notes: " note "})
+	out, err := Validate(RuleInput{Name: " Weekend ", Weekdays: in, Notes: " note "}, testMaxInterval)
 	require.NoError(t, err)
 	require.Equal(t, "Weekend", out.Name)
 	require.Equal(t, "note", out.Notes)

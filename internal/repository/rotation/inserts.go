@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
@@ -48,26 +47,32 @@ func (s *Store) missed(ctx context.Context, id uint64, query string) (rotation.M
 }
 
 type insertRow struct {
-	ID               uint64    `db:"id"`
-	HourStart        time.Time `db:"hour_start_utc"`
-	TrackID          uint64    `db:"track_id"`
-	MissedID         *uint64   `db:"missed_id"`
-	Placement        string    `db:"placement"`
-	FixedMinute      *int      `db:"fixed_minute"`
-	FixedToleranceMS int       `db:"fixed_tolerance_ms"`
+	ID          uint64    `db:"id"`
+	HourStart   time.Time `db:"hour_start_utc"`
+	TrackID     uint64    `db:"track_id"`
+	MissedID    *uint64   `db:"missed_id"`
+	Placement   string    `db:"placement"`
+	OffsetMS    *int32    `db:"offset_ms"`
+	ToleranceMS int32     `db:"tolerance_ms"`
 }
 
 func (r insertRow) domain() rotation.Insert {
-	return rotation.Insert{
+	out := rotation.Insert{
 		ID: r.ID, HourStart: r.HourStart.UTC(), TrackID: r.TrackID, MissedID: r.MissedID,
-		Placement: clocks.Placement(r.Placement), FixedMinute: r.FixedMinute, FixedToleranceMS: r.FixedToleranceMS,
+		Placement: rotation.Placement(r.Placement), ToleranceMS: int(r.ToleranceMS),
 	}
+	if r.OffsetMS != nil {
+		out.OffsetMS = new(int(*r.OffsetMS))
+	}
+	return out
 }
+
+const insertColumns = `id, hour_start_utc, track_id, missed_id, placement, offset_ms, tolerance_ms`
 
 // Inserts returns the inserts of the hour, in ID order
 // (ix_hour_inserts_hour_start_utc).
 func (s *Store) Inserts(ctx context.Context, hourStart time.Time) ([]rotation.Insert, error) {
-	rows, err := s.q.Query(ctx, `SELECT id, hour_start_utc, track_id, missed_id, placement, fixed_minute, fixed_tolerance_ms
+	rows, err := s.q.Query(ctx, `SELECT `+insertColumns+`
 FROM hour_inserts WHERE hour_start_utc = $1 ORDER BY id`, hourStart)
 	if err != nil {
 		return nil, fmt.Errorf("select hour inserts: %w", err)
@@ -79,12 +84,25 @@ FROM hour_inserts WHERE hour_start_utc = $1 ORDER BY id`, hourStart)
 	return out, nil
 }
 
+// Insert returns one insert (pk_hour_inserts), or rotation.ErrInsertNotFound.
+func (s *Store) Insert(ctx context.Context, id uint64) (rotation.Insert, error) {
+	rows, err := s.q.Query(ctx, `SELECT `+insertColumns+` FROM hour_inserts WHERE id = $1`, id)
+	if err != nil {
+		return rotation.Insert{}, fmt.Errorf("select hour insert %d: %w", id, err)
+	}
+	ins, err := db.CollectOne(rows, insertRow.domain, rotation.ErrInsertNotFound)
+	if err != nil && !errors.Is(err, rotation.ErrInsertNotFound) {
+		return rotation.Insert{}, fmt.Errorf("scan hour insert %d: %w", id, err)
+	}
+	return ins, err
+}
+
 // CreateInsert stores an insert.
 func (s *Store) CreateInsert(ctx context.Context, ins rotation.Insert) (uint64, error) {
 	var id uint64
-	err := s.q.QueryRow(ctx, `INSERT INTO hour_inserts (hour_start_utc, track_id, missed_id, placement, fixed_minute, fixed_tolerance_ms)
+	err := s.q.QueryRow(ctx, `INSERT INTO hour_inserts (hour_start_utc, track_id, missed_id, placement, offset_ms, tolerance_ms)
 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-		ins.HourStart, ins.TrackID, ins.MissedID, string(ins.Placement), ins.FixedMinute, ins.FixedToleranceMS).Scan(&id)
+		ins.HourStart, ins.TrackID, ins.MissedID, string(ins.Placement), ins.OffsetMS, ins.ToleranceMS).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert hour insert: %w", err)
 	}

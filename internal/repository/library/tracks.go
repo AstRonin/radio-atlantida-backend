@@ -484,8 +484,8 @@ func (s *Tracks) SetPlaylists(ctx context.Context, id uint64, playlistIDs []uint
 }
 
 // Delete removes a track; its memberships and play rule links go with it
-// (CASCADE). The play log, the track plan, and clock filler pools refuse it
-// (RESTRICT).
+// (CASCADE). The play log, the track plan, clock inserts, and one-time
+// inserts refuse it (RESTRICT).
 func (s *Tracks) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM tracks WHERE id = ?`, id)
 	if res.Error != nil {
@@ -497,16 +497,42 @@ func (s *Tracks) Delete(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// Users returns the clocks whose filler pool holds the track (uses
-// ix_clock_filler_pool_track_id).
+// usersOfTracks lists the clocks with an insert of each track and the
+// one-time inserts of each track, named by their hour (UTC), at most $2 per
+// track (ix_clock_inserts_track_id, ix_hour_inserts_track_id).
+const usersOfTracks = `
+SELECT track_id, kind, id, name
+FROM (
+    SELECT u.*, row_number() OVER (PARTITION BY u.track_id ORDER BY u.kind, u.name, u.id) AS n
+    FROM (
+        SELECT DISTINCT i.track_id, 'clock' AS kind, c.id, c.name
+        FROM clock_inserts i JOIN clocks c ON c.id = i.clock_id
+        WHERE i.track_id IN ?
+        UNION ALL
+        SELECT h.track_id, 'hour_insert' AS kind, h.id, to_char(h.hour_start_utc AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"') AS name
+        FROM hour_inserts h
+        WHERE h.track_id IN ?
+    ) u
+) n
+WHERE n <= ?
+ORDER BY track_id, n`
+
+type trackUserRow struct {
+	TrackID uint64
+	Kind    string
+	ID      uint64
+	Name    string
+}
+
+// Users returns the clocks with an insert of the track and its one-time
+// inserts, at most limit.
 func (s *Tracks) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
-	var rows []refRow
-	err := s.g.WithContext(ctx).Raw(`
-SELECT 'clock' AS kind, c.id, c.name
-FROM clocks c
-WHERE EXISTS (SELECT 1 FROM clock_filler_pool p WHERE p.clock_id = c.id AND p.track_id = ?)
-ORDER BY c.name, c.id
-LIMIT ?`, id, limit).Scan(&rows).Error
+	var users []trackUserRow
+	err := s.g.WithContext(ctx).Raw(usersOfTracks, []uint64{id}, []uint64{id}, limit).Scan(&users).Error
+	rows := make([]refRow, len(users))
+	for i, u := range users {
+		rows[i] = refRow{Kind: u.Kind, ID: u.ID, Name: u.Name}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("select users of track %d: %w", id, err)
 	}
@@ -517,7 +543,7 @@ LIMIT ?`, id, limit).Scan(&rows).Error
 // one statement; their memberships and play rule links go with them
 // (CASCADE). Each NOT EXISTS is an index lookup: ix_play_log_track_id_started_at,
 // ix_scheduled_items_track_id_planned_start_utc, ix_hour_inserts_track_id,
-// ix_clock_filler_pool_track_id. A reference committed after the
+// ix_clock_inserts_track_id. A reference committed after the
 // statement's snapshot still fails it on the foreign key (RESTRICT).
 //
 // EXPLAIN ANALYZE, PostgreSQL 17, 30 000 tracks, 10 000 play log rows,
@@ -532,7 +558,7 @@ WHERE t.id IN ?
   AND NOT EXISTS (SELECT 1 FROM play_log p WHERE p.track_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM scheduled_items i WHERE i.track_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM hour_inserts h WHERE h.track_id = t.id)
-  AND NOT EXISTS (SELECT 1 FROM clock_filler_pool f WHERE f.track_id = t.id)
+  AND NOT EXISTS (SELECT 1 FROM clock_inserts c WHERE c.track_id = t.id)
 RETURNING t.id`, ids).Scan(&deleted).Error
 	if err != nil {
 		return nil, deleteError("delete tracks", err)
@@ -541,8 +567,8 @@ RETURNING t.id`, ids).Scan(&deleted).Error
 }
 
 // Blockers returns the title of each existing track of ids, whether its
-// history refers to it, and the clocks whose filler pool holds it (at most
-// limit per track, in name order).
+// history refers to it, and the clocks and one-time inserts that use it (at
+// most limit per track).
 func (s *Tracks) Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]library.TrackBlockers, error) {
 	g := s.g.WithContext(ctx)
 	var tracks []struct {
@@ -553,28 +579,14 @@ func (s *Tracks) Blockers(ctx context.Context, ids []uint64, limit int) (map[uin
 	err := g.Raw(`
 SELECT t.id, t.title,
        EXISTS (SELECT 1 FROM play_log p WHERE p.track_id = t.id)
-       OR EXISTS (SELECT 1 FROM scheduled_items i WHERE i.track_id = t.id)
-       OR EXISTS (SELECT 1 FROM hour_inserts h WHERE h.track_id = t.id) AS history
+       OR EXISTS (SELECT 1 FROM scheduled_items i WHERE i.track_id = t.id) AS history
 FROM tracks t
 WHERE t.id IN ?`, ids).Scan(&tracks).Error
 	if err != nil {
 		return nil, fmt.Errorf("select tracks kept: %w", err)
 	}
-	var users []struct {
-		TrackID uint64
-		Kind    string
-		ID      uint64
-		Name    string
-	}
-	err = g.Raw(`
-SELECT track_id, 'clock' AS kind, id, name
-FROM (
-    SELECT f.track_id, c.id, c.name, row_number() OVER (PARTITION BY f.track_id ORDER BY c.name, c.id) AS n
-    FROM (SELECT DISTINCT clock_id, track_id FROM clock_filler_pool WHERE track_id IN ?) f
-    JOIN clocks c ON c.id = f.clock_id
-) u
-WHERE n <= ?
-ORDER BY track_id, n`, ids, limit).Scan(&users).Error
+	var users []trackUserRow
+	err = g.Raw(usersOfTracks, ids, ids, limit).Scan(&users).Error
 	if err != nil {
 		return nil, fmt.Errorf("select users of tracks kept: %w", err)
 	}

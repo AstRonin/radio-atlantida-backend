@@ -49,10 +49,8 @@ import (
 	playoutrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playout"
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
-	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
 	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
-	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
@@ -128,7 +126,7 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	}, time.Now)
 	clocksSvc := clocks.NewService(d, clocksrepo.New(d), clocksrepo.NewCheck(d.Pool), gridSvc,
 		func(context.Context) (clocks.Settings, error) {
-			return clocks.Settings{DurationToleranceMS: 30000, FixedToleranceMS: 60000, GridHorizonDays: 30}, nil
+			return clocks.Settings{FixedToleranceMS: 60000, GridHorizonDays: 30}, nil
 		}, time.Now)
 	hub := ws.NewHub(log)
 	pool := workerpool.New(1, 4)
@@ -137,9 +135,8 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	rotationSvc := rotation.NewService(d, rotationrepo.New(d.Pool), clocksSvc, gridSvc,
 		func(context.Context) (rotation.PlanSettings, error) {
 			return rotation.PlanSettings{ // setting defaults
-				Location: stationTZ(t), PlanHorizonHours: 48, ReminderDeadline: 2 * time.Hour,
-				Fallback:                clocks.Filler{Mode: clocks.FillerRandom},
-				Build:                   rotation.Settings{MinFillerGapMS: 10000, MaxRelaxedToleranceMS: 120000},
+				Location: stationTZ(t), PlanHorizonHours: 48,
+				Build:                   rotation.Settings{MinGapMS: 10000},
 				Freeze:                  5 * time.Minute,
 				DefaultFixedToleranceMS: 60000,
 			}, nil
@@ -202,11 +199,10 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	})
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
 		Log: log, DB: d.Pool, Logs: logging.NewFileReader(t.TempDir()), Operations: tracker,
-		Rotation:  rotationSvc,
-		Library:   svc,
-		PlayRules: playrules.NewService(d, playrulesrepo.New(d.Pool)),
-		Separation: separation.NewService(separationrepo.New(d), func(context.Context) (int, error) {
-			return 10 * 24, nil // retention.play_log_days default
+		Rotation: rotationSvc,
+		Library:  svc,
+		PlayRules: playrules.NewService(d, playrulesrepo.New(d.Pool), func(context.Context) (int, error) {
+			return 10 * 24 * 60, nil // retention.play_log_days default
 		}),
 		Clocks:    clocksSvc,
 		Grid:      gridSvc,
@@ -508,11 +504,10 @@ func TestLibraryDeleteRefusals(t *testing.T) {
 	pooled, aired, plain := newTrack("Pooled", abba.ID), newTrack("Aired", gone.ID), newTrack("Plain", nil)
 
 	// Fixtures for what later phases create: a clock that uses the playlist
-	// and has a filler pool, and a play log row.
+	// and plays a track as an insert, and a play log row.
 	clock := a.exec(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
-	element := a.exec(`INSERT INTO clock_elements (clock_id, position, nominal_duration_ms) VALUES ($1, 0, 200000) RETURNING id`, clock)
-	a.exec(`INSERT INTO clock_element_playlists (clock_element_id, playlist_id) VALUES ($1, $2) RETURNING clock_element_id`, element, pop.ID)
-	a.exec(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 0) RETURNING id`, clock, pooled.ID)
+	a.exec(`INSERT INTO clock_playlists (clock_id, playlist_id, position) VALUES ($1, $2, 0) RETURNING clock_id`, clock, pop.ID)
+	a.exec(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 1800000, $2) RETURNING id`, clock, pooled.ID)
 	now := time.Now().UTC()
 	a.exec(`INSERT INTO play_log (track_id, artist_id, status, planned_start_utc, started_at, actual_duration_ms)
 	        VALUES ($1, $2, 'aired', $3, $3, 200000) RETURNING id`, aired.ID, gone.ID, now)
@@ -533,11 +528,6 @@ func TestLibraryDeleteRefusals(t *testing.T) {
 		"title": "Aired", "file_path": "music/Aired.mp3", "type_id": music, "playlist_ids": []uint64{},
 	}, nil)
 	a.problem(http.StatusConflict, errcodes.ArtistHasHistory, http.MethodDelete, fmt.Sprintf("/api/artists/%d", gone.ID), nil)
-
-	// A clock's default filler refers to an artist.
-	a.exec(`UPDATE clocks SET default_filler_mode = 'artist', default_filler_artist_id = $1 WHERE id = $2 RETURNING id`, abba.ID, clock)
-	p = a.problem(http.StatusConflict, errcodes.ArtistInUse, http.MethodDelete, fmt.Sprintf("/api/artists/%d", abba.ID), nil)
-	require.Equal(t, []string{fmt.Sprintf("track:%d:Pooled", pooled.ID), fmt.Sprintf("clock:%d:Morning", clock)}, refsOf(p))
 
 	// Play rules: in use while applied to a track or a playlist.
 	var rule dto.PlayRule
@@ -587,6 +577,16 @@ func TestLibraryPlayRules(t *testing.T) {
 	require.Nil(t, updated.Weekdays)
 	require.Equal(t, 10, *updated.MinIntervalMinutes)
 
+	// The artist interval, capped at the play log retention (10 days).
+	var artists dto.PlayRule
+	a.ok(http.StatusCreated, http.MethodPost, "/api/play-rules", map[string]any{"name": "Artists", "artist_min_interval_minutes": 120}, &artists)
+	require.Equal(t, 120, *artists.ArtistMinInterval)
+	require.Nil(t, artists.MinIntervalMinutes)
+	a.fieldError("artist_min_interval_minutes", errcodes.IntervalBeyondRetention, http.MethodPost, "/api/play-rules",
+		map[string]any{"name": "Long", "artist_min_interval_minutes": 10*1440 + 1})
+	a.fieldError("min_interval_minutes", errcodes.IntervalBeyondRetention, http.MethodPost, "/api/play-rules",
+		map[string]any{"name": "Long", "min_interval_minutes": 10*1440 + 1})
+
 	var pop dto.Playlist
 	a.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": "Pop", "type_id": music}, &pop)
 	var targets dto.PlayRule
@@ -608,31 +608,36 @@ func TestLibraryPlayRules(t *testing.T) {
 
 	var list dto.PlayRuleList
 	a.ok(http.StatusOK, http.MethodGet, "/api/play-rules", nil, &list)
-	require.Len(t, list.Items, 1)
-	require.Equal(t, 1, list.Items[0].PlaylistCount)
+	var names []string
+	for _, r := range list.Items {
+		names = append(names, r.Name)
+	}
+	require.Equal(t, []string{"Artists", "Music rotation", "Night"}, names, "name order; Music rotation comes from migration 0013")
+	require.Equal(t, 1, list.Items[2].PlaylistCount)
+	require.Equal(t, 72*60, *list.Items[1].MinIntervalMinutes)
 }
 
-func TestLibrarySeparationRules(t *testing.T) {
+// A playlist carries its placement rule in clocks (§7.2).
+func TestLibraryPlaylistRule(t *testing.T) {
 	a := newLibraryAPI(t)
+	music := a.typeID("music")
+	var pl dto.Playlist
+	a.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": "Pop", "type_id": music}, &pl)
+	require.Equal(t, "fill", pl.ClockRule, "the default")
+	require.Nil(t, pl.ClockCount)
 
-	var list dto.SeparationRuleList
-	a.ok(http.StatusOK, http.MethodGet, "/api/separation-rules", nil, &list)
-	require.Len(t, list.Items, 2)
-	require.Equal(t, "track", list.Items[0].Scope)
-	require.Equal(t, 72, list.Items[0].MinIntervalHours)
+	var saved dto.PlaylistSaved
+	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d", pl.ID), map[string]any{
+		"name": "Pop", "type_id": music, "clock_rule": "spread", "clock_count": 3,
+	}, &saved)
+	require.Equal(t, "spread", saved.ClockRule)
+	require.Equal(t, 3, *saved.ClockCount)
+	require.Nil(t, saved.BuildOperationID, "no clock uses it")
 
-	var r dto.SeparationRule
-	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/separation-rules/%d", list.Items[0].ID),
-		map[string]any{"min_interval_hours": 96, "notes": "from the reference software"}, &r)
-	require.Equal(t, 96, r.MinIntervalHours)
-	require.Equal(t, "from the reference software", r.Notes)
-
-	a.fieldError("min_interval_hours", errcodes.Range, http.MethodPut, fmt.Sprintf("/api/separation-rules/%d", r.ID),
-		map[string]any{"min_interval_hours": 241})
-	a.fieldError("min_interval_hours", errcodes.Range, http.MethodPut, fmt.Sprintf("/api/separation-rules/%d", r.ID),
-		map[string]any{"min_interval_hours": 0})
-	a.problem(http.StatusNotFound, errcodes.SeparationRuleNotFound, http.MethodPut, "/api/separation-rules/9999",
-		map[string]any{"min_interval_hours": 72})
+	path := fmt.Sprintf("/api/playlists/%d", pl.ID)
+	a.fieldError("clock_count", errcodes.ClockCountRequired, http.MethodPut, path, map[string]any{"name": "Pop", "type_id": music, "clock_rule": "spread"})
+	a.fieldError("clock_count", errcodes.ClockCountNotAllowed, http.MethodPut, path, map[string]any{"name": "Pop", "type_id": music, "clock_count": 2})
+	a.fieldError("clock_rule", errcodes.Enum, http.MethodPut, path, map[string]any{"name": "Pop", "type_id": music, "clock_rule": "often"})
 }
 
 // The preview streams the file with Range support; the client never sends
@@ -693,7 +698,7 @@ func TestLibraryDeleteTracks(t *testing.T) {
 	}
 	one, pooled, two := newTrack("One"), newTrack("Pooled"), newTrack("Two")
 	clock := a.exec(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
-	a.exec(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 0) RETURNING id`, clock, pooled.ID)
+	a.exec(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 0, $2) RETURNING id`, clock, pooled.ID)
 
 	var res dto.DeleteTracksResult
 	a.ok(http.StatusOK, http.MethodPost, "/api/tracks/delete", map[string]any{"track_ids": []uint64{one.ID, pooled.ID, two.ID}}, &res)

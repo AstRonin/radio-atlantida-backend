@@ -20,14 +20,14 @@ const (
 	rebuildTimeout = 5 * time.Minute
 )
 
-// rebuild is a queued operation of the planner: a clock_build, or a
-// reschedule when reschedule is set.
+// rebuild is a queued operation of the planner: a clock_build, or an
+// insert operation (reschedule, hour_insert) when insert is set.
 type rebuild struct {
 	opID uint64
 	// force rebuilds the hours in the range even when they are current.
 	force *Range
-	// reschedule places a missed item (operation kind reschedule).
-	reschedule *RescheduleRequest
+	// insert adds or removes a one-time insert of one hour.
+	insert *insertOp
 }
 
 // Rebuild starts a clock_build operation that syncs the plan after a clock
@@ -69,7 +69,7 @@ func (s *Service) enqueueOp(ctx context.Context, r rebuild) {
 	}
 }
 
-// Run is the planner: it runs the queued clock_build operations until ctx
+// Run is the planner: it runs the queued operations until ctx
 // is cancelled. Everything queued when a sync starts is merged into it, and
 // each operation gets the outcome of that sync. It is the only consumer of
 // the queue; serve owns it in its errgroup. Operations still queued at
@@ -99,19 +99,19 @@ func (s *Service) drain() []rebuild {
 	}
 }
 
-// runBatch runs the reschedules of a batch one by one, then the clock
-// builds as one sync.
+// runBatch runs the insert operations of a batch one by one, then the
+// clock builds as one sync.
 func (s *Service) runBatch(ctx context.Context, batch []rebuild) {
 	var force []Range
 	var builds []rebuild
 	for _, r := range batch {
-		if r.reschedule != nil {
+		if r.insert != nil {
 			rctx, cancel := context.WithTimeout(ctx, hourTimeout+dbTimeout)
 			// Execute stores, logs, and publishes the outcome; an error
 			// here means the outcome itself could not be stored, and it is
 			// logged.
 			_ = s.ops.Execute(rctx, r.opID, logging.ComponentRotation, func(ctx context.Context) (string, error) {
-				return s.reschedule(ctx, *r.reschedule)
+				return s.runInsert(ctx, *r.insert)
 			})
 			cancel()
 			continue

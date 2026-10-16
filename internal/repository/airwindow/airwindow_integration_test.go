@@ -60,7 +60,7 @@ VALUES ($1, $2, $3, $4, 180000, 60000, $2 = 'truncated') RETURNING id`, f.track,
 func (f *fixture) planned(status string, start time.Time) uint64 {
 	f.t.Helper()
 	return f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
-VALUES ($1, $2, $3, 180000, 'clock', $4) RETURNING id`, f.clock, f.track, start, status)
+VALUES ($1, $2, $3, 180000, 'fill', $4) RETURNING id`, f.clock, f.track, start, status)
 }
 
 func TestPlayed(t *testing.T) {
@@ -106,9 +106,9 @@ func TestQueued(t *testing.T) {
 	f.planned("queued", m(-1))  // start passed
 	atFrom := f.planned("queued", m(0))
 	f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status, outage_id, missed_at)
-VALUES ($1, $2, $3, 180000, 'clock', 'missed', $4, $3) RETURNING id`, f.clock, f.track, m(1), f.outage)
+VALUES ($1, $2, $3, 180000, 'fill', 'missed', $4, $3) RETURNING id`, f.clock, f.track, m(1), f.outage)
 	f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
-VALUES ($1, $2, $3, 180000, 'clock', 'aired') RETURNING id`, f.clock, f.track, m(2))
+VALUES ($1, $2, $3, 180000, 'fill', 'aired') RETURNING id`, f.clock, f.track, m(2))
 	later := f.planned("planned", m(6))
 	next := f.planned("planned", m(3))
 	f.planned("planned", m(9))
@@ -142,7 +142,7 @@ SELECT $1, 'aired', g, g, 180000, 180000
 FROM generate_series($2::timestamptz - interval '10 days', $2::timestamptz, interval '4 minutes') g`, f.track, hour)
 	require.NoError(t, err)
 	_, err = f.d.Pool.Exec(ctx, `INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
-SELECT $1, $2, g, 180000, 'clock', CASE WHEN g < $3::timestamptz + interval '10 minutes' THEN 'queued' ELSE 'planned' END
+SELECT $1, $2, g, 180000, 'fill', CASE WHEN g < $3::timestamptz + interval '10 minutes' THEN 'queued' ELSE 'planned' END
 FROM generate_series($3::timestamptz, $3::timestamptz + interval '48 hours', interval '4 minutes') g`, f.clock, f.track, hour)
 	require.NoError(t, err)
 	_, err = f.d.Pool.Exec(ctx, `ANALYZE play_log; ANALYZE scheduled_items`)

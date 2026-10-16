@@ -25,14 +25,8 @@ func cueBody(in int, out any, fadeIn, fadeOut int) map[string]any {
 // (docs/phase-22-plan.md §3.3, §3.6).
 func TestTrackCueRebuildsPlannedHours(t *testing.T) {
 	f := newClockFixture(t)
-	filler := f.filler()
 	var saved dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{
-		"name": "Day",
-		"elements": []any{
-			element(f.music, 19), element(f.music, 19), element(f.music, 19, "filler_mode", "random"),
-		},
-	}, &saved)
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("Day"), &saved)
 	f.waitOperation(saved.BuildOperationID)
 	date, weekday, _ := tomorrowNoon(t)
 	var assigned dto.GridAssignResult
@@ -44,20 +38,18 @@ func TestTrackCueRebuildsPlannedHours(t *testing.T) {
 	require.Len(t, items, 4)
 	planned := items[0].TrackID
 
-	// Usage marks: three songs and the filler are planned; the filler is in
-	// no playlist.
+	// Usage marks: the four songs are planned, all from a playlist.
 	var page dto.TrackPage
 	f.ok(http.StatusOK, http.MethodGet, "/api/tracks?in_plan=true&sort=next_planned_at", nil, &page)
 	require.Equal(t, 4, page.Total)
 	require.Equal(t, planned, page.Items[0].ID, "the earliest planned first")
 	require.Equal(t, items[0].PlannedStartUTC, *page.Items[0].NextPlannedAt)
 	f.ok(http.StatusOK, http.MethodGet, "/api/tracks?in_playlist=false&in_plan=true", nil, &page)
-	require.Equal(t, 1, page.Total)
-	require.Equal(t, filler, page.Items[0].ID)
+	require.Zero(t, page.Total)
 	f.ok(http.StatusOK, http.MethodGet, "/api/tracks?in_plan=false", nil, &page)
-	require.Equal(t, 2, page.Total, "the fourth song and the jingle")
+	require.Equal(t, 1, page.Total, "the jingle")
 
-	// A 20 s cut at the start: 18:40 on air, within the ±30 s tolerance.
+	// A 20 s cut at the start: 18:40 on air.
 	f.exec(`UPDATE tracks SET reviewed_at = now() WHERE id = $1 RETURNING id`, planned)
 	var res dto.TrackCueResult
 	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d/cue", planned), cueBody(20000, nil, 1000, 0), &res)
@@ -70,7 +62,9 @@ func TestTrackCueRebuildsPlannedHours(t *testing.T) {
 	for _, it := range f.plan().Items[0].Items {
 		if it.TrackID == planned {
 			require.Equal(t, 20000, it.PlannedInMS, "planned with the new cut")
-			require.Equal(t, 1140000, it.PlannedOutMS)
+			if !it.Truncated {
+				require.Equal(t, 1140000, it.PlannedOutMS)
+			}
 		}
 	}
 

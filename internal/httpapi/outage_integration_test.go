@@ -38,14 +38,10 @@ VALUES ($1, 'missed', $2, 120000, $3, 'open') RETURNING id`, track, yesterday.Ad
 
 func TestMissedItemsRescheduleAndDismiss(t *testing.T) {
 	f := newClockFixture(t)
-	f.filler()
 	news := f.exec(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('News', 'news/n.mp3', $1, 120000) RETURNING id`,
 		f.typeID("news"))
 	var saved dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{
-		"name":     "Day",
-		"elements": []any{element(f.music, 19), element(f.music, 19), element(f.music, 19, "filler_mode", "random")},
-	}, &saved)
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("Day"), &saved)
 	date, weekday, start := tomorrowNoon(t)
 	var assigned dto.GridAssignResult
 	f.ok(http.StatusOK, http.MethodPost, "/api/grid/assign", map[string]any{
@@ -90,7 +86,8 @@ func TestMissedItemsRescheduleAndDismiss(t *testing.T) {
 	f.fieldError("target_hour_start_utc", errcodes.Invalid, http.MethodPost, path, body(start.Add(time.Minute)))
 	f.fieldError("target_hour_start_utc", errcodes.Range, http.MethodPost, path, body(time.Now().UTC().Truncate(time.Hour)))
 	f.fieldError("target_hour_start_utc", errcodes.Invalid, http.MethodPost, path, body(start.Add(time.Hour)))
-	f.fieldError("fixed_minute", errcodes.Required, http.MethodPost, path, body(start, "placement", "fixed"))
+	f.fieldError("offset_ms", errcodes.Required, http.MethodPost, path, body(start, "placement", "fixed"))
+	f.fieldError("offset_ms", errcodes.Invalid, http.MethodPost, path, body(start, "offset_ms", 60000))
 	f.problem(http.StatusNotFound, errcodes.MissedItemNotFound, http.MethodPost, "/api/missed-items/999999/reschedule", body(start))
 
 	// Placed at the start of the hour.
@@ -102,7 +99,9 @@ func TestMissedItemsRescheduleAndDismiss(t *testing.T) {
 	require.Equal(t, news, h.Items[0].TrackID)
 	require.Equal(t, "reschedule", h.Items[0].Source)
 	require.Equal(t, start, h.Items[0].PlannedStartUTC)
-	require.Equal(t, start.Add(2*time.Minute), h.Items[1].PlannedStartUTC, "the clock follows it")
+	require.Equal(t, start.Add(2*time.Minute), h.Items[1].PlannedStartUTC, "the music follows it")
+	require.Equal(t, missed, *h.Inserts[0].MissedID)
+	require.Equal(t, h.Inserts[0].ID, *h.Items[0].HourInsertID)
 	f.ok(http.StatusOK, http.MethodGet, "/api/missed-items?resolution=rescheduled", nil, &list)
 	require.Len(t, list.Items, 1)
 	require.Equal(t, h.Items[0].ID, *list.Items[0].ResolvedItemID)
@@ -120,12 +119,15 @@ func TestMissedItemsRescheduleAndDismiss(t *testing.T) {
 	f.problem(http.StatusConflict, errcodes.MissedItemResolved, http.MethodPost, path, body(start))
 	f.problem(http.StatusConflict, errcodes.MissedItemResolved, http.MethodPost, fmt.Sprintf("/api/missed-items/%d/dismiss", missed), nil)
 
-	// A track that breaks separation in that hour: the operation fails and
+	// A track that breaks a play rule in that hour: the operation fails and
 	// the item stays open.
-	other := f.missedItem(f.tracks[0])
+	early := f.exec(`INSERT INTO play_rules (name, window_from, window_to) VALUES ('Early', '06:00', '07:00') RETURNING id`)
+	f.exec(`INSERT INTO track_play_rules (track_id, rule_id) VALUES ($1, $2) RETURNING track_id`, f.jingle, early)
+	other := f.missedItem(f.jingle)
 	f.ok(http.StatusAccepted, http.MethodPost, fmt.Sprintf("/api/missed-items/%d/reschedule", other), body(start, "placement", "end"), &acc)
 	failed := f.waitFailed(acc.OperationID)
 	require.Contains(t, failed.ErrorMessage, "cannot be placed")
+	require.Contains(t, failed.ErrorMessage, "breaks a play rule")
 	f.ok(http.StatusOK, http.MethodGet, "/api/missed-items", nil, &list)
 	require.Len(t, list.Items, 1)
 	require.Equal(t, other, list.Items[0].ID)

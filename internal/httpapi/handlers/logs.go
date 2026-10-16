@@ -20,7 +20,7 @@ type logFilesOutput struct {
 type readLogInput struct {
 	Name      string `path:"name" pattern:"^app-\\d{4}-\\d{2}-\\d{2}\\.log$" example:"app-2026-10-13.log"`
 	Level     string `query:"level" enum:"DEBUG,INFO,WARN,ERROR" doc:"Minimum level: WARN returns WARN and ERROR entries."`
-	Component string `query:"component" enum:"api,db,rotation,filler,liquidsoap,icecast,webrtc,retention,outage,reconcile,media"`
+	Component string `query:"component" enum:"api,db,rotation,liquidsoap,icecast,webrtc,retention,outage,reconcile,media"`
 	Limit     int    `query:"limit" minimum:"1" maximum:"1000" default:"100"`
 	Offset    int    `query:"offset" minimum:"0" maximum:"100000" default:"0"`
 }

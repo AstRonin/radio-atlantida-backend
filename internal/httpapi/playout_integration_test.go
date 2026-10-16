@@ -169,12 +169,8 @@ func (a *libraryAPI) playLog(where string, args ...any) playLogRow {
 
 func TestPlayoutPushesAndLogs(t *testing.T) {
 	f := newClockFixture(t)
-	f.filler()
 	var saved dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{
-		"name":     "Day",
-		"elements": []any{element(f.music, 19), element(f.music, 19), element(f.music, 19, "filler_mode", "random")},
-	}, &saved)
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("Day"), &saved)
 	date, weekday, start := tomorrowNoon(t)
 	var assigned dto.GridAssignResult
 	f.ok(http.StatusOK, http.MethodPost, "/api/grid/assign", map[string]any{

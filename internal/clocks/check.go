@@ -15,26 +15,26 @@ import (
 // translates by code.
 type WarningCode string
 
-// Warning codes (§6.0, §7.3). They do not block the save.
+// Warning codes of the dry check (§6.0, §7.3). They do not block the save.
+// The sample build adds the warning codes of rotation.
 const (
-	// WarnNoTracks: no track of the element's playlists has a duration.
-	WarnNoTracks WarningCode = "element_no_tracks"
-	// WarnNoFittingTrack: no track lies within nominal ± tolerance.
-	WarnNoFittingTrack WarningCode = "element_no_fitting_track"
-	// WarnFewTracks: fewer fitting tracks than the element draws within the
-	// track separation window, counted from the grid hours of the clock.
-	WarnFewTracks WarningCode = "element_few_tracks"
+	// WarnNoTracks: a playlist of the clock or an insert has no track that
+	// can be planned.
+	WarnNoTracks WarningCode = "playlist_no_tracks"
+	// WarnFewTracks: fewer fill tracks than the clock plays within the
+	// minimum interval of their play rules, counted from its grid hours.
+	WarnFewTracks WarningCode = "fill_few_tracks"
+	// WarnNoIntervalRule: no play rule of a fill playlist sets a minimum
+	// interval, so its tracks may repeat within the hour.
+	WarnNoIntervalRule WarningCode = "fill_no_interval_rule"
 	// WarnBlockedByPlayRules: in some grid hours of the clock, the play
-	// rule windows block every fitting track (§7.3).
-	WarnBlockedByPlayRules WarningCode = "element_blocked_by_play_rules"
-	// WarnSegmentOverflow: the last segment runs past the end of the hour;
-	// the crossing track is cut there (§7).
-	WarnSegmentOverflow WarningCode = "segment_overflow"
+	// rule windows block every track of a rule or insert playlist (§7.3).
+	WarnBlockedByPlayRules WarningCode = "rule_blocked_by_play_rules"
 )
 
-// WarningCodes lists every warning code.
+// WarningCodes lists every warning code of the dry check.
 func WarningCodes() []WarningCode {
-	return []WarningCode{WarnNoTracks, WarnNoFittingTrack, WarnFewTracks, WarnBlockedByPlayRules, WarnSegmentOverflow}
+	return []WarningCode{WarnNoTracks, WarnFewTracks, WarnNoIntervalRule, WarnBlockedByPlayRules}
 }
 
 // WeekdayHour is an hour of the week, station local.
@@ -43,132 +43,188 @@ type WeekdayHour struct {
 	Hour    int
 }
 
-// Warning is a problem the dry check found. Element and Segment are indexes
-// into the saved clock.
+// Warning is a problem the dry check found. PlaylistIndex and InsertIndex
+// are indexes into the saved clock.
 type Warning struct {
-	Code    WarningCode
-	Message string
-	Element *int
-	Segment *int
+	Code          WarningCode
+	Message       string
+	PlaylistIndex *int
+	InsertIndex   *int
 	// Hours are the blocked hours of WarnBlockedByPlayRules.
 	Hours []WeekdayHour
 }
 
-// warnings runs the dry check of a saved clock (§6.0): available tracks per
-// element, their fit to the tolerance, enough tracks for the separation
-// window, play rule windows in the clock's grid hours, and overflow.
-func (s *Service) warnings(ctx context.Context, c Clock, l Layout) ([]Warning, error) {
-	var out []Warning
-	last := l.Segments[len(l.Segments)-1]
-	if last.OverflowMS > 0 {
-		out = append(out, Warning{
-			Code: WarnSegmentOverflow, Segment: new(last.Index),
-			Message: fmt.Sprintf("the elements run %d s past the end of the hour; the crossing track is cut and faded out", (last.OverflowMS+999)/1000),
-		})
-	}
-
+// warnings runs the dry check of a saved clock (§6.0): playable tracks per
+// playlist and insert, enough fill tracks for the minimum interval of their
+// rules, a fill playlist without an interval rule, and play rule windows in
+// the clock's grid hours.
+func (s *Service) warnings(ctx context.Context, c Clock) ([]Warning, error) {
 	var playlists []uint64
-	for _, e := range c.Elements {
-		playlists = append(playlists, e.PlaylistIDs...)
+	for _, p := range c.Playlists {
+		playlists = append(playlists, p.PlaylistID)
+	}
+	for _, ins := range c.Inserts {
+		if ins.PlaylistID != nil {
+			playlists = append(playlists, *ins.PlaylistID)
+		}
 	}
 	cands, err := s.check.Candidates(ctx, uniq(playlists))
 	if err != nil {
 		return nil, fmt.Errorf("read candidates: %w", err)
 	}
-	hours, sepEnd, err := s.gridHours(ctx, c.ID)
+	hours, err := s.gridHours(ctx, c.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	for i, e := range c.Elements {
-		var withDuration, fitting []Candidate
-		for _, t := range cands.Tracks {
-			if !intersects(t.PlaylistIDs, e.PlaylistIDs) || t.DurationMS == nil {
-				continue
-			}
-			withDuration = append(withDuration, t)
-			if abs(*t.DurationMS-e.NominalDurationMS) <= e.DurationToleranceMS {
-				fitting = append(fitting, t)
-			}
-		}
-		switch {
-		case len(withDuration) == 0:
+	var out []Warning
+	var fillTracks []Candidate
+	fillIDs := map[uint64]bool{}
+	for i, p := range c.Playlists {
+		playable := playableOf(cands.Tracks, p.PlaylistID)
+		rule := p.EffectiveRule()
+		if len(playable) == 0 {
 			out = append(out, Warning{
-				Code: WarnNoTracks, Element: new(i),
-				Message: "the element's playlists have no track with a duration",
-			})
-			continue
-		case len(fitting) == 0:
-			out = append(out, Warning{
-				Code: WarnNoFittingTrack, Element: new(i),
-				Message: fmt.Sprintf("no track lasts %s ± %d s", clockTime(e.NominalDurationMS), e.DurationToleranceMS/1000),
+				Code: WarnNoTracks, PlaylistIndex: new(i),
+				Message: "the playlist has no track that can be planned (with a duration)",
 			})
 			continue
 		}
-		if w, ok := fewTracks(c.Elements, i, len(fitting), hours, sepEnd); ok {
+		if rule == RuleFill {
+			for _, t := range playable {
+				if !fillIDs[t.TrackID] {
+					fillIDs[t.TrackID] = true
+					fillTracks = append(fillTracks, t)
+				}
+			}
+			if !hasInterval(cands.PlaylistRules[p.PlaylistID], cands.Rules) {
+				out = append(out, Warning{
+					Code: WarnNoIntervalRule, PlaylistIndex: new(i),
+					Message: "no play rule of the playlist sets a minimum interval; its tracks may repeat within the hour",
+				})
+			}
+			continue
+		}
+		first, last := 0, 59
+		if rule == RuleMiddle {
+			first, last = 25, 35
+		}
+		if w, ok := blockedHours(playable, cands.Rules, hours, first, last); ok {
+			w.PlaylistIndex = new(i)
+			w.Message = fmt.Sprintf("play rules block every track of the playlist in %d hours of the grid; its slot is skipped there", len(w.Hours))
 			out = append(out, w)
 		}
-		if w, ok := blockedHours(e, i, fitting, cands.Rules, hours); ok {
+	}
+	for i, ins := range c.Inserts {
+		if ins.PlaylistID == nil {
+			continue
+		}
+		playable := playableOf(cands.Tracks, *ins.PlaylistID)
+		if len(playable) == 0 {
+			out = append(out, Warning{
+				Code: WarnNoTracks, InsertIndex: new(i),
+				Message: "the insert's playlist has no track that can be planned (with a duration)",
+			})
+			continue
+		}
+		first := max(0, ins.OffsetMS-ins.ToleranceMS) / 60_000
+		last := min(HourMS-1, ins.OffsetMS+ins.ToleranceMS) / 60_000
+		if w, ok := blockedHours(playable, cands.Rules, hours, first, last); ok {
+			w.InsertIndex = new(i)
+			w.Message = fmt.Sprintf("play rules block every track of the insert's playlist in %d hours of the grid; the insert is skipped there", len(w.Hours))
 			out = append(out, w)
 		}
+	}
+	if w, ok := fewTracks(fillTracks, cands.Rules, hours, s.now().UTC()); ok {
+		out = append(out, w)
 	}
 	return out, nil
 }
 
-// gridHours returns the grid hours of the clock within the grid horizon,
-// and the end of the track separation window.
-func (s *Service) gridHours(ctx context.Context, clockID uint64) ([]Hour, time.Time, error) {
+// gridHours returns the grid hours of the clock within the grid horizon.
+func (s *Service) gridHours(ctx context.Context, clockID uint64) ([]Hour, error) {
 	set, err := s.settings(ctx)
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("read clock settings: %w", err)
-	}
-	sepHours, err := s.check.TrackSeparationHours(ctx)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("read track separation: %w", err)
+		return nil, fmt.Errorf("read clock settings: %w", err)
 	}
 	now := s.now().UTC()
 	hours, err := s.grid.ClockHours(ctx, clockID, now, now.AddDate(0, 0, set.GridHorizonDays))
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("read grid hours of clock %d: %w", clockID, err)
+		return nil, fmt.Errorf("read grid hours of clock %d: %w", clockID, err)
 	}
-	return hours, now.Add(time.Duration(sepHours) * time.Hour), nil
+	return hours, nil
 }
 
-// fewTracks warns when an element has fewer fitting tracks than it draws
-// within the track separation window: each track may air once in that
-// window. Elements of the clock with the same playlists draw from the same
-// tracks. Other clocks that share the playlists are not counted.
-func fewTracks(elements []Element, i, fitting int, hours []Hour, sepEnd time.Time) (Warning, bool) {
+func playableOf(tracks []Candidate, playlistID uint64) []Candidate {
+	var out []Candidate
+	for _, t := range tracks {
+		if t.AirMS != nil && slices.Contains(t.PlaylistIDs, playlistID) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func hasInterval(ruleIDs []uint64, rules map[uint64]playrules.RuleInput) bool {
+	return slices.ContainsFunc(ruleIDs, func(id uint64) bool {
+		r, ok := rules[id]
+		return ok && r.MinIntervalMinutes != nil
+	})
+}
+
+// fewTracks warns when the fill playlists have fewer tracks than the clock
+// plays within the minimum interval of their rules: each track may air once
+// in that interval. The interval is the shortest one that covers every fill
+// track; tracks without one are counted as free. The plays per hour come
+// from the average length of the fill tracks. Other clocks that share the
+// playlists are not counted.
+func fewTracks(fill []Candidate, rules map[uint64]playrules.RuleInput, hours []Hour, now time.Time) (Warning, bool) {
+	if len(fill) == 0 {
+		return Warning{}, false
+	}
+	interval, total := 0, 0
+	for _, t := range fill {
+		longest := 0
+		for _, id := range t.RuleIDs {
+			if r, ok := rules[id]; ok && r.MinIntervalMinutes != nil {
+				longest = max(longest, *r.MinIntervalMinutes)
+			}
+		}
+		if longest == 0 {
+			return Warning{}, false // a track that may repeat at once never runs out
+		}
+		if interval == 0 || longest < interval {
+			interval = longest
+		}
+		total += *t.AirMS
+	}
+	end := now.Add(time.Duration(interval) * time.Minute)
 	inWindow := 0
 	for _, h := range hours {
-		if h.StartUTC.Before(sepEnd) {
+		if h.StartUTC.Before(end) {
 			inWindow++
 		}
 	}
-	perHour := 0
-	for _, e := range elements {
-		if slices.Equal(uniq(e.PlaylistIDs), uniq(elements[i].PlaylistIDs)) {
-			perHour++
-		}
-	}
-	draws := perHour * inWindow
-	if fitting >= draws {
+	perHour := (HourMS*len(fill) + total - 1) / total // ceil(hour / average length)
+	plays := perHour * inWindow
+	if len(fill) >= plays {
 		return Warning{}, false
 	}
 	return Warning{
-		Code: WarnFewTracks, Element: new(i),
-		Message: fmt.Sprintf("%d fitting tracks for %d plays within the track separation window; some slots will stay empty",
-			fitting, draws),
+		Code: WarnFewTracks,
+		Message: fmt.Sprintf("%d fill tracks for about %d plays within the minimum interval of their play rules; the hours run short of allowed tracks",
+			len(fill), plays),
 	}, true
 }
 
-// blockedHours warns about the grid hours in which the time windows of the
-// play rules block every fitting track of the element. Only the window and
-// weekdays are checked: the interval and per-hour limits depend on the plan.
-func blockedHours(e Element, i int, fitting []Candidate, rules map[uint64]playrules.RuleInput, hours []Hour) (Warning, bool) {
+// blockedHours finds the grid hours in which the time windows of the play
+// rules block every track at every minute first ... last of the hour. Only
+// the window and weekdays are checked: the interval and per-hour limits
+// depend on the plan.
+func blockedHours(tracks []Candidate, rules map[uint64]playrules.RuleInput, hours []Hour, first, last int) (Warning, bool) {
 	// Tracks with the same rules behave the same; one check per rule set.
 	groups := map[string][]playrules.RuleInput{}
-	for _, t := range fitting {
+	for _, t := range tracks {
 		var rs []playrules.RuleInput
 		for _, id := range t.RuleIDs {
 			if r, ok := rules[id]; ok && (r.WindowFrom != nil || r.Weekdays != nil) {
@@ -180,12 +236,6 @@ func blockedHours(e Element, i int, fitting []Candidate, rules map[uint64]playru
 		}
 		groups[ruleKey(t.RuleIDs)] = rs
 	}
-
-	first, lastMin := 0, 59
-	if e.Placement == PlacementFixed {
-		first = max(0, e.earliest()/minuteMS)
-		lastMin = min(59, (e.target()+e.FixedToleranceMS)/minuteMS)
-	}
 	seen := map[WeekdayHour]bool{}
 	var blocked []WeekdayHour
 	for _, h := range hours {
@@ -194,7 +244,7 @@ func blockedHours(e Element, i int, fitting []Candidate, rules map[uint64]playru
 			continue
 		}
 		seen[wh] = true
-		if !anyAllowed(groups, wh, first, lastMin) {
+		if !anyAllowed(groups, wh, first, last) {
 			blocked = append(blocked, wh)
 		}
 	}
@@ -207,10 +257,7 @@ func blockedHours(e Element, i int, fitting []Candidate, rules map[uint64]playru
 		}
 		return a.Hour - b.Hour
 	})
-	return Warning{
-		Code: WarnBlockedByPlayRules, Element: new(i), Hours: blocked,
-		Message: fmt.Sprintf("play rules block every fitting track in %d hours of the grid; the element is skipped there", len(blocked)),
-	}, true
+	return Warning{Code: WarnBlockedByPlayRules, Hours: blocked}, true
 }
 
 // anyAllowed reports whether some rule group lets a track start at some
@@ -235,15 +282,4 @@ func ruleKey(ids []uint64) string {
 		parts[i] = strconv.FormatUint(id, 10)
 	}
 	return strings.Join(parts, ",")
-}
-
-func intersects(a, b []uint64) bool {
-	return slices.ContainsFunc(a, func(x uint64) bool { return slices.Contains(b, x) })
-}
-
-func abs(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
 }

@@ -116,18 +116,18 @@ func TestSettingsSaveAndReadBack(t *testing.T) {
 	t.Parallel()
 	h, logs := newSettingsRouter(t)
 
-	rec := put(t, h, "/api/settings/filler.fallback", `{"value":{"mode":"playlist","source_id":3}}`)
+	rec := put(t, h, "/api/settings/rotation.min_gap_ms", `{"value":5000}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var saved map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &saved))
-	require.Equal(t, map[string]any{"mode": "playlist", "source_id": 3.0}, saved["value"])
+	require.Equal(t, 5000.0, saved["value"])
 	require.Equal(t, false, saved["is_default"])
 	require.Equal(t, "2026-10-13T06:44:05Z", saved["updated_at"], "UTC")
 
 	rec = do(t, h, http.MethodGet, "/api/settings")
-	s := findSetting(t, rec.Body.Bytes(), "filler.fallback")
-	require.Equal(t, map[string]any{"mode": "playlist", "source_id": 3.0}, s["value"])
-	require.Equal(t, map[string]any{"mode": "random"}, s["default"])
+	s := findSetting(t, rec.Body.Bytes(), "rotation.min_gap_ms")
+	require.Equal(t, 5000.0, s["value"])
+	require.Equal(t, 10000.0, s["default"])
 
 	var changed map[string]any
 	for _, e := range logs.entries(t) {
@@ -152,7 +152,6 @@ func TestSettingsInvalidValueIsFieldError(t *testing.T) {
 		{"liquidsoap.fade_out_ms", `{"value":"2500"}`, errcodes.Type},
 		{"station.timezone", `{"value":"Nowhere/City"}`, errcodes.Format},
 		{"stream.codec", `{"value":"wav"}`, errcodes.Enum},
-		{"filler.fallback", `{"value":{"mode":"artist"}}`, errcodes.Required},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+" "+tt.body, func(t *testing.T) {

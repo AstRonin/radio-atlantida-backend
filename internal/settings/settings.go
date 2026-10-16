@@ -47,6 +47,9 @@ const (
 	RuleUnknownField Rule = "unknown_field"
 	// RuleInvalid: any other problem.
 	RuleInvalid Rule = "invalid"
+	// RuleIntervalBeyondRetention: the play log retention would become
+	// shorter than an interval of a play rule.
+	RuleIntervalBeyondRetention Rule = "interval_beyond_retention"
 )
 
 // InvalidValueError refuses a value that fails the definition of its key.
@@ -115,8 +118,9 @@ type Service struct {
 	log        *slog.Logger
 	now        func() time.Time
 
-	mu   sync.RWMutex
-	subs []func(Change)
+	mu     sync.RWMutex
+	subs   []func(Change)
+	guards map[string][]func(ctx context.Context, v any) error
 }
 
 // NewService returns the service. secretsSet tells, by environment variable
@@ -190,6 +194,9 @@ func (s *Service) Set(ctx context.Context, key string, raw json.RawMessage) (Set
 	}
 	v, err := d.parse(raw)
 	if err != nil {
+		return Setting{}, err
+	}
+	if err = s.guard(ctx, key, v); err != nil {
 		return Setting{}, err
 	}
 	canonical, err := json.Marshal(v)
@@ -268,6 +275,42 @@ func OnChange[T any](s *Service, k Key[T], fn func(T)) {
 			fn(v)
 		}
 	})
+}
+
+// Guard registers fn to check a new value of one typed key against data
+// outside the settings (the play log retention against the play rules)
+// before it is saved. A refusal is returned as it is; an *InvalidValueError
+// names the rule. fn runs in the goroutine that saves the value.
+func Guard[T any](s *Service, k Key[T], fn func(ctx context.Context, v T) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.guards == nil {
+		s.guards = map[string][]func(context.Context, any) error{}
+	}
+	s.guards[k.name] = append(s.guards[k.name], func(ctx context.Context, v any) error {
+		tv, ok := v.(T)
+		if !ok {
+			return fmt.Errorf("setting %s holds %T", k.name, v)
+		}
+		return fn(ctx, tv)
+	})
+}
+
+// Refuse returns the refusal of a value of key, for a guard.
+func Refuse(key string, rule Rule, msg string) error { return invalid(key, rule, msg) }
+
+func (s *Service) guard(ctx context.Context, key string, v any) error {
+	s.mu.RLock()
+	guards := s.guards[key]
+	s.mu.RUnlock()
+	gctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	for _, fn := range guards {
+		if err := fn(gctx, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) editable(key string) (*Definition, error) {

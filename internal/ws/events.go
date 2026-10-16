@@ -68,6 +68,8 @@ type OperationFailedData struct {
 	Kind      string `json:"kind" doc:"Operation kind."`
 	Component string `json:"component" doc:"Component that failed (log component)."`
 	Error     string `json:"error" doc:"Short error message."`
+	// Reason is set for refusals the panel explains by code.
+	Reason *string `json:"reason,omitempty" enum:"insert_does_not_fit,insert_blocked" doc:"Stable reason of a refused one-time insert (hour_insert, reschedule): it does not fit its window or the hour, or the track breaks a play rule at its start."`
 }
 
 // OperationProgressEvent reports the progress of a long operation. It is
@@ -91,7 +93,8 @@ type OperationProgressData struct {
 const EventTrackPlanWarning = "track_plan.warning"
 
 // TrackPlanWarningEvent reports the warnings of one built hour of the track
-// plan: skipped elements, emergency picks, filler problems (§7, §7.3).
+// plan: skipped inserts and rule slots, emergency picks, dropped one-time
+// inserts (§7, §7.3).
 type TrackPlanWarningEvent struct {
 	Type string               `json:"type" doc:"Always track_plan.warning."`
 	Time time.Time            `json:"time" doc:"UTC time of the build."`
@@ -108,32 +111,12 @@ type TrackPlanWarningData struct {
 
 // TrackPlanWarning is one warning of a build. The panel translates by code.
 type TrackPlanWarning struct {
-	Code         string  `json:"code" enum:"element_blocked_by_play_rules,element_tolerance_relaxed,element_general_pool,element_emergency,pool_track_refused,pool_empty,filler_waiting,gap_unfilled,element_replaced,reschedule_dropped"`
-	Message      string  `json:"message" doc:"English message for developers."`
-	ElementIndex *int    `json:"element_index,omitempty" doc:"Index into the clock's elements."`
-	SegmentIndex *int    `json:"segment_index,omitempty"`
-	TrackID      *uint64 `json:"track_id,omitempty"`
-}
-
-// EventFillerRequestCreated is the type of [FillerRequestCreatedEvent].
-const EventFillerRequestCreated = "filler_request.created"
-
-// FillerRequestCreatedEvent reports a new filler reminder: a short hour that
-// waits for the operator, or an empty filler pool (§7).
-type FillerRequestCreatedEvent struct {
-	Type string                   `json:"type" doc:"Always filler_request.created."`
-	Time time.Time                `json:"time"`
-	Data FillerRequestCreatedData `json:"data"`
-}
-
-// FillerRequestCreatedData is the payload of [FillerRequestCreatedEvent].
-type FillerRequestCreatedData struct {
-	ID           uint64    `json:"id"`
-	ClockID      uint64    `json:"clock_id"`
-	ClockName    string    `json:"clock_name"`
-	HourStartUTC time.Time `json:"hour_start_utc"`
-	Reason       string    `json:"reason" enum:"short_clock,pool_empty"`
-	DeadlineAt   time.Time `json:"deadline_at" doc:"Without an answer by then, the clock's default filler mode applies."`
+	Code          string  `json:"code" enum:"insert_replaced,insert_skipped,hour_insert_dropped,rule_slot_skipped,rule_blocked_by_play_rules,fill_general_pool,fill_emergency,gap_unfilled,reschedule_dropped"`
+	Message       string  `json:"message" doc:"English message for developers."`
+	PlaylistIndex *int    `json:"playlist_index,omitempty" doc:"Index into the clock's playlists."`
+	InsertIndex   *int    `json:"insert_index,omitempty" doc:"Index into the clock's inserts."`
+	TrackID       *uint64 `json:"track_id,omitempty"`
+	HourInsertID  *uint64 `json:"hour_insert_id,omitempty" doc:"The one-time insert the warning is about."`
 }
 
 // EventNowPlaying is the type of [NowPlayingEvent].

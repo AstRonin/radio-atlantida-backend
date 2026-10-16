@@ -26,6 +26,8 @@ func (s *Playlists) WithTx(tx db.Tx) library.PlaylistStore { return &Playlists{g
 type playlistRow struct {
 	ID         uint64
 	Name       string
+	ClockRule  string
+	ClockCount *int
 	CreatedAt  time.Time
 	TypeID     uint64
 	TypeCode   string
@@ -35,7 +37,7 @@ type playlistRow struct {
 
 // The track count uses ix_track_playlists_playlist_id.
 const selectPlaylists = `
-SELECT p.id, p.name, p.created_at, t.id AS type_id, t.code AS type_code, t.name AS type_name,
+SELECT p.id, p.name, p.clock_rule, p.clock_count, p.created_at, t.id AS type_id, t.code AS type_code, t.name AS type_name,
        (SELECT count(*) FROM track_playlists tp WHERE tp.playlist_id = p.id) AS track_count
 FROM playlists p
 JOIN playlist_types t ON t.id = p.type_id`
@@ -96,6 +98,8 @@ WHERE playlist_id IN ? ORDER BY rule_id`, ids).Scan(&links).Error
 			ID:          r.ID,
 			Name:        r.Name,
 			Type:        library.TypeRef{ID: r.TypeID, Code: r.TypeCode, Name: r.TypeName},
+			ClockRule:   r.ClockRule,
+			ClockCount:  r.ClockCount,
 			TrackCount:  r.TrackCount,
 			PlayRuleIDs: rules[r.ID],
 			CreatedAt:   r.CreatedAt.UTC(),
@@ -105,26 +109,37 @@ WHERE playlist_id IN ? ORDER BY rule_id`, ids).Scan(&links).Error
 }
 
 type playlistWrite struct {
-	ID     uint64 `gorm:"primaryKey"`
-	Name   string
-	TypeID uint64
+	ID         uint64 `gorm:"primaryKey"`
+	Name       string
+	TypeID     uint64
+	ClockRule  string
+	ClockCount *int
 }
 
 func (playlistWrite) TableName() string { return "playlists" }
 
+// clockRule is the placement rule of an input; empty is fill
+// (library.PlaylistInput).
+func clockRule(in library.PlaylistInput) string {
+	if in.ClockRule == "" {
+		return library.RuleFill
+	}
+	return in.ClockRule
+}
+
 // Create adds a playlist.
 func (s *Playlists) Create(ctx context.Context, in library.PlaylistInput) (uint64, error) {
-	r := playlistWrite{Name: in.Name, TypeID: in.TypeID}
+	r := playlistWrite{Name: in.Name, TypeID: in.TypeID, ClockRule: clockRule(in), ClockCount: in.ClockCount}
 	if err := s.g.WithContext(ctx).Create(&r).Error; err != nil {
 		return 0, writeError("insert playlist", err)
 	}
 	return r.ID, nil
 }
 
-// Update changes the name and the type of a playlist.
+// Update changes the name, the type, and the placement rule of a playlist.
 func (s *Playlists) Update(ctx context.Context, id uint64, in library.PlaylistInput) error {
 	res := s.g.WithContext(ctx).Table("playlists").Where("id = ?", id).
-		Updates(map[string]any{"name": in.Name, "type_id": in.TypeID})
+		Updates(map[string]any{"name": in.Name, "type_id": in.TypeID, "clock_rule": clockRule(in), "clock_count": in.ClockCount})
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("update playlist %d", id), res.Error)
 	}
@@ -135,7 +150,7 @@ func (s *Playlists) Update(ctx context.Context, id uint64, in library.PlaylistIn
 }
 
 // Delete removes a playlist; its memberships and play rule links go with it
-// (CASCADE). Clock elements and clock filler sources refuse the delete
+// (CASCADE). Clock playlists and clock inserts refuse the delete
 // (RESTRICT).
 func (s *Playlists) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM playlists WHERE id = ?`, id)
@@ -148,23 +163,18 @@ func (s *Playlists) Delete(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// Users returns the clocks that use the playlist: in an element, as the
-// filler of an element, or as the clock's default filler. clocks holds a
-// few dozen rows; the element lookups use the primary keys and
-// uq_clock_elements_clock_id_position.
+// Users returns the clocks that use the playlist: as a clock playlist or as
+// the source of an insert. clocks holds a few dozen rows; the lookups use
+// pk_clock_playlists and ix_clock_inserts_playlist_id.
 func (s *Playlists) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
 	var rows []refRow
 	err := s.g.WithContext(ctx).Raw(`
 SELECT 'clock' AS kind, c.id, c.name
 FROM clocks c
-WHERE c.default_filler_playlist_id = ?
-   OR EXISTS (SELECT 1 FROM clock_elements e
-              JOIN clock_element_playlists ep ON ep.clock_element_id = e.id
-              WHERE e.clock_id = c.id AND ep.playlist_id = ?)
-   OR EXISTS (SELECT 1 FROM clock_elements e
-              WHERE e.clock_id = c.id AND e.filler_playlist_id = ?)
+WHERE EXISTS (SELECT 1 FROM clock_playlists cp WHERE cp.clock_id = c.id AND cp.playlist_id = ?)
+   OR EXISTS (SELECT 1 FROM clock_inserts i WHERE i.clock_id = c.id AND i.playlist_id = ?)
 ORDER BY c.name, c.id
-LIMIT ?`, id, id, id, limit).Scan(&rows).Error
+LIMIT ?`, id, id, limit).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("select users of playlist %d: %w", id, err)
 	}
@@ -218,4 +228,17 @@ func (s *Playlists) SetTracks(ctx context.Context, id uint64, trackIDs []uint64)
 		return writeError(fmt.Sprintf("insert tracks of playlist %d", id), err)
 	}
 	return nil
+}
+
+// TouchClocks sets updated_at of the clocks that use the playlist as a
+// clock playlist, so their planned hours are stale (§4), and reports
+// whether there were any (pk_clock_playlists, ix_clock_playlists_playlist_id).
+func (s *Playlists) TouchClocks(ctx context.Context, id uint64) (bool, error) {
+	res := s.g.WithContext(ctx).Exec(`
+UPDATE clocks SET updated_at = now()
+WHERE id IN (SELECT clock_id FROM clock_playlists WHERE playlist_id = ?)`, id)
+	if res.Error != nil {
+		return false, fmt.Errorf("touch clocks of playlist %d: %w", id, res.Error)
+	}
+	return res.RowsAffected > 0, nil
 }

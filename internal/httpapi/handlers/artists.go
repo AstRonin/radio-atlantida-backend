@@ -105,7 +105,7 @@ func registerArtists(api huma.API, log *slog.Logger, svc Library) {
 		Method:      http.MethodDelete,
 		Path:        "/api/artists/{id}",
 		Summary:     "Delete an artist",
-		Description: "Refused while tracks or clocks (as filler) refer to the artist (artist_in_use, with used_by), and for an artist with play history (artist_has_history).",
+		Description: "Refused while tracks refer to the artist (artist_in_use, with used_by), and for an artist with play history (artist_has_history).",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *idInput) (*struct{}, error) {

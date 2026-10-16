@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/broadcast"
+	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/handlers"
@@ -298,7 +299,8 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/artists", "/api/artists/{id}",
 		"/api/tracks", "/api/tracks/{id}", "/api/tracks/{id}/play-rules", "/api/tracks/{id}/audio",
 		"/api/play-rules", "/api/play-rules/{id}", "/api/play-rules/{id}/targets",
-		"/api/separation-rules", "/api/separation-rules/{id}",
+		"/api/clocks", "/api/clocks/{id}", "/api/track-plan", "/api/track-plan/rebuild",
+		"/api/track-plan/inserts", "/api/track-plan/inserts/{id}",
 		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/music-gain",
 		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
 		"/api/outages",
@@ -310,15 +312,20 @@ func TestOpenAPIDocument(t *testing.T) {
 		require.Contains(t, doc.Paths, p)
 	}
 	require.NotContains(t, doc.Paths, "/api/import/inbox", "replaced by the folders (docs/phase-18-plan.md)")
+	for _, p := range []string{ // removed by docs/phase-23-plan.md
+		"/api/separation-rules", "/api/separation-rules/{id}", "/api/filler-requests", "/api/filler-requests/{id}/answer",
+		"/api/clocks/{id}/save-with-filler", "/api/clocks/{id}/save-incomplete", "/api/clocks/{id}/filler-pool",
+	} {
+		require.NotContains(t, doc.Paths, p)
+	}
 
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 14)
+	require.Len(t, schemas["Event"].OneOf, 13)
 	require.Equal(t, []string{ws.EventLiveState}, schemas["LiveStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackPlanWarning}, schemas["TrackPlanWarningEvent"].Properties["type"].Enum)
-	require.Equal(t, []string{ws.EventFillerRequestCreated}, schemas["FillerRequestCreatedEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventNowPlaying}, schemas["NowPlayingEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackEnded}, schemas["TrackEndedEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventLiquidsoapState}, schemas["LiquidsoapStateEvent"].Properties["type"].Enum)
@@ -334,6 +341,15 @@ func TestOpenAPIDocument(t *testing.T) {
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindMissedItems.CompletedEvent())
 	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindReschedule.FailedEvent())
 	require.Equal(t, stringsOf(rotation.WarningCodes()), schemas["TrackPlanWarning"].Properties["code"].Enum)
+	clockCodes := stringsOf(clocks.WarningCodes())
+	for _, c := range stringsOf(rotation.WarningCodes()) {
+		if !slices.Contains(clockCodes, c) {
+			clockCodes = append(clockCodes, c)
+		}
+	}
+	require.Equal(t, clockCodes, schemas["ClockWarning"].Properties["code"].Enum, "dry check codes, then the sample build's")
+	require.Equal(t, stringsOf(rotation.RefusalReasons()), schemas["OperationFailedData"].Properties["reason"].Enum)
+	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindHourInsert.FailedEvent())
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindClockBuild.CompletedEvent())
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindRetention.CompletedEvent())
 	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindRetention.FailedEvent())

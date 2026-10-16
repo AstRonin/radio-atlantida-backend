@@ -9,20 +9,21 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 )
 
-// Rotation keeps the track plan and the filler reminders
+// Rotation keeps the track plan and its one-time inserts
 // (*rotation.Service).
 type Rotation interface {
 	Rebuild(ctx context.Context) (uint64, error)
 	RebuildRange(ctx context.Context, r rotation.Range) (uint64, error)
 	Plan(ctx context.Context, r rotation.Range) ([]rotation.PlannedHour, error)
-	Requests(ctx context.Context, status rotation.RequestStatus) ([]rotation.FillerRequest, error)
-	Answer(ctx context.Context, id, trackID uint64) (rotation.FillerRequest, error)
-	PoolRefilled(ctx context.Context, clockID uint64) error
+	Sample(ctx context.Context, c clocks.Clock) (rotation.Sample, error)
+	AddInsert(ctx context.Context, r rotation.AddInsertRequest) (uint64, error)
+	RemoveInsert(ctx context.Context, id uint64) (uint64, error)
 	Rescheduler
 }
 
@@ -43,21 +44,8 @@ type operationAcceptedOutput struct {
 	Body dto.OperationAccepted
 }
 
-type fillerRequestListInput struct {
-	Status string `query:"status" enum:"pending,answered,defaulted,expired,all" default:"pending"`
-}
-
-type fillerRequestListOutput struct {
-	Body dto.FillerRequestList
-}
-
-type fillerAnswerInput struct {
-	ID   uint64 `path:"id" minimum:"1"`
-	Body dto.FillerAnswerBody
-}
-
-type fillerRequestOutput struct {
-	Body dto.FillerRequest
+type addHourInsertInput struct {
+	Body dto.HourInsertBody
 }
 
 func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
@@ -88,7 +76,7 @@ func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
 		Method:        http.MethodPost,
 		Path:          "/api/track-plan/rebuild",
 		Summary:       "Rebuild the track plan",
-		Description:   "Rebuilds every future hour of the range, even when it is current, as a clock_build operation. Hours that have started are not touched. Pending reminders of the rebuilt hours expire, and new ones are created.",
+		Description:   "Rebuilds every future hour of the range, even when it is current, as a clock_build operation. Hours that have started are not touched; one-time inserts stay.",
 		Tags:          tags,
 		DefaultStatus: http.StatusAccepted,
 		Errors:        errorsWith(http.StatusUnprocessableEntity),
@@ -101,43 +89,39 @@ func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
 	})
 
 	register(api, log, huma.Operation{
-		OperationID: "list-filler-requests",
-		Method:      http.MethodGet,
-		Path:        "/api/filler-requests",
-		Summary:     "List filler reminders",
-		Description: "Reminders of short hours that wait for the operator, and of empty filler pools (§7), newest hour first.",
-		Tags:        tags,
-		Errors:      errorsWith(http.StatusUnprocessableEntity),
-	}, func(ctx context.Context, in *fillerRequestListInput) (*fillerRequestListOutput, error) {
-		status := rotation.RequestStatus(in.Status)
-		if in.Status == "all" {
-			status = ""
-		}
-		rs, err := svc.Requests(ctx, status)
+		OperationID:   "add-hour-insert",
+		Method:        http.MethodPost,
+		Path:          "/api/track-plan/inserts",
+		Summary:       "Add a one-time insert to a planned hour",
+		Description:   "Plays the track at a time with seconds in one hour that has not started (today's news), as an hour_insert operation that stores the insert and rebuilds the hour around it (§7.2). The clock template is not changed; the insert stays when the hour is rebuilt, and a template insert at the same time is replaced for that hour. Checks that need no build are refused per field; the operation fails without a change (reason insert_does_not_fit or insert_blocked) when the track cannot be placed whole.",
+		Tags:          tags,
+		DefaultStatus: http.StatusAccepted,
+		Errors:        errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *addHourInsertInput) (*operationAcceptedOutput, error) {
+		id, err := svc.AddInsert(ctx, rotation.AddInsertRequest{
+			HourStart: in.Body.HourStartUTC.UTC(), OffsetMS: in.Body.OffsetMS, ToleranceMS: in.Body.ToleranceMS, TrackID: in.Body.TrackID,
+		})
 		if err != nil {
 			return nil, err
 		}
-		out := &fillerRequestListOutput{Body: dto.FillerRequestList{Items: make([]dto.FillerRequest, len(rs))}}
-		for i, r := range rs {
-			out.Body.Items[i] = fillerRequestDTO(r)
-		}
-		return out, nil
+		return &operationAcceptedOutput{Body: dto.OperationAccepted{OperationID: id}}, nil
 	})
 
 	register(api, log, huma.Operation{
-		OperationID: "answer-filler-request",
-		Method:      http.MethodPost,
-		Path:        "/api/filler-requests/{id}/answer",
-		Summary:     "Answer a filler reminder",
-		Description: "The track fills the hour's first waiting segment, the clock's default filler mode the others, and the hour is rebuilt. Refused (track_id: blocked) when the track breaks separation or a play rule at that time; a pool_empty reminder is closed by refilling the pool instead.",
-		Tags:        tags,
-		Errors:      errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
-	}, func(ctx context.Context, in *fillerAnswerInput) (*fillerRequestOutput, error) {
-		r, err := svc.Answer(ctx, in.ID, in.Body.TrackID)
+		OperationID:   "remove-hour-insert",
+		Method:        http.MethodDelete,
+		Path:          "/api/track-plan/inserts/{id}",
+		Summary:       "Remove a one-time insert",
+		Description:   "Removes the insert and rebuilds its hour, as an hour_insert operation. Removing a rescheduled missed item opens the missed item again. Refused once the hour is frozen (hour_started).",
+		Tags:          tags,
+		DefaultStatus: http.StatusAccepted,
+		Errors:        errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *idInput) (*operationAcceptedOutput, error) {
+		id, err := svc.RemoveInsert(ctx, in.ID)
 		if err != nil {
 			return nil, err
 		}
-		return &fillerRequestOutput{Body: fillerRequestDTO(r)}, nil
+		return &operationAcceptedOutput{Body: dto.OperationAccepted{OperationID: id}}, nil
 	})
 }
 
@@ -170,23 +154,21 @@ func startRangeRebuild(ctx context.Context, log *slog.Logger, svc Rotation, r ro
 func planHourDTO(h rotation.PlannedHour) dto.TrackPlanHour {
 	out := dto.TrackPlanHour{
 		HourStartUTC: h.Start.UTC(), Clock: dto.TrackPlanClock{ID: h.ClockID, Name: h.ClockName},
-		GridSlotID: h.GridSlotID, Seed: h.Seed, BuiltAt: h.BuiltAt.UTC(), FillerRequestID: h.FillerRequestID,
-		Items: make([]dto.TrackPlanItem, len(h.Items)),
+		GridSlotID: h.GridSlotID, Seed: h.Seed, BuiltAt: h.BuiltAt.UTC(),
+		Items: make([]dto.TrackPlanItem, len(h.Items)), Inserts: make([]dto.TrackPlanInsert, len(h.Inserts)),
 	}
 	for i, it := range h.Items {
 		out.Items[i] = dto.TrackPlanItem{
 			ID: it.ID, TrackID: it.TrackID, Title: it.Title, ArtistName: it.ArtistName, DurationMS: it.DurationMS,
-			ElementID: it.ElementID, PlannedStartUTC: it.Start.UTC(), PlannedInMS: it.InMS, PlannedOutMS: it.OutMS, Truncated: it.Truncated,
-			Source: it.Source, Status: it.Status,
+			InsertID: it.InsertID, HourInsertID: it.HourInsertID, PlannedStartUTC: it.Start.UTC(), PlannedInMS: it.InMS,
+			PlannedOutMS: it.OutMS, Truncated: it.Truncated, Source: it.Source, Status: it.Status,
+		}
+	}
+	for i, ins := range h.Inserts {
+		out.Inserts[i] = dto.TrackPlanInsert{
+			ID: ins.ID, Placement: string(ins.Placement), OffsetMS: ins.OffsetMS, ToleranceMS: ins.ToleranceMS,
+			TrackID: ins.TrackID, MissedID: ins.MissedID,
 		}
 	}
 	return out
-}
-
-func fillerRequestDTO(r rotation.FillerRequest) dto.FillerRequest {
-	return dto.FillerRequest{
-		ID: r.ID, ClockID: r.ClockID, ClockName: r.ClockName, HourStartUTC: r.HourStart.UTC(), Reason: r.Reason,
-		Mode: string(r.Mode), Status: string(r.Status), CreatedAt: r.CreatedAt.UTC(), DeadlineAt: r.DeadlineAt.UTC(),
-		AnswerTrackID: r.AnswerTrackID,
-	}
 }

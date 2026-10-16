@@ -2,7 +2,6 @@ package rotation
 
 import (
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"slices"
 	"time"
@@ -11,96 +10,203 @@ import (
 )
 
 const (
-	// maxFillerTracks bounds the filler tracks of one gap (§7: "until the
-	// shortfall is closed or the iteration limit is reached").
-	maxFillerTracks = 3
-	// maxRelaxSteps bounds the emergency relaxation of a tolerance; each
-	// step doubles it, up to Settings.MaxRelaxedToleranceMS.
-	maxRelaxSteps = 8
-	// minRelaxStepMS is the first relaxed tolerance of an element whose
-	// tolerance is zero.
-	minRelaxStepMS = 1000
-	minuteMS       = 60_000
+	minuteMS = 60_000
+	// The middle rule: a track that starts at about 30:00, within ±5
+	// minutes (decision 7).
+	middleTargetMS = 30 * minuteMS
+	middleWindowMS = 5 * minuteMS
+	// minAirMS is the shortest part a crossing track may be cut to: the
+	// shortest on-air part of a track (the cue rule of the library). A gap
+	// shorter than that is left.
+	minAirMS = 5000
 )
 
-// window is where a segment ends, in ms from the start of the hour: the
-// start window of the fixed element that closes it, or the end of the hour.
-type window struct {
-	earliest, target, latest int
+// kind is the kind of the item last placed, for the rule that a rule
+// track never starts next to an insert or another rule track.
+type kind int
+
+const (
+	kindNone kind = iota
+	kindFill
+	kindRule
+	kindInsert
+)
+
+// hard is a point the content before it must reach: a timed insert (its
+// start window), the block of end tracks (a fixed start), or the end of the
+// hour.
+type hard struct {
+	target, earliest, latest int
+	// insert is the timed insert of the point; nil for the end block and
+	// the end of the hour.
+	insert *anchor
+	// endBlock marks the block of end tracks.
+	endBlock bool
 }
 
-func windowOf(elements []clocks.Element, s clocks.Segment) window {
-	if s.ClosedBy == nil {
-		return window{clocks.HourMS, clocks.HourMS, clocks.HourMS}
-	}
-	f := elements[*s.ClosedBy]
-	t := *f.FixedMinute * minuteMS
-	return window{t - f.FixedToleranceMS, t, t + f.FixedToleranceMS}
+// anchor is a timed insert with its track: a template insert or a fixed
+// one-time insert.
+type anchor struct {
+	target, earliest, latest int
+	track                    Track
+	item                     Item
+	// hourInsert is set for a one-time insert, which is refused instead of
+	// skipped.
+	hourInsert *Insert
+}
+
+// soft is the slot of a middle or spread rule track: reached by a best-fit
+// fill track, never by cutting.
+type soft struct {
+	target, earliest, latest int
+	playlist                 int // index into the clock's playlists
+}
+
+// blockItem is a track of the end block, at a fixed offset.
+type blockItem struct {
+	track      Track
+	item       Item
+	playlist   int // the rule playlist; -1 for a one-time insert
+	hourInsert *Insert
+}
+
+// fillSource is a fill playlist with its share.
+type fillSource struct {
+	playlistID uint64
+	weight     int
 }
 
 // builder holds the state of one build.
 type builder struct {
-	in   HourInput
-	rng  *rand.Rand
-	chk  *checker
-	pool []PoolRow
-	plan HourPlan
-	// answered: the answer track was offered to a segment.
-	answered bool
-	// placed are the inserts whose pinned track is planned.
-	placed map[uint64]bool
+	in     HourInput
+	rng    *rand.Rand
+	chk    *checker
+	plan   HourPlan
+	minGap int
+	// tracks are the tracks of each playlist of the clock and its inserts.
+	tracks map[uint64][]Track
+	fill   []fillSource
+	cursor int
+	prev   kind
+	softs  []soft
 }
 
-// Build plans one hour of a clock (§7, §7.2). It is deterministic for a
-// given input and seed. Segments are filled in order:
+// Build plans one hour of a clock (§7, §7.2, docs/phase-23-plan.md §3.3).
+// It is deterministic for a given input and seed.
 //
-//   - The fixed element that opens a segment starts where the content
-//     before it ends, but not before the earliest start of its window.
-//   - Each element gets a track from the union of its playlists that passes
-//     separation and its play rules, within nominal ± tolerance: at random
-//     with equal weights, or, for the last element of a segment, the best
-//     fit to the time left.
-//   - An item that ends past the segment's latest end is the crossing track:
-//     cut at the segment's target end if it starts before it (truncated,
-//     faded out by Liquidsoap), removed otherwise. The rest of the segment
-//     is removed; overflow never triggers filler.
-//   - A gap before the segment's earliest end is closed with filler.
+//  1. Anchors: the template inserts and the fixed one-time inserts, by
+//     target; a one-time insert at the offset of a template insert replaces
+//     it. A playlist insert draws its track now.
+//  2. The end block (one-time end inserts, then the end tracks of the rule
+//     playlists) ends at 60:00. The start block (an insert at 0:00, the
+//     one-time start inserts, the start tracks) opens the hour.
+//  3. Middle and spread slots are soft anchors in the free time.
+//  4. Fill: before each track a fill playlist is drawn by its share, then
+//     an allowed track of it. Before a hard point the last track is the best
+//     fit to its window, else it is cut at the target and faded out.
+//  5. Inserts chain: one starts when the content before it ends, not
+//     before its window opens; past its window it is skipped (template) or
+//     refused (one-time).
 func Build(in HourInput) HourPlan {
 	b := &builder{
 		in:     in,
 		rng:    rand.New(rand.NewPCG(in.Seed, in.Seed^0x9e3779b97f4a7c15)), //nolint:gosec // G404: rotation needs a seeded, reproducible source, not a secure one
 		chk:    newChecker(in),
-		pool:   slices.Clone(in.Pool),
-		placed: map[uint64]bool{},
+		plan:   HourPlan{Refused: map[uint64]Refusal{}},
+		minGap: max(in.Settings.MinGapMS, 1),
+		tracks: map[uint64][]Track{},
 	}
-	elements := in.Clock.Elements
-	segs := in.Layout.Segments
-	cursor := 0
-	for k, seg := range segs {
-		w := windowOf(elements, seg)
-		stopped := false
-		if k > 0 {
-			cursor = max(cursor, windowOf(elements, segs[k-1]).earliest)
-			cursor, stopped = b.element(*segs[k-1].ClosedBy, cursor, w, len(seg.Elements) == 0)
+	b.index()
+
+	anchors := b.anchors()
+	var starts, ends []Insert
+	for _, ins := range in.HourInserts {
+		switch ins.Placement {
+		case PlacementStart:
+			starts = append(starts, ins)
+		case PlacementEnd:
+			ends = append(ends, ins)
 		}
-		for j, i := range seg.Elements {
-			if stopped {
-				break
+	}
+	block, blockStart := b.endBlock(ends)
+
+	// The start block: an insert at 0:00, the one-time start inserts, the
+	// start tracks.
+	for len(anchors) > 0 && anchors[0].target == 0 {
+		b.placeAnchor(anchors[0])
+		anchors = anchors[1:]
+	}
+	for i := range starts {
+		b.placeStartInsert(&starts[i])
+	}
+	for i, p := range in.Clock.Playlists {
+		if r := p.EffectiveRule(); r == clocks.RuleStart || r == clocks.RuleStartEnd {
+			b.placeStartRule(i)
+		}
+	}
+
+	b.softs = b.softAnchors(anchors, blockStart, len(block) > 0)
+	hards := make([]hard, 0, len(anchors)+2)
+	for i := range anchors {
+		a := &anchors[i]
+		hards = append(hards, hard{target: a.target, earliest: a.earliest, latest: a.latest, insert: a})
+	}
+	if len(block) > 0 {
+		hards = append(hards, hard{target: blockStart, earliest: blockStart, latest: blockStart, endBlock: true})
+	}
+	slices.SortStableFunc(hards, func(a, b hard) int { return a.target - b.target })
+	hards = append(hards, hard{target: clocks.HourMS, earliest: clocks.HourMS, latest: clocks.HourMS})
+
+	for _, h := range hards {
+		switch {
+		case h.insert != nil:
+			b.fillTo(h)
+			b.placeAnchor(*h.insert)
+		case h.endBlock && b.cursor > blockStart:
+			b.dropBlock(block, "the content before it runs past its start")
+		case h.endBlock:
+			b.fillTo(h)
+			for _, bi := range block {
+				b.place(bi.track, bi.item, bi.item.OffsetMS, clocks.HourMS, kindRule, false)
 			}
-			cursor, stopped = b.element(i, cursor, w, j == len(seg.Elements)-1)
-		}
-		if !stopped {
-			cursor = b.fill(seg, cursor, w)
+		default:
+			b.fillTo(h)
 		}
 	}
-	// A pinned element after the end of a full segment is never reached.
-	for _, i := range slices.Sorted(maps.Keys(in.Pins)) {
-		p := in.Pins[i]
-		if !b.placed[p.InsertID] && !slices.Contains(b.plan.PinsRefused, p.InsertID) {
-			b.refusePin(i, p, "its segment is full before it")
-		}
+	for _, s := range b.softs {
+		b.warnRule(WarnRuleSlotSkipped, s.playlist, "its window %s to %s is taken", clockTime(s.earliest), clockTime(s.latest))
 	}
+	slices.SortStableFunc(b.plan.Items, func(a, b Item) int { return a.OffsetMS - b.OffsetMS })
 	return b.plan
+}
+
+// index groups the tracks of the clock's playlists and insert playlists,
+// and lists the fill playlists with their shares (decision 9: without
+// shares, every fill playlist weighs 1).
+func (b *builder) index() {
+	want := map[uint64]bool{}
+	for _, p := range b.in.Clock.Playlists {
+		want[p.PlaylistID] = true
+		if p.EffectiveRule() == clocks.RuleFill {
+			w := 1
+			if p.FillWeight != nil {
+				w = *p.FillWeight
+			}
+			b.fill = append(b.fill, fillSource{playlistID: p.PlaylistID, weight: w})
+		}
+	}
+	for _, ins := range b.in.Clock.Inserts {
+		if ins.PlaylistID != nil {
+			want[*ins.PlaylistID] = true
+		}
+	}
+	for _, t := range b.in.Library.Tracks {
+		for _, id := range t.PlaylistIDs {
+			if want[id] {
+				b.tracks[id] = append(b.tracks[id], t)
+			}
+		}
+	}
 }
 
 // at returns the instant of an offset into the hour.
@@ -108,130 +214,493 @@ func (b *builder) at(offsetMS int) time.Time {
 	return b.in.Start.Add(time.Duration(offsetMS) * time.Millisecond)
 }
 
-// element plans element i at cursor and returns the new cursor and whether
-// the segment is full.
-func (b *builder) element(i, cursor int, w window, last bool) (int, bool) {
-	if cursor >= w.latest {
-		return cursor, true
+// allowedOf returns the tracks of ts that may start at offset.
+func (b *builder) allowedOf(ts []Track, offset int) []Track {
+	at := b.at(offset)
+	var out []Track
+	for _, t := range ts {
+		if b.chk.allowed(t, at) {
+			out = append(out, t)
+		}
 	}
-	if p, ok := b.in.Pins[i]; ok {
-		return b.pinned(i, p, cursor, w)
-	}
-	e := b.in.Clock.Elements[i]
-	target := e.NominalDurationMS
-	if last {
-		target = min(max(w.target-cursor, e.NominalDurationMS-e.DurationToleranceMS), e.NominalDurationMS+e.DurationToleranceMS)
-	}
-	t, ok := b.pick(i, e, b.at(cursor), target, last)
-	if !ok {
-		return cursor, false
-	}
-	return b.place(t, &e.ID, cursor, w, SourceClock, nil)
+	return out
 }
 
-// pinned plans an element with a fixed track (a rescheduled item). The
-// track must play whole: it is never truncated, relaxed, or replaced; if it
-// cannot, the insert is refused and the segment goes on without it.
-func (b *builder) pinned(i int, p Pin, cursor int, w window) (int, bool) {
-	at := b.at(cursor)
-	t, ok := b.in.Library.track(p.TrackID)
-	switch {
-	case !ok:
-		b.refusePin(i, p, "the track has no duration")
-		return cursor, false
-	case !b.chk.eligible(t, at):
-		b.refusePin(i, p, fmt.Sprintf("the track breaks separation or a play rule at %s", b.clock(at)))
-		return cursor, false
-	case cursor+t.DurationMS > w.latest:
-		b.refusePin(i, p, fmt.Sprintf("starting at %s it runs past the end of its segment", b.clock(at)))
-		return cursor, false
-	}
-	cursor, full := b.place(t, nil, cursor, w, SourceReschedule, nil)
-	b.plan.Items[len(b.plan.Items)-1].RescheduleOfID = copyPtr(p.MissedID)
-	b.placed[p.InsertID] = true
-	return cursor, full
-}
+func clip(ms int) int { return min(max(ms, 0), clocks.HourMS) }
 
-func (b *builder) refusePin(i int, p Pin, reason string) {
-	b.plan.PinsRefused = append(b.plan.PinsRefused, p.InsertID)
-	b.warn(WarnRescheduleDropped, &i, nil, &p.TrackID, "the rescheduled item cannot be placed: %s", reason)
-}
-
-// pick chooses the track of an element starting at at, with the emergency
-// steps of §7 when nothing fits.
-func (b *builder) pick(i int, e clocks.Element, at time.Time, target int, best bool) (Track, bool) {
-	var eligible []Track
-	candidates, blocked := 0, 0
-	for _, t := range b.in.Library.Tracks {
-		if !t.inAny(e.PlaylistIDs) {
+// anchors resolves the timed inserts of the hour, in target order, and
+// records their plays at the target, so the tracks around them respect
+// them.
+func (b *builder) anchors() []anchor {
+	var out []anchor
+	replaced := map[int]bool{}
+	for i := range b.in.HourInserts {
+		h := &b.in.HourInserts[i]
+		if h.Placement != PlacementFixed || h.OffsetMS == nil {
 			continue
 		}
-		candidates++
-		switch {
-		case !b.chk.allowed(t, at):
-			blocked++
-		case b.chk.separated(t, at):
-			eligible = append(eligible, t)
+		for j, ci := range b.in.Clock.Inserts {
+			if ci.OffsetMS == *h.OffsetMS && !replaced[j] {
+				replaced[j] = true
+				b.warn(Warning{
+					Code: WarnInsertReplaced, InsertIndex: new(j), HourInsertID: new(h.ID),
+					Message: fmt.Sprintf("a one-time insert replaces the insert at %s in this hour", clockTime(ci.OffsetMS)),
+				})
+			}
 		}
+		out = append(out, anchor{
+			target: *h.OffsetMS, earliest: clip(*h.OffsetMS - h.ToleranceMS), latest: clip(*h.OffsetMS + h.ToleranceMS),
+			hourInsert: h,
+		})
 	}
-	if candidates > 0 && blocked == candidates {
-		b.warn(WarnBlockedByPlayRules, &i, nil, nil, "play rules block every track of the element at %s; it is skipped", b.clock(at))
-		return Track{}, false
+	for i, ci := range b.in.Clock.Inserts {
+		if replaced[i] {
+			continue
+		}
+		out = append(out, anchor{
+			target: ci.OffsetMS, earliest: clip(ci.OffsetMS - ci.ToleranceMS), latest: clip(ci.OffsetMS + ci.ToleranceMS),
+			item: Item{Source: SourceInsert, ClockInsertID: new(ci.ID), InsertIndex: new(i)},
+		})
 	}
-	if t, ok := b.choose(eligible, target, e.DurationToleranceMS, best); ok {
-		return t, true
-	}
+	slices.SortStableFunc(out, func(a, b anchor) int { return a.target - b.target })
 
-	tol := e.DurationToleranceMS
-	for range maxRelaxSteps {
-		next := min(max(2*tol, minRelaxStepMS), b.in.Settings.MaxRelaxedToleranceMS)
-		if next <= tol {
-			break
+	kept := out[:0]
+	for _, a := range out {
+		if a.hourInsert != nil {
+			t, ok := b.hourTrack(a.hourInsert, a.target)
+			if !ok {
+				continue
+			}
+			a.track, a.item = t, hourItem(a.hourInsert)
+		} else {
+			ci := b.in.Clock.Inserts[*a.item.InsertIndex]
+			t, ok := b.templateTrack(*a.item.InsertIndex, ci, a.target)
+			if !ok {
+				continue
+			}
+			a.track = t
 		}
-		tol = next
-		if t, ok := b.choose(eligible, target, tol, best); ok {
-			b.warn(WarnToleranceRelaxed, &i, nil, &t.ID, "no track fits ± %d s at %s; chosen with ± %d s",
-				e.DurationToleranceMS/1000, b.clock(at), tol/1000)
-			return t, true
-		}
+		b.chk.add(a.track.ID, a.track.ArtistID, b.at(a.target))
+		kept = append(kept, a)
 	}
-
-	if t, ok := b.closest(b.allEligible(at, func(Track) bool { return true }), target); ok {
-		b.warn(WarnGeneralPool, &i, nil, &t.ID, "no track of the element's playlists fits at %s; chosen from the whole library", b.clock(at))
-		return t, true
-	}
-	b.warn(WarnEmergency, &i, nil, nil, "no track passes the rules at %s; the element is skipped", b.clock(at))
-	return Track{}, false
+	return kept
 }
 
-// choose returns a track within target ± tol: at random, every track with
-// the same weight, or the best fit.
-func (b *builder) choose(ts []Track, target, tol int, best bool) (Track, bool) {
+// templateTrack returns the track of a template insert at offset: its
+// track, or a random allowed track of its playlist.
+func (b *builder) templateTrack(i int, ci clocks.Insert, offset int) (Track, bool) {
+	skip := func(format string, args ...any) (Track, bool) {
+		b.warn(Warning{
+			Code: WarnInsertSkipped, InsertIndex: new(i), TrackID: ci.TrackID,
+			Message: fmt.Sprintf("the insert at %s is skipped: ", clockTime(ci.OffsetMS)) + fmt.Sprintf(format, args...),
+		})
+		return Track{}, false
+	}
+	if ci.TrackID != nil {
+		t, ok := b.in.Library.track(*ci.TrackID)
+		switch {
+		case !ok:
+			return skip("its track has no duration")
+		case !b.chk.allowed(t, b.at(offset)):
+			return skip("its track breaks a play rule at %s", b.clock(offset))
+		}
+		return t, true
+	}
+	ts := b.tracks[*ci.PlaylistID]
+	if len(ts) == 0 {
+		return skip("its playlist has no track that can be planned")
+	}
+	allowed := b.allowedOf(ts, offset)
+	if len(allowed) == 0 {
+		return skip("play rules block every track of its playlist at %s", b.clock(offset))
+	}
+	return allowed[b.rng.IntN(len(allowed))], true
+}
+
+// hourTrack returns the track of a one-time insert if it may start at
+// offset; otherwise the insert is refused.
+func (b *builder) hourTrack(h *Insert, offset int) (Track, bool) {
+	t, ok := b.in.Library.track(h.TrackID)
+	switch {
+	case !ok:
+		b.refuse(h, ReasonDoesNotFit, "the track has no duration")
+		return Track{}, false
+	case offset < 0 || offset+t.DurationMS > clocks.HourMS:
+		b.refuse(h, ReasonDoesNotFit, "it runs past the end of the hour")
+		return Track{}, false
+	case !b.chk.allowed(t, b.at(offset)):
+		b.refuse(h, ReasonBlocked, fmt.Sprintf("the track breaks a play rule at %s", b.clock(offset)))
+		return Track{}, false
+	}
+	return t, true
+}
+
+func hourItem(h *Insert) Item {
+	it := Item{Source: SourceHourInsert, HourInsertID: new(h.ID)}
+	if h.MissedID != nil {
+		it.Source, it.RescheduleOfID = SourceReschedule, new(*h.MissedID)
+	}
+	return it
+}
+
+func (b *builder) refuse(h *Insert, reason RefusalReason, msg string) {
+	b.plan.Refused[h.ID] = Refusal{Reason: reason, Message: msg}
+}
+
+// endBlock picks the tracks that end the hour, built backwards from 60:00:
+// the one-time end inserts, then the end tracks of the rule playlists in
+// clock order. It returns them in play order with the block's start, and
+// records their plays.
+func (b *builder) endBlock(ends []Insert) ([]blockItem, int) {
+	var slots []blockItem
+	for i := range ends {
+		slots = append(slots, blockItem{playlist: -1, hourInsert: &ends[i]})
+	}
+	for i, p := range b.in.Clock.Playlists {
+		if r := p.EffectiveRule(); r == clocks.RuleEnd || r == clocks.RuleStartEnd {
+			slots = append(slots, blockItem{playlist: i})
+		}
+	}
+	start := clocks.HourMS
+	var out []blockItem
+	for k := len(slots) - 1; k >= 0; k-- {
+		s := slots[k]
+		if s.hourInsert != nil {
+			t, ok := b.in.Library.track(s.hourInsert.TrackID)
+			if !ok {
+				b.refuse(s.hourInsert, ReasonDoesNotFit, "the track has no duration")
+				continue
+			}
+			t, ok = b.hourTrack(s.hourInsert, start-t.DurationMS)
+			if !ok {
+				continue
+			}
+			s.track, s.item = t, hourItem(s.hourInsert)
+		} else {
+			pid := b.in.Clock.Playlists[s.playlist].PlaylistID
+			var fit []Track
+			for _, t := range b.tracks[pid] {
+				if t.DurationMS <= start && b.chk.allowed(t, b.at(start-t.DurationMS)) {
+					fit = append(fit, t)
+				}
+			}
+			if len(fit) == 0 {
+				b.ruleMissing(s.playlist, start, "the end track")
+				continue
+			}
+			s.track = fit[b.rng.IntN(len(fit))]
+			s.item = Item{Source: SourceRule, PlaylistID: new(pid)}
+		}
+		start -= s.track.DurationMS
+		s.item.OffsetMS = start
+		b.chk.add(s.track.ID, s.track.ArtistID, b.at(start))
+		out = append(out, s)
+	}
+	slices.Reverse(out)
+	return out, start
+}
+
+// dropBlock gives up the end block: the chain before it runs past its
+// start.
+func (b *builder) dropBlock(block []blockItem, reason string) {
+	for _, bi := range block {
+		if bi.hourInsert != nil {
+			b.refuse(bi.hourInsert, ReasonDoesNotFit, reason)
+		} else {
+			b.warnRule(WarnRuleSlotSkipped, bi.playlist, "the end track is skipped: %s", reason)
+		}
+	}
+}
+
+// ruleMissing warns that a rule playlist has no track for a slot: blocked
+// by play rules, or without a track that can be planned.
+func (b *builder) ruleMissing(i, offset int, slot string) {
+	if len(b.tracks[b.in.Clock.Playlists[i].PlaylistID]) == 0 {
+		b.warnRule(WarnRuleSlotSkipped, i, "%s is skipped: the playlist has no track that can be planned", slot)
+		return
+	}
+	b.warnRule(WarnRuleBlocked, i, "%s is skipped: play rules block every fitting track of the playlist at %s", slot, b.clock(offset))
+}
+
+// placeAnchor places a timed insert where the content before it ends, but
+// not before its window opens. Past its window, a template insert is
+// skipped and a one-time insert refused. A template insert that crosses
+// the end of the hour is cut there; a one-time insert plays whole.
+func (b *builder) placeAnchor(a anchor) {
+	start := max(b.cursor, a.earliest)
+	switch {
+	case start > a.latest && a.hourInsert != nil:
+		b.refuse(a.hourInsert, ReasonDoesNotFit,
+			fmt.Sprintf("the content before it runs to %s, past its window %s to %s", clockTime(start), clockTime(a.earliest), clockTime(a.latest)))
+		return
+	case start > a.latest:
+		b.warn(Warning{
+			Code: WarnInsertSkipped, InsertIndex: a.item.InsertIndex, TrackID: new(a.track.ID),
+			Message: fmt.Sprintf("the insert at %s is skipped: the content before it runs to %s, past its window",
+				clockTime(a.target), clockTime(start)),
+		})
+		return
+	case a.hourInsert != nil && start+a.track.DurationMS > clocks.HourMS:
+		b.refuse(a.hourInsert, ReasonDoesNotFit, fmt.Sprintf("starting at %s it runs past the end of the hour", clockTime(start)))
+		return
+	}
+	b.place(a.track, a.item, start, clocks.HourMS, kindInsert, false)
+}
+
+// placeStartInsert places a one-time start insert at the cursor.
+func (b *builder) placeStartInsert(h *Insert) {
+	t, ok := b.hourTrack(h, b.cursor)
+	if !ok {
+		return
+	}
+	b.place(t, hourItem(h), b.cursor, clocks.HourMS, kindInsert, true)
+}
+
+// placeStartRule places the start track of a rule playlist at the cursor.
+func (b *builder) placeStartRule(i int) {
+	pid := b.in.Clock.Playlists[i].PlaylistID
+	allowed := b.allowedOf(b.tracks[pid], b.cursor)
+	if len(allowed) == 0 {
+		b.ruleMissing(i, b.cursor, "the start track")
+		return
+	}
+	t := allowed[b.rng.IntN(len(allowed))]
+	b.place(t, Item{Source: SourceRule, PlaylistID: new(pid)}, b.cursor, clocks.HourMS, kindRule, true)
+}
+
+// softAnchors returns the middle and spread slots, by target. A spread
+// playlist cuts the free time (the hour without the start block, the
+// inserts, and the end block) into equal parts; each slot lies at a random
+// point of the middle half of its part, with a window of a quarter part on
+// each side.
+func (b *builder) softAnchors(anchors []anchor, blockStart int, hasBlock bool) []soft {
+	type span struct{ from, to int }
+	busy := []span{{0, b.cursor}}
+	for _, a := range anchors {
+		busy = append(busy, span{a.target, min(a.target+a.track.DurationMS, clocks.HourMS)})
+	}
+	if hasBlock {
+		busy = append(busy, span{blockStart, clocks.HourMS})
+	}
+	slices.SortFunc(busy, func(a, b span) int { return a.from - b.from })
+	var free []span
+	at, total := 0, 0
+	for _, s := range busy {
+		if s.from > at {
+			free = append(free, span{at, s.from})
+			total += s.from - at
+		}
+		at = max(at, s.to)
+	}
+	if at < clocks.HourMS {
+		free = append(free, span{at, clocks.HourMS})
+		total += clocks.HourMS - at
+	}
+	clockAt := func(x int) int {
+		for _, f := range free {
+			if x < f.to-f.from {
+				return f.from + max(x, 0)
+			}
+			x -= f.to - f.from
+		}
+		return clocks.HourMS
+	}
+
+	var out []soft
+	for i, p := range b.in.Clock.Playlists {
+		switch p.EffectiveRule() {
+		case clocks.RuleMiddle:
+			out = append(out, soft{
+				target: middleTargetMS, earliest: middleTargetMS - middleWindowMS,
+				latest: middleTargetMS + middleWindowMS, playlist: i,
+			})
+		case clocks.RuleSpread:
+			n := 1
+			if c := p.EffectiveCount(); c != nil {
+				n = *c
+			}
+			part := total / n
+			if part <= 0 {
+				b.warnRule(WarnRuleSlotSkipped, i, "the hour has no free time for its %d tracks", n)
+				continue
+			}
+			for k := range n {
+				x := k*part + part/4 + b.rng.IntN(max(part/2, 1))
+				out = append(out, soft{target: clockAt(x), earliest: clockAt(x - part/4), latest: clockAt(x + part/4), playlist: i})
+			}
+		}
+	}
+	slices.SortStableFunc(out, func(a, b soft) int { return a.target - b.target })
+	return out
+}
+
+// nextSoft returns the first slot that is still open and lies before limit.
+func (b *builder) nextSoft(limit int) *soft {
+	if len(b.softs) == 0 || b.softs[0].target >= limit {
+		return nil
+	}
+	return &b.softs[0]
+}
+
+func (b *builder) popSoft() { b.softs = b.softs[1:] }
+
+// fillTo fills the time up to the window of h with fill tracks, placing the
+// rule tracks of the slots on the way.
+func (b *builder) fillTo(h hard) {
+	emergency := false
+	for {
+		s := b.nextSoft(h.target)
+		if s != nil && b.cursor > s.latest {
+			b.warnRule(WarnRuleSlotSkipped, s.playlist, "the slot %s to %s is passed", clockTime(s.earliest), clockTime(s.latest))
+			b.popSoft()
+			continue
+		}
+		if s != nil && b.cursor >= s.earliest && b.prev == kindFill {
+			b.placeSoft(*s, h)
+			b.popSoft()
+			continue
+		}
+		if h.earliest-b.cursor < b.minGap {
+			return // the gap stays: the next point starts earlier within its window, or later
+		}
+
+		t, pid, ok := b.drawFill()
+		src := SourceFill
+		if !ok {
+			t, ok = b.closest(b.allowedOf(b.in.Library.Tracks, b.cursor), h.target-b.cursor)
+			if !ok {
+				b.warn(Warning{Code: WarnEmergency, Message: fmt.Sprintf(
+					"no track passes the play rules at %s; the gap to %s is left for the emergency source", b.clock(b.cursor), clockTime(h.target))})
+				return
+			}
+			if !emergency {
+				emergency = true
+				b.warn(Warning{Code: WarnGeneralPool, TrackID: new(t.ID), Message: fmt.Sprintf(
+					"no fill track passes the play rules at %s; chosen from the whole library", b.clock(b.cursor))})
+			}
+			src, pid = SourceGeneral, nil
+		}
+		end := b.cursor + t.DurationMS
+		switch {
+		case end > h.earliest:
+			if bt, bpid, ok := b.bestFit(h.earliest, h.latest, h.target); ok && src == SourceFill {
+				b.place(bt, Item{Source: SourceFill, PlaylistID: bpid}, b.cursor, clocks.HourMS, kindFill, true)
+				return
+			}
+			if end <= h.latest {
+				b.place(t, Item{Source: src, PlaylistID: pid}, b.cursor, clocks.HourMS, kindFill, true)
+				return
+			}
+			if h.target-b.cursor < minAirMS {
+				b.warn(Warning{Code: WarnGapUnfilled, Message: fmt.Sprintf(
+					"the %d s gap before %s is too short for any track", (h.target-b.cursor)/1000, clockTime(h.target))})
+				return
+			}
+			b.place(t, Item{Source: src, PlaylistID: pid}, b.cursor, h.target, kindFill, true)
+			return
+		case s != nil && b.cursor < s.earliest && end > s.earliest && src == SourceFill:
+			if bt, bpid, ok := b.bestFit(s.earliest, min(s.latest, h.earliest), s.target); ok {
+				t, pid = bt, bpid
+			}
+		}
+		b.place(t, Item{Source: src, PlaylistID: pid}, b.cursor, clocks.HourMS, kindFill, true)
+	}
+}
+
+// placeSoft places the rule track of a slot at the cursor. It is skipped
+// when it would end next to the insert or end track that follows, or past
+// the end of the hour.
+func (b *builder) placeSoft(s soft, h hard) {
+	pid := b.in.Clock.Playlists[s.playlist].PlaylistID
+	room := h.earliest
+	if h.insert != nil || h.endBlock {
+		room -= b.minGap // a fill track must follow it
+	}
 	var fit []Track
-	for _, t := range ts {
-		if abs(t.DurationMS-target) <= tol {
+	for _, t := range b.allowedOf(b.tracks[pid], b.cursor) {
+		if b.cursor+t.DurationMS <= room {
 			fit = append(fit, t)
 		}
 	}
 	if len(fit) == 0 {
-		return Track{}, false
+		if len(b.allowedOf(b.tracks[pid], b.cursor)) == 0 {
+			b.ruleMissing(s.playlist, b.cursor, "the slot at "+clockTime(s.target))
+			return
+		}
+		b.warnRule(WarnRuleSlotSkipped, s.playlist, "the slot at %s is skipped: its track would end next to the insert or past the hour",
+			clockTime(s.target))
+		return
 	}
-	if best {
-		return b.closest(fit, target)
-	}
-	return fit[b.rng.IntN(len(fit))], true
+	t := fit[b.rng.IntN(len(fit))]
+	b.place(t, Item{Source: SourceRule, PlaylistID: new(pid)}, b.cursor, clocks.HourMS, kindRule, true)
 }
 
-// closest returns the track whose duration is nearest to target; ties are
+// drawFill draws a fill playlist by share, then a random track of it that
+// may start at the cursor. A playlist without an allowed track leaves the
+// draw for this track.
+func (b *builder) drawFill() (Track, *uint64, bool) {
+	left := slices.Clone(b.fill)
+	for len(left) > 0 {
+		total := 0
+		for _, f := range left {
+			total += f.weight
+		}
+		r := b.rng.IntN(total)
+		k := 0
+		for ; r >= left[k].weight; k++ {
+			r -= left[k].weight
+		}
+		allowed := b.allowedOf(b.tracks[left[k].playlistID], b.cursor)
+		if len(allowed) > 0 {
+			return allowed[b.rng.IntN(len(allowed))], new(left[k].playlistID), true
+		}
+		left = slices.Delete(left, k, k+1)
+	}
+	return Track{}, nil, false
+}
+
+// bestFit returns the allowed fill track that, started at the cursor, ends
+// within [earliest, latest] closest to target; ties are broken at random.
+func (b *builder) bestFit(earliest, latest, target int) (Track, *uint64, bool) {
+	type cand struct {
+		t   Track
+		pid uint64
+	}
+	seen := map[uint64]bool{}
+	var best []cand
+	bestDiff := -1
+	for _, f := range b.fill {
+		for _, t := range b.allowedOf(b.tracks[f.playlistID], b.cursor) {
+			end := b.cursor + t.DurationMS
+			if seen[t.ID] || end < earliest || end > latest {
+				continue
+			}
+			seen[t.ID] = true
+			switch d := abs(end - target); {
+			case bestDiff < 0 || d < bestDiff:
+				bestDiff, best = d, append(best[:0], cand{t, f.playlistID})
+			case d == bestDiff:
+				best = append(best, cand{t, f.playlistID})
+			}
+		}
+	}
+	if len(best) == 0 {
+		return Track{}, nil, false
+	}
+	c := best[b.rng.IntN(len(best))]
+	return c.t, new(c.pid), true
+}
+
+// closest returns the track whose length is nearest to want; ties are
 // broken at random.
-func (b *builder) closest(ts []Track, target int) (Track, bool) {
+func (b *builder) closest(ts []Track, want int) (Track, bool) {
 	if len(ts) == 0 {
 		return Track{}, false
 	}
-	bestDiff := abs(ts[0].DurationMS - target)
+	bestDiff := abs(ts[0].DurationMS - want)
 	var ties []Track
 	for _, t := range ts {
-		switch d := abs(t.DurationMS - target); {
+		switch d := abs(t.DurationMS - want); {
 		case d < bestDiff:
 			bestDiff, ties = d, append(ties[:0], t)
 		case d == bestDiff:
@@ -241,162 +710,36 @@ func (b *builder) closest(ts []Track, target int) (Track, bool) {
 	return ties[b.rng.IntN(len(ties))], true
 }
 
-// allEligible returns the library tracks that match and pass the rules at
-// at.
-func (b *builder) allEligible(at time.Time, match func(Track) bool) []Track {
-	var out []Track
-	for _, t := range b.in.Library.Tracks {
-		if match(t) && b.chk.eligible(t, at) {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// place adds a track at cursor under the crossing rule and returns the new
-// cursor and whether the segment is full.
-func (b *builder) place(t Track, elementID *uint64, cursor int, w window, src Source, poolRow *uint64) (int, bool) {
-	it := Item{
-		TrackID: t.ID, ElementID: elementID, OffsetMS: cursor, InMS: t.CueInMS, OutMS: t.CueInMS + t.DurationMS,
-		Source: src, PoolRowID: poolRow,
-	}
-	end, full := cursor+t.DurationMS, false
-	if end > w.latest {
-		if cursor >= w.target {
-			return cursor, true // removed: it would not play at all
-		}
-		it.OutMS, it.Truncated = t.CueInMS+w.target-cursor, true
-		end, full = w.target, true
+// place adds a track at offset, cut at cutAt with the crossing rule (it is
+// marked truncated and faded out by Liquidsoap), and moves the cursor to
+// its end. record adds its start to the checker; anchors were recorded
+// when they were resolved.
+func (b *builder) place(t Track, it Item, offset, cutAt int, k kind, record bool) {
+	it.TrackID, it.OffsetMS, it.InMS, it.OutMS = t.ID, offset, t.CueInMS, t.CueInMS+t.DurationMS
+	end := offset + t.DurationMS
+	if cutAt = min(cutAt, clocks.HourMS); end > cutAt {
+		it.OutMS, it.Truncated, end = t.CueInMS+cutAt-offset, true, cutAt
 	}
 	b.plan.Items = append(b.plan.Items, it)
-	b.chk.add(t.ID, t.ArtistID, b.at(cursor))
-	return end, full
+	if record {
+		b.chk.add(t.ID, t.ArtistID, b.at(offset))
+	}
+	b.cursor, b.prev = end, k
 }
 
-// fillState is the filler source of one gap; it falls back to the default
-// mode when the answer or the pool cannot serve.
-type fillState struct {
-	mode   clocks.Filler
-	answer bool
+func (b *builder) warn(w Warning) { b.plan.Warnings = append(b.plan.Warnings, w) }
+
+func (b *builder) warnRule(code WarningCode, playlist int, format string, args ...any) {
+	b.warn(Warning{Code: code, PlaylistIndex: new(playlist), Message: fmt.Sprintf(format, args...)})
 }
 
-// fill closes the gap before the segment's earliest end with filler (§7)
-// and returns the new cursor.
-func (b *builder) fill(seg clocks.Segment, cursor int, w window) int {
-	minGap := max(b.in.Settings.MinFillerGapMS, 1)
-	if w.earliest-cursor < minGap {
-		return cursor
-	}
-	holder := b.in.Clock.Elements[seg.Holder].Filler
-	st := fillState{mode: holder}
-	asks := holder.Mode == clocks.FillerAsk || (holder.Mode == clocks.FillerNone && seg.ShortfallMS > 0)
-	switch {
-	case asks:
-		if len(b.plan.Asked) == 0 {
-			b.plan.AskMode = holder.Mode
-		}
-		b.plan.Asked = append(b.plan.Asked, seg.Index)
-		switch b.in.Waiting {
-		case WaitAsk:
-			b.warn(WarnFillerWaiting, nil, &seg.Index, nil, "segment %d is short by %d s and waits for the filler reminder",
-				seg.Index, (w.earliest-cursor+999)/1000)
-			return cursor
-		case WaitAnswer:
-			st.answer = !b.answered
-			b.answered = true
-		}
-		st.mode = b.in.DefaultFiller
-	case holder.Mode == clocks.FillerNone:
-		st.mode = b.in.DefaultFiller
-	}
-
-	for range maxFillerTracks {
-		if w.earliest-cursor < minGap {
-			break
-		}
-		t, src, row, ok := b.fillerTrack(&st, seg.Index, b.at(cursor), w.target-cursor)
-		if !ok {
-			b.warn(WarnGapUnfilled, nil, &seg.Index, nil, "no filler track passes the rules for the %d s gap of segment %d",
-				(w.earliest-cursor+999)/1000, seg.Index)
-			break
-		}
-		var full bool
-		if cursor, full = b.place(t, nil, cursor, w, src, row); full {
-			break
-		}
-	}
-	return cursor
+// clock formats an offset into the hour as station local HH:MM:SS.
+func (b *builder) clock(offset int) string {
+	return b.at(offset).In(b.in.Location).Format(time.TimeOnly)
 }
 
-// fillerTrack picks one filler track at at, the best fit to want.
-func (b *builder) fillerTrack(st *fillState, segment int, at time.Time, want int) (Track, Source, *uint64, bool) {
-	if st.answer {
-		st.answer = false
-		if t, ok := b.in.Library.track(b.in.AnswerTrackID); ok && b.chk.eligible(t, at) {
-			return t, SourceFillerAnswer, nil, true
-		}
-		b.plan.AnswerRefused = true
-	}
-	if st.mode.Mode == clocks.FillerPool {
-		if t, row, ok := b.poolTrack(segment, at); ok {
-			return t, SourceFillerPool, &row, true
-		}
-		st.mode = b.in.DefaultFiller
-	}
-	match, src := func(Track) bool { return true }, SourceFillerRandom
-	if id := st.mode.SourceID; id != nil {
-		switch st.mode.Mode {
-		case clocks.FillerPlaylist:
-			match, src = func(t Track) bool { return t.inAny([]uint64{*id}) }, SourceFillerPlaylist
-		case clocks.FillerArtist:
-			match, src = func(t Track) bool { return t.ArtistID != nil && *t.ArtistID == *id }, SourceFillerArtist
-		}
-		// A source with no track at all (a fallback playlist deleted since
-		// it was set) fills at random.
-		if !slices.ContainsFunc(b.in.Library.Tracks, match) {
-			match, src = func(Track) bool { return true }, SourceFillerRandom
-		}
-	}
-	t, ok := b.closest(b.allEligible(at, match), want)
-	return t, src, nil, ok
-}
-
-// poolTrack takes the next pool track that passes the rules at at. A
-// refused track is skipped with a warning and stays unused in the pool.
-func (b *builder) poolTrack(segment int, at time.Time) (Track, uint64, bool) {
-	if len(b.pool) == 0 {
-		b.plan.PoolEmpty = true
-		b.warn(WarnPoolEmpty, nil, &segment, nil, "the filler pool is empty; the default filler mode is used")
-		return Track{}, 0, false
-	}
-	for len(b.pool) > 0 {
-		row := b.pool[0]
-		b.pool = b.pool[1:]
-		if t, ok := b.in.Library.track(row.TrackID); ok && b.chk.eligible(t, at) {
-			return t, row.ID, true
-		}
-		b.warn(WarnPoolTrackRefused, nil, &segment, &row.TrackID, "pool track %d breaks separation or a play rule at %s; skipped",
-			row.TrackID, b.clock(at))
-	}
-	return Track{}, 0, false
-}
-
-func (b *builder) warn(code WarningCode, element, segment *int, trackID *uint64, format string, args ...any) {
-	b.plan.Warnings = append(b.plan.Warnings, Warning{
-		Code: code, Message: fmt.Sprintf(format, args...),
-		Element: copyPtr(element), Segment: copyPtr(segment), TrackID: copyPtr(trackID),
-	})
-}
-
-// clock formats an instant as station local HH:MM:SS.
-func (b *builder) clock(at time.Time) string { return at.In(b.in.Location).Format(time.TimeOnly) }
-
-func copyPtr[T any](p *T) *T {
-	if p == nil {
-		return nil
-	}
-	return new(*p)
-}
+// clockTime formats an offset into the hour as MM:SS.
+func clockTime(ms int) string { return fmt.Sprintf("%02d:%02d", ms/minuteMS, ms/1000%60) }
 
 func abs(v int) int {
 	if v < 0 {

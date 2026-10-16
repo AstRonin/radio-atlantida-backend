@@ -210,7 +210,7 @@ func assignInput(clockID uint64, weekdays, hours []int, from string, to *string)
 }
 
 func gridClockDTO(c grid.ClockRef) dto.GridClockRef {
-	return dto.GridClockRef{ID: c.ID, Name: c.Name, Status: string(c.Status)}
+	return dto.GridClockRef{ID: c.ID, Name: c.Name}
 }
 
 func slotDTO(s grid.Slot) dto.GridSlot {

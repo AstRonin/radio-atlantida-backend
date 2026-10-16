@@ -181,7 +181,7 @@ WHERE id = $1`, id, r.format, analysedAt, codes[:r.issues], reviewedAt)
 			// A queued item, and a later planned one that is not the next.
 			start := time.Date(2026, 10, 17, *r.planned, 0, 0, 0, time.UTC)
 			_, err = f.d.Pool.Exec(ctx, `INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
-VALUES ($1, $2, $3, 1000, 'clock', 'queued'), ($1, $2, $3::timestamptz + interval '20 hours', 1000, 'clock', 'planned')`,
+VALUES ($1, $2, $3, 1000, 'fill', 'queued'), ($1, $2, $3::timestamptz + interval '20 hours', 1000, 'fill', 'planned')`,
 				clock, id, start)
 			require.NoError(t, err)
 		}

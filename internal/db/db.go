@@ -38,7 +38,7 @@ const (
 
 // DB holds the two handles over one connection pool.
 type DB struct {
-	// Pool is used for hot paths (play log, rotation, separation,
+	// Pool is used for hot paths (play log, rotation, play rule checks,
 	// reconciliation).
 	Pool *pgxpool.Pool
 	// Gorm is used for admin CRUD.

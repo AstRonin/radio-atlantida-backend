@@ -15,7 +15,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/grid"
 )
@@ -46,20 +45,19 @@ func writeError(op string, err error) error {
 }
 
 type slotRow struct {
-	ID          uint64
-	Weekday     int
-	Hour        int
-	ValidFrom   time.Time
-	ValidTo     *time.Time
-	ClockID     uint64
-	ClockName   string
-	ClockStatus string
+	ID        uint64
+	Weekday   int
+	Hour      int
+	ValidFrom time.Time
+	ValidTo   *time.Time
+	ClockID   uint64
+	ClockName string
 }
 
 func (r slotRow) domain() grid.Slot {
 	out := grid.Slot{
 		ID: r.ID, Weekday: r.Weekday, Hour: r.Hour, ValidFrom: civil(r.ValidFrom),
-		Clock: grid.ClockRef{ID: r.ClockID, Name: r.ClockName, Status: clocks.Status(r.ClockStatus)},
+		Clock: grid.ClockRef{ID: r.ClockID, Name: r.ClockName},
 	}
 	if r.ValidTo != nil {
 		out.ValidTo = new(civil(*r.ValidTo))
@@ -75,7 +73,7 @@ func civil(t time.Time) time.Time {
 
 const selectSlots = `
 SELECT s.id, s.weekday, s.hour, s.valid_from, s.valid_to,
-       c.id AS clock_id, c.name AS clock_name, c.status AS clock_status
+       c.id AS clock_id, c.name AS clock_name
 FROM grid_slots s
 JOIN clocks c ON c.id = s.clock_id`
 

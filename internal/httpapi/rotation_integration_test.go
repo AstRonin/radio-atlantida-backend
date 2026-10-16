@@ -47,25 +47,11 @@ func (a *libraryAPI) plan() dto.TrackPlan {
 	return p
 }
 
-// filler adds a 3-minute track in no playlist: the best random filler for
-// the 3 minutes a 3 × 19 minute clock leaves.
-func (f *clockFixture) filler() uint64 {
-	return f.exec(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('Filler', 'filler/f.mp3', $1, 180000) RETURNING id`,
-		f.typeID("music"))
-}
-
 func TestTrackPlanFollowsGridAndClock(t *testing.T) {
 	f := newClockFixture(t)
-	filler := f.filler()
 
 	var saved dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{
-		"name": "Day",
-		"elements": []any{
-			element(f.music, 19), element(f.music, 19), element(f.music, 19, "filler_mode", "random"),
-		},
-	}, &saved)
-	require.Equal(t, "complete", saved.Clock.Status)
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("Day"), &saved)
 	f.waitOperation(saved.BuildOperationID)
 	require.Empty(t, f.plan().Items, "the clock is not in the grid yet")
 
@@ -83,32 +69,47 @@ func TestTrackPlanFollowsGridAndClock(t *testing.T) {
 	require.Equal(t, start, h.HourStartUTC)
 	require.Equal(t, saved.Clock.ID, h.Clock.ID)
 	require.Equal(t, assigned.Created[0].ID, *h.GridSlotID)
+	require.Empty(t, h.Inserts)
+	// Four songs of 19 minutes, each once (Hourly): three whole, the fourth
+	// cut at 60:00.
 	require.Len(t, h.Items, 4)
-	for i, it := range h.Items[:3] {
-		require.Equal(t, "clock", it.Source)
+	seen := map[uint64]bool{}
+	for i, it := range h.Items {
+		require.Equal(t, "fill", it.Source)
 		require.Equal(t, "planned", it.Status)
-		require.Equal(t, saved.Clock.Elements[i].ID, *it.ElementID)
 		require.Equal(t, start.Add(time.Duration(i)*19*time.Minute), it.PlannedStartUTC)
+		require.False(t, seen[it.TrackID])
+		seen[it.TrackID] = true
 	}
-	require.Equal(t, filler, h.Items[3].TrackID)
-	require.Equal(t, "filler_random", h.Items[3].Source)
-	require.False(t, h.Items[3].Truncated, "3:00 closes the gap exactly")
+	require.True(t, h.Items[3].Truncated)
+	require.Equal(t, 180000, h.Items[3].PlannedOutMS-h.Items[3].PlannedInMS)
 
 	// A rebuild of a current hour is a no-op; a clock change rebuilds it.
 	var again dto.ClockSaveResult
-	f.ok(http.StatusOK, http.MethodPost, fmt.Sprintf("/api/clocks/%d/save-incomplete", saved.Clock.ID), nil, &again)
-	op = f.waitOperation(again.BuildOperationID)
-	require.Contains(t, op.ResultSummary, "built 0 hours")
-	elements := make([]any, len(saved.Clock.Elements))
-	for i, e := range saved.Clock.Elements {
-		elements[i] = element(f.music, 19, "id", e.ID, "filler_mode", e.FillerMode)
-	}
-	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/clocks/%d", saved.Clock.ID), map[string]any{
-		"name": "Day 2", "elements": elements,
-	}, &again)
+	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/clocks/%d", saved.Clock.ID), f.musicClock("Day 2"), &again)
 	op = f.waitOperation(again.BuildOperationID)
 	require.Contains(t, op.ResultSummary, "built 1 hours")
 	require.True(t, f.plan().Items[0].BuiltAt.After(h.BuiltAt))
+
+	// A changed placement rule of a playlist in the clock rebuilds it too.
+	var pl dto.PlaylistSaved
+	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d", f.jingles), map[string]any{
+		"name": "Jingles", "type_id": f.typeID("jingle"), "clock_rule": "start",
+	}, &pl)
+	require.Nil(t, pl.BuildOperationID, "no clock uses the jingles")
+	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/clocks/%d", saved.Clock.ID), map[string]any{
+		"name": "Day 2", "playlists": []any{map[string]any{"playlist_id": f.music}, map[string]any{"playlist_id": f.jingles}},
+	}, &again)
+	f.waitOperation(again.BuildOperationID)
+	require.Equal(t, "rule", f.plan().Items[0].Items[0].Source, "the jingle starts the hour")
+	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d", f.jingles), map[string]any{
+		"name": "Jingles", "type_id": f.typeID("jingle"), "clock_rule": "end",
+	}, &pl)
+	op = f.waitOperation(pl.BuildOperationID)
+	require.Contains(t, op.ResultSummary, "built 1 hours")
+	items := f.plan().Items[0].Items
+	require.Equal(t, "fill", items[0].Source)
+	require.Equal(t, "rule", items[len(items)-1].Source, "the jingle ends the hour")
 
 	// Clearing the grid clears the plan, so the clock can be deleted.
 	f.ok(http.StatusOK, http.MethodPost, "/api/grid/unassign", map[string]any{
@@ -120,17 +121,15 @@ func TestTrackPlanFollowsGridAndClock(t *testing.T) {
 	f.ok(http.StatusNoContent, http.MethodDelete, fmt.Sprintf("/api/clocks/%d", saved.Clock.ID), nil, nil)
 }
 
-func TestFillerReminders(t *testing.T) {
+// The operator adds today's news to one planned hour; the hour is rebuilt
+// around it, a rebuild keeps it, and removing it rebuilds the hour again
+// (§7.2, docs/phase-23-plan.md §3.4).
+func TestHourInserts(t *testing.T) {
 	f := newClockFixture(t)
-	filler := f.filler()
-
-	// Short with holder none: incomplete, so the hour waits for a reminder.
+	news := f.exec(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('News', 'news/n.mp3', $1, 120000) RETURNING id`,
+		f.typeID("news"))
 	var saved dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{
-		"name":     "Short",
-		"elements": []any{element(f.music, 19), element(f.music, 19), element(f.music, 19)},
-	}, &saved)
-	require.Equal(t, "incomplete", saved.Clock.Status)
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("Day"), &saved)
 	date, weekday, start := tomorrowNoon(t)
 	var assigned dto.GridAssignResult
 	f.ok(http.StatusOK, http.MethodPost, "/api/grid/assign", map[string]any{
@@ -138,72 +137,79 @@ func TestFillerReminders(t *testing.T) {
 	}, &assigned)
 	f.waitOperation(assigned.BuildOperationID)
 
-	var reqs dto.FillerRequestList
-	f.ok(http.StatusOK, http.MethodGet, "/api/filler-requests", nil, &reqs)
-	require.Len(t, reqs.Items, 1)
-	r := reqs.Items[0]
-	require.Equal(t, "short_clock", r.Reason)
-	require.Equal(t, "none", r.Mode)
-	require.Equal(t, "pending", r.Status)
-	require.Equal(t, start, r.HourStartUTC)
-	require.Equal(t, start.Add(-2*time.Hour), r.DeadlineAt)
-	h := f.plan().Items[0]
-	require.Len(t, h.Items, 3, "the gap waits")
-	require.Equal(t, r.ID, *h.FillerRequestID)
-
-	answer := fmt.Sprintf("/api/filler-requests/%d/answer", r.ID)
-	// A track planned in the same hour breaks separation; nothing changes.
-	f.fieldError("track_id", errcodes.Blocked, http.MethodPost, answer, map[string]any{"track_id": h.Items[0].TrackID})
-	f.fieldError("track_id", errcodes.UnknownID, http.MethodPost, answer, map[string]any{"track_id": 999999})
-	f.problem(http.StatusNotFound, errcodes.FillerRequestNotFound, http.MethodPost, "/api/filler-requests/999999/answer",
-		map[string]any{"track_id": filler})
-	require.Len(t, f.plan().Items[0].Items, 3)
-
-	var answered dto.FillerRequest
-	f.ok(http.StatusOK, http.MethodPost, answer, map[string]any{"track_id": filler}, &answered)
-	require.Equal(t, "answered", answered.Status)
-	require.Equal(t, filler, *answered.AnswerTrackID)
-	h2 := f.plan().Items[0]
-	require.Len(t, h2.Items, 4)
-	require.Equal(t, "filler_answer", h2.Items[3].Source)
-	require.Equal(t, filler, h2.Items[3].TrackID)
-	require.Equal(t, h.Seed, h2.Seed, "an answer rebuilds the hour with its seed")
-	for i := range 3 {
-		require.Equal(t, h.Items[i].TrackID, h2.Items[i].TrackID, "same seed, same picks")
+	body := func(extra ...any) map[string]any {
+		b := map[string]any{"hour_start_utc": start.Format(time.RFC3339), "offset_ms": 1800000, "tolerance_ms": 0, "track_id": news}
+		for i := 0; i+1 < len(extra); i += 2 {
+			b[extra[i].(string)] = extra[i+1]
+		}
+		return b
 	}
-	f.problem(http.StatusConflict, errcodes.FillerRequestClosed, http.MethodPost, answer, map[string]any{"track_id": filler})
+	const path = "/api/track-plan/inserts"
+	f.fieldError("hour_start_utc", errcodes.Invalid, http.MethodPost, path, body("hour_start_utc", start.Add(time.Minute).Format(time.RFC3339)))
+	f.fieldError("hour_start_utc", errcodes.Range, http.MethodPost, path, body("hour_start_utc", time.Now().UTC().Truncate(time.Hour).Format(time.RFC3339)))
+	f.fieldError("hour_start_utc", errcodes.Invalid, http.MethodPost, path, body("hour_start_utc", start.Add(time.Hour).Format(time.RFC3339)))
+	f.fieldError("offset_ms", errcodes.Range, http.MethodPost, path, body("offset_ms", 1800500))
+	f.fieldError("offset_ms", errcodes.DoesNotFit, http.MethodPost, path, body("offset_ms", 3590000))
+	f.fieldError("track_id", errcodes.UnknownID, http.MethodPost, path, body("track_id", 999999))
 
-	// A forced rebuild asks again; when the deadline passes, the default
-	// mode (the global fallback: random) fills the gap.
-	var accepted dto.OperationAccepted
-	f.ok(http.StatusAccepted, http.MethodPost, "/api/track-plan/rebuild", map[string]any{
-		"from": start.Format(time.RFC3339), "to": start.Add(time.Hour).Format(time.RFC3339),
-	}, &accepted)
-	f.waitOperation(&accepted.OperationID)
-	f.ok(http.StatusOK, http.MethodGet, "/api/filler-requests", nil, &reqs)
-	require.Len(t, reqs.Items, 1)
-	require.NotEqual(t, r.ID, reqs.Items[0].ID)
-	require.Len(t, f.plan().Items[0].Items, 3)
+	// 12:30:00 sharp: the music before it is cut at 30:00 or ends there.
+	var acc dto.OperationAccepted
+	f.ok(http.StatusAccepted, http.MethodPost, path, body(), &acc)
+	op := f.waitOperation(&acc.OperationID)
+	require.Contains(t, op.ResultSummary, "placed at 12:30:00")
+	h := f.plan().Items[0]
+	require.Len(t, h.Inserts, 1)
+	ins := h.Inserts[0]
+	require.Equal(t, dto.TrackPlanInsert{ID: ins.ID, Placement: "fixed", OffsetMS: new(1800000), ToleranceMS: 0, TrackID: news}, ins)
+	var placed *dto.TrackPlanItem
+	for i, it := range h.Items {
+		if it.Source == "hour_insert" {
+			placed = &h.Items[i]
+			require.Equal(t, start.Add(30*time.Minute), h.Items[i].PlannedStartUTC)
+			require.Equal(t, start.Add(30*time.Minute), h.Items[i-1].PlannedStartUTC.Add(time.Duration(h.Items[i-1].PlannedOutMS-h.Items[i-1].PlannedInMS)*time.Millisecond))
+		}
+	}
+	require.NotNil(t, placed, "%+v", h.Items)
+	require.Equal(t, ins.ID, *placed.HourInsertID)
 
-	// Within playout.prepush_minutes of its start the hour is frozen: its
-	// items may be in Liquidsoap's queue.
+	// A rebuild and a clock change keep it.
+	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/clocks/%d", saved.Clock.ID), f.musicClock("Day 2"), &saved)
+	f.waitOperation(saved.BuildOperationID)
+	h = f.plan().Items[0]
+	require.Len(t, h.Inserts, 1)
+	require.Contains(t, sourcesOf(h), "hour_insert")
+
+	// A track that breaks a play rule there: the operation fails and
+	// nothing changes.
+	var early dto.PlayRule
+	f.ok(http.StatusCreated, http.MethodPost, "/api/play-rules", map[string]any{"name": "Early", "window_from": "06:00", "window_to": "07:00"}, &early)
+	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d/play-rules", f.jingle), map[string]any{"rule_ids": []uint64{early.ID}}, nil)
+	f.ok(http.StatusAccepted, http.MethodPost, path, body("offset_ms", 600000, "track_id", f.jingle), &acc)
+	failed := f.waitFailed(acc.OperationID)
+	require.Contains(t, failed.ErrorMessage, "breaks a play rule")
+	require.Len(t, f.plan().Items[0].Inserts, 1)
+
+	// Removing it rebuilds the hour without it.
+	f.problem(http.StatusNotFound, errcodes.HourInsertNotFound, http.MethodDelete, path+"/999999", nil)
+	f.ok(http.StatusAccepted, http.MethodDelete, fmt.Sprintf("%s/%d", path, ins.ID), nil, &acc)
+	op = f.waitOperation(&acc.OperationID)
+	require.Contains(t, op.ResultSummary, "removed")
+	h = f.plan().Items[0]
+	require.Empty(t, h.Inserts)
+	require.NotContains(t, sourcesOf(h), "hour_insert")
+
+	// A frozen hour is refused.
+	f.ok(http.StatusAccepted, http.MethodPost, path, body(), &acc)
+	f.waitOperation(&acc.OperationID)
+	id := f.plan().Items[0].Inserts[0].ID
 	f.clock.set(start.Add(-2 * time.Minute))
-	f.problem(http.StatusConflict, errcodes.HourStarted, http.MethodPost,
-		fmt.Sprintf("/api/filler-requests/%d/answer", reqs.Items[0].ID), map[string]any{"track_id": filler})
+	f.problem(http.StatusConflict, errcodes.HourStarted, http.MethodDelete, fmt.Sprintf("%s/%d", path, id), nil)
+}
 
-	f.clock.set(start.Add(-time.Hour))
-	summary, err := f.rotation.RunJob(t.Context())
-	require.NoError(t, err)
-	require.Contains(t, summary, "1 reminders defaulted")
-	f.ok(http.StatusOK, http.MethodGet, "/api/filler-requests?status=defaulted", nil, &reqs)
-	require.Len(t, reqs.Items, 1)
-	h3 := f.plan().Items[0]
-	require.Len(t, h3.Items, 4)
-	require.Equal(t, "filler_random", h3.Items[3].Source)
-	f.problem(http.StatusConflict, errcodes.FillerRequestClosed, http.MethodPost,
-		fmt.Sprintf("/api/filler-requests/%d/answer", reqs.Items[0].ID), map[string]any{"track_id": filler})
-
-	f.fieldError("to", errcodes.Range, http.MethodPost, "/api/track-plan/rebuild", map[string]any{
-		"from": start.Format(time.RFC3339), "to": start.Format(time.RFC3339),
-	})
+func sourcesOf(h dto.TrackPlanHour) []string {
+	var out []string
+	for _, it := range h.Items {
+		out = append(out, it.Source)
+	}
+	return out
 }

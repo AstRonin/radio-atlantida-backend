@@ -7,12 +7,11 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 )
 
-// checker decides whether a track may start at a time: separation (§7) and
-// play rules (§7.3), against the history and what the build planned so far.
-// Neither is ever relaxed.
+// checker decides whether a track may start at a time by its play rules
+// (§7.3), against the history and what the build planned so far. The rules
+// are never relaxed.
 type checker struct {
 	loc   *time.Location
-	sep   Separation
 	rules map[uint64]playrules.RuleInput
 	// Starts per track and per artist, sorted.
 	byTrack  map[uint64][]time.Time
@@ -21,7 +20,7 @@ type checker struct {
 
 func newChecker(in HourInput) *checker {
 	c := &checker{
-		loc: in.Location, sep: in.Separation, rules: in.Library.Rules,
+		loc: in.Location, rules: in.Library.Rules,
 		byTrack: map[uint64][]time.Time{}, byArtist: map[uint64][]time.Time{},
 	}
 	for _, p := range in.History {
@@ -57,19 +56,12 @@ func within(ts []time.Time, at time.Time, d time.Duration) bool {
 	return i > 0 && at.Sub(ts[i-1]) < d
 }
 
-// separated reports whether the track passes track and artist separation at
-// at. A track without an artist has no artist separation.
-func (c *checker) separated(t Track, at time.Time) bool {
-	if within(c.byTrack[t.ID], at, c.sep.Track) {
-		return false
-	}
-	return t.ArtistID == nil || !within(c.byArtist[*t.ArtistID], at, c.sep.Artist)
-}
-
 // allowed reports whether every play rule of the track lets it start at at:
 // the time window and weekdays (station local), the minimum interval
-// between its starts, and the starts per local clock hour. A rule deleted
-// since the library was read does not limit.
+// between its starts, the minimum interval between starts of its artist
+// (from any playlist; a track without an artist has none), and the starts
+// per local clock hour. A rule deleted since the library was read does not
+// limit.
 func (c *checker) allowed(t Track, at time.Time) bool {
 	local := at.In(c.loc)
 	day := (int(local.Weekday())+6)%7 + 1
@@ -86,6 +78,10 @@ func (c *checker) allowed(t Track, at time.Time) bool {
 		if r.MinIntervalMinutes != nil && within(starts, at, time.Duration(*r.MinIntervalMinutes)*time.Minute) {
 			return false
 		}
+		if r.ArtistMinIntervalMinutes != nil && t.ArtistID != nil &&
+			within(c.byArtist[*t.ArtistID], at, time.Duration(*r.ArtistMinIntervalMinutes)*time.Minute) {
+			return false
+		}
 		if r.MaxPerHour != nil && startsInHour(starts, local) >= *r.MaxPerHour {
 			return false
 		}
@@ -100,9 +96,4 @@ func startsInHour(starts []time.Time, local time.Time) int {
 	lo, _ := slices.BinarySearchFunc(starts, from, time.Time.Compare)
 	hi, _ := slices.BinarySearchFunc(starts, to, time.Time.Compare)
 	return hi - lo
-}
-
-// eligible reports whether the track passes separation and its play rules.
-func (c *checker) eligible(t Track, at time.Time) bool {
-	return c.separated(t, at) && c.allowed(t, at)
 }

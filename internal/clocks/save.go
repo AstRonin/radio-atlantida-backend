@@ -12,20 +12,12 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
 )
 
-// Create saves a new clock and returns it with the dry check. A short
-// clock is saved incomplete; the panel then asks for the filler (§6.0).
+// Create saves a new clock and returns it with its dry check.
 func (s *Service) Create(ctx context.Context, in Input) (Result, error) {
 	c, err := s.prepare(ctx, in)
 	if err != nil {
 		return Result{}, err
 	}
-	arr, err := Arrange(c.Elements, nil)
-	if err != nil {
-		return Result{}, err
-	}
-	c.Elements = arr.Elements
-	c.Status = arr.Layout.Status(c.Elements)
-
 	wctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	var id uint64
@@ -36,119 +28,30 @@ func (s *Service) Create(ctx context.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{}, asFieldError(err)
 	}
-	return s.result(ctx, id, nil)
+	return s.result(ctx, id)
 }
 
-// Update replaces a clock and returns it with the dry check. Elements are
-// matched by ID; a new fixed element that overlaps an existing one replaces
-// it (§7.2). A refused save changes nothing.
+// Update replaces a clock (its playlists and inserts) and returns it with
+// its dry check. A refused save changes nothing.
 func (s *Service) Update(ctx context.Context, id uint64, in Input) (Result, error) {
 	c, err := s.prepare(ctx, in)
 	if err != nil {
 		return Result{}, err
 	}
 	c.ID = id
-	replaced, err := s.update(ctx, c)
-	if err != nil {
-		return Result{}, asFieldError(err)
-	}
-	return s.result(ctx, id, replaced)
-}
-
-// update arranges the clock against its stored elements and saves it, in
-// one transaction under the clock's lock.
-func (s *Service) update(ctx context.Context, c Clock) ([]Element, error) {
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	var replaced []Element
-	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		st := s.store.WithTx(tx)
-		if err := st.Lock(ctx, c.ID); err != nil {
-			return err
-		}
-		stored, err := st.Get(ctx, c.ID)
-		if err != nil {
-			return err
-		}
-		existing := map[uint64]bool{}
-		for _, e := range stored.Elements {
-			existing[e.ID] = true
-		}
-		arr, err := Arrange(c.Elements, existing)
-		if err != nil {
-			return err
-		}
-		replaced = arr.Replaced
-		c.Elements = arr.Elements
-		c.Status = arr.Layout.Status(c.Elements)
-		return st.Update(ctx, c)
-	})
-	return replaced, err
-}
-
-// SaveWithFiller stores the filler chosen in the dialog for each short
-// segment, on the segment's holder element, and the pool if given. Every
-// short segment must have a filler afterwards, so the clock is complete.
-func (s *Service) SaveWithFiller(ctx context.Context, id uint64, choice FillerChoice) (Result, error) {
-	errs := &validation.Error{}
-	for i, ch := range choice.Segments {
-		path := fmt.Sprintf("segments[%d]", i)
-		if ch.Filler.Mode == FillerNone {
-			errs.Add(path+".filler_mode", validation.Invalid, "choose a filler mode, or save the clock as incomplete")
-			continue
-		}
-		checkFiller(errs, path, ch.Filler, true)
-	}
-	if err := errs.Err(); err != nil {
-		return Result{}, err
-	}
-	if err := s.checkChoiceSources(ctx, choice.Segments); err != nil {
-		return Result{}, err
-	}
-
 	wctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	err := s.tx.WithTx(wctx, func(ctx context.Context, tx db.Tx) error {
+	err = s.tx.WithTx(wctx, func(ctx context.Context, tx db.Tx) error {
 		st := s.store.WithTx(tx)
-		if err := st.Lock(ctx, id); err != nil {
-			return err
+		if lockErr := st.Lock(ctx, id); lockErr != nil {
+			return lockErr
 		}
-		c, err := st.Get(ctx, id)
-		if err != nil {
-			return err
-		}
-		l, err := LayoutOf(c.Elements)
-		if err != nil {
-			return fmt.Errorf("layout of clock %d: %w", id, err)
-		}
-		if err := applyChoices(c.Elements, l, choice.Segments); err != nil {
-			return err
-		}
-		if uncovered := l.Uncovered(c.Elements); len(uncovered) > 0 {
-			return validation.Field("segments", validation.Required, "%s", shortSegments(uncovered))
-		}
-		if choice.PoolTrackIDs != nil {
-			if err := st.SetPool(ctx, id, choice.PoolTrackIDs); err != nil {
-				return err
-			}
-		}
-		if err := s.checkPool(ctx, st, c); err != nil {
-			return err
-		}
-		c.Status = l.Status(c.Elements)
 		return st.Update(ctx, c)
 	})
 	if err != nil {
 		return Result{}, asFieldError(err)
 	}
-	return s.result(ctx, id, nil)
-}
-
-// SaveIncomplete acknowledges a short clock without a filler choice: the
-// clock stays incomplete and shows its warning. Reminders for its hours in
-// the planning window are created by rotation (internal/rotation, §7).
-func (s *Service) SaveIncomplete(ctx context.Context, id uint64) (Result, error) {
-	return s.result(ctx, id, nil)
+	return s.result(ctx, id)
 }
 
 // Delete deletes a clock that no grid slot uses and that has no history.
@@ -170,183 +73,150 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 	return &InUseError{UsedBy: refs}
 }
 
-// Pool returns the filler pool of a clock.
-func (s *Service) Pool(ctx context.Context, id uint64) ([]PoolEntry, error) {
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	if _, err := s.store.Get(ctx, id); err != nil {
-		return nil, err
-	}
-	return s.store.Pool(ctx, id)
-}
-
-// SetPool replaces the unused rows of the filler pool with trackIDs, in
-// order. Used rows stay as history (§4).
-func (s *Service) SetPool(ctx context.Context, id uint64, trackIDs []uint64) ([]PoolEntry, error) {
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		st := s.store.WithTx(tx)
-		if err := st.Lock(ctx, id); err != nil {
-			return err
-		}
-		return st.SetPool(ctx, id, trackIDs)
-	})
-	if err != nil {
-		return nil, asFieldError(err)
-	}
-	return s.store.Pool(ctx, id)
-}
-
-// prepare checks the clock fields and the references of a save and returns
-// the clock with the tolerance defaults applied. The layout is checked by
-// Arrange.
+// prepare reads what the checks need and returns the clock of a save.
 func (s *Service) prepare(ctx context.Context, in Input) (Clock, error) {
-	errs := &validation.Error{}
-	c := Clock{Name: strings.TrimSpace(in.Name), DefaultFiller: in.DefaultFiller}
-	if c.Name == "" {
-		errs.Add("name", validation.Required, "must not be blank")
-	}
-	if c.DefaultFiller != nil {
-		checkFiller(errs, "", *c.DefaultFiller, false)
-	}
-	if err := errs.Err(); err != nil {
-		return Clock{}, err
-	}
-
 	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	set, err := s.settings(rctx)
 	if err != nil {
 		return Clock{}, fmt.Errorf("read clock settings: %w", err)
 	}
-	c.Elements = make([]Element, len(in.Elements))
-	for i, e := range in.Elements {
-		c.Elements[i] = Element{
-			ID: e.ID, Placement: e.Placement, FixedMinute: e.FixedMinute,
-			FixedToleranceMS:    orDefault(e.FixedToleranceMS, set.FixedToleranceMS),
-			NominalDurationMS:   e.NominalDurationMS,
-			DurationToleranceMS: orDefault(e.DurationToleranceMS, set.DurationToleranceMS),
-			Filler:              e.Filler,
-			PlaylistIDs:         e.PlaylistIDs,
+	var playlists, tracks []uint64
+	for _, p := range in.Playlists {
+		playlists = append(playlists, p.PlaylistID)
+	}
+	for _, ins := range in.Inserts {
+		if ins.PlaylistID != nil {
+			playlists = append(playlists, *ins.PlaylistID)
 		}
-		if c.Elements[i].Filler.Mode == "" {
-			c.Elements[i].Filler.Mode = FillerNone
+		if ins.TrackID != nil {
+			tracks = append(tracks, *ins.TrackID)
 		}
 	}
-	if err := s.checkRefs(rctx, c); err != nil {
+	own := map[uint64]PlaylistRule{}
+	if len(playlists) > 0 {
+		if own, err = s.store.PlaylistRules(rctx, uniq(playlists)); err != nil {
+			return Clock{}, fmt.Errorf("read playlist rules: %w", err)
+		}
+	}
+	missing := map[uint64]bool{}
+	if len(tracks) > 0 {
+		ids, err := s.store.MissingTracks(rctx, uniq(tracks))
+		if err != nil {
+			return Clock{}, fmt.Errorf("check tracks: %w", err)
+		}
+		for _, id := range ids {
+			missing[id] = true
+		}
+	}
+	return Check(in, own, missing, set.FixedToleranceMS)
+}
+
+// Check validates a save and returns the clock to store (§7.2). own holds
+// the rule of every playlist that exists; missingTracks the track IDs that
+// do not. defaultToleranceMS applies to an insert without a tolerance.
+// Refusals name the request field (playlists[2].fill_weight,
+// inserts[0].offset_ms).
+func Check(in Input, own map[uint64]PlaylistRule, missingTracks map[uint64]bool, defaultToleranceMS int) (Clock, error) {
+	errs := &validation.Error{}
+	c := Clock{Name: strings.TrimSpace(in.Name)}
+	if c.Name == "" {
+		errs.Add("name", validation.Required, "must not be blank")
+	}
+
+	seen := map[uint64]bool{}
+	fill, weighted, unweighted := 0, 0, -1
+	for i, p := range in.Playlists {
+		field := func(name string) string { return fmt.Sprintf("playlists[%d].%s", i, name) }
+		cp := ClockPlaylist{PlaylistID: p.PlaylistID, Rule: p.Rule, Count: p.Count, FillWeight: p.FillWeight}
+		rule, known := own[p.PlaylistID]
+		switch {
+		case !known:
+			errs.Add(field("playlist_id"), validation.UnknownID, "no playlist has ID %d", p.PlaylistID)
+		case seen[p.PlaylistID]:
+			errs.Add(field("playlist_id"), validation.Invalid, "the playlist is listed twice")
+		}
+		seen[p.PlaylistID] = true
+		cp.Own = rule
+		if p.Rule != nil && !p.Rule.Valid() {
+			errs.Add(field("clock_rule"), validation.Invalid, "must be one of fill, spread, start, end, start_end, middle")
+			continue
+		}
+		spreadOverride := p.Rule != nil && *p.Rule == RuleSpread
+		switch {
+		case spreadOverride && p.Count == nil:
+			errs.Add(field("clock_count"), validation.ClockCountRequired, "the spread rule needs the number of tracks")
+		case !spreadOverride && p.Count != nil:
+			errs.Add(field("clock_count"), validation.ClockCountNotAllowed, "only a spread override of the rule has a count")
+		case p.Count != nil && (*p.Count < 1 || *p.Count > MaxSpreadCount):
+			errs.Add(field("clock_count"), validation.Range, "must be between 1 and %d", MaxSpreadCount)
+		}
+		if !known {
+			c.Playlists = append(c.Playlists, cp)
+			continue
+		}
+		isFill := cp.EffectiveRule() == RuleFill
+		switch {
+		case p.FillWeight != nil && !isFill:
+			errs.Add(field("fill_weight"), validation.FillWeightNotAllowed, "only a fill playlist has a share")
+		case p.FillWeight != nil && (*p.FillWeight < 1 || *p.FillWeight > MaxFillWeight):
+			errs.Add(field("fill_weight"), validation.Range, "must be between 1 and %d", MaxFillWeight)
+		}
+		if isFill {
+			fill++
+			switch {
+			case p.FillWeight != nil:
+				weighted++
+			case unweighted < 0:
+				unweighted = i
+			}
+		}
+		c.Playlists = append(c.Playlists, cp)
+	}
+	switch {
+	case fill == 0:
+		errs.Add("playlists", validation.FillPlaylistRequired, "a clock needs at least one playlist whose placement rule is fill")
+	case weighted > 0 && unweighted >= 0:
+		errs.Add(fmt.Sprintf("playlists[%d].fill_weight", unweighted), validation.FillWeightsPartial,
+			"either every fill playlist has a share or none")
+	}
+
+	offsets := map[int]bool{}
+	for i, ins := range in.Inserts {
+		field := func(name string) string { return fmt.Sprintf("inserts[%d].%s", i, name) }
+		out := Insert{OffsetMS: ins.OffsetMS, ToleranceMS: defaultToleranceMS, TrackID: ins.TrackID, PlaylistID: ins.PlaylistID}
+		if ins.ToleranceMS != nil {
+			out.ToleranceMS = *ins.ToleranceMS
+		}
+		switch {
+		case ins.OffsetMS < 0 || ins.OffsetMS > MaxOffsetMS:
+			errs.Add(field("offset_ms"), validation.Range, "must be between 0 (00:00) and %d (59:59)", MaxOffsetMS)
+		case ins.OffsetMS%1000 != 0:
+			errs.Add(field("offset_ms"), validation.Format, "must be whole seconds")
+		case offsets[ins.OffsetMS]:
+			errs.Add(field("offset_ms"), validation.InsertOffsetTaken, "another insert starts at %s", clockTime(ins.OffsetMS))
+		}
+		offsets[ins.OffsetMS] = true
+		if out.ToleranceMS < 0 || out.ToleranceMS > MaxToleranceMS {
+			errs.Add(field("tolerance_ms"), validation.Range, "must be between 0 and %d", MaxToleranceMS)
+		}
+		switch {
+		case (ins.TrackID == nil) == (ins.PlaylistID == nil):
+			errs.Add(field("track_id"), validation.InsertSourceRequired, "set exactly one of track_id and playlist_id")
+		case ins.TrackID != nil && missingTracks[*ins.TrackID]:
+			errs.Add(field("track_id"), validation.UnknownID, "no track has ID %d", *ins.TrackID)
+		case ins.PlaylistID != nil:
+			if _, ok := own[*ins.PlaylistID]; !ok {
+				errs.Add(field("playlist_id"), validation.UnknownID, "no playlist has ID %d", *ins.PlaylistID)
+			}
+		}
+		c.Inserts = append(c.Inserts, out)
+	}
+	slices.SortStableFunc(c.Inserts, func(a, b Insert) int { return a.OffsetMS - b.OffsetMS })
+	if err := errs.Err(); err != nil {
 		return Clock{}, err
 	}
 	return c, nil
-}
-
-func orDefault(v *int, def int) int {
-	if v == nil {
-		return def
-	}
-	return *v
-}
-
-// checkRefs names the request field of every playlist or artist that does
-// not exist, so the panel can mark the element.
-func (s *Service) checkRefs(ctx context.Context, c Clock) error {
-	var playlists, artists []uint64
-	addSource := func(f *Filler) {
-		if f == nil || f.SourceID == nil {
-			return
-		}
-		switch f.Mode {
-		case FillerPlaylist:
-			playlists = append(playlists, *f.SourceID)
-		case FillerArtist:
-			artists = append(artists, *f.SourceID)
-		}
-	}
-	addSource(c.DefaultFiller)
-	for _, e := range c.Elements {
-		playlists = append(playlists, e.PlaylistIDs...)
-		addSource(&e.Filler)
-	}
-	missingP, missingA, err := s.missing(ctx, playlists, artists)
-	if err != nil {
-		return err
-	}
-	if len(missingP) == 0 && len(missingA) == 0 {
-		return nil
-	}
-
-	errs := &validation.Error{}
-	checkSource := func(field string, f *Filler) {
-		if f == nil || f.SourceID == nil {
-			return
-		}
-		if (f.Mode == FillerPlaylist && missingP[*f.SourceID]) || (f.Mode == FillerArtist && missingA[*f.SourceID]) {
-			errs.Add(field, validation.UnknownID, "no %s has ID %d", f.Mode, *f.SourceID)
-		}
-	}
-	checkSource("default_filler_source_id", c.DefaultFiller)
-	for i, e := range c.Elements {
-		for _, p := range e.PlaylistIDs {
-			if missingP[p] {
-				errs.Add(elementField(i, "playlist_ids"), validation.UnknownID, "no playlist has ID %d", p)
-				break
-			}
-		}
-		checkSource(elementField(i, "filler_source_id"), &e.Filler)
-	}
-	return errs.Err()
-}
-
-// checkChoiceSources refuses a filler choice whose playlist or artist does
-// not exist.
-func (s *Service) checkChoiceSources(ctx context.Context, choices []SegmentChoice) error {
-	var playlists, artists []uint64
-	for _, ch := range choices {
-		switch {
-		case ch.Filler.SourceID == nil:
-		case ch.Filler.Mode == FillerPlaylist:
-			playlists = append(playlists, *ch.Filler.SourceID)
-		case ch.Filler.Mode == FillerArtist:
-			artists = append(artists, *ch.Filler.SourceID)
-		}
-	}
-	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
-	missingP, missingA, err := s.missing(rctx, playlists, artists)
-	if err != nil {
-		return err
-	}
-	errs := &validation.Error{}
-	for i, ch := range choices {
-		f := ch.Filler
-		if f.SourceID != nil && ((f.Mode == FillerPlaylist && missingP[*f.SourceID]) || (f.Mode == FillerArtist && missingA[*f.SourceID])) {
-			errs.Add(fmt.Sprintf("segments[%d].filler_source_id", i), validation.UnknownID, "no %s has ID %d", f.Mode, *f.SourceID)
-		}
-	}
-	return errs.Err()
-}
-
-func (s *Service) missing(ctx context.Context, playlists, artists []uint64) (map[uint64]bool, map[uint64]bool, error) {
-	mp, ma := map[uint64]bool{}, map[uint64]bool{}
-	if len(playlists) > 0 {
-		ids, err := s.store.MissingPlaylists(ctx, uniq(playlists))
-		if err != nil {
-			return nil, nil, fmt.Errorf("check playlists: %w", err)
-		}
-		for _, id := range ids {
-			mp[id] = true
-		}
-	}
-	if len(artists) > 0 {
-		ids, err := s.store.MissingArtists(ctx, uniq(artists))
-		if err != nil {
-			return nil, nil, fmt.Errorf("check artists: %w", err)
-		}
-		for _, id := range ids {
-			ma[id] = true
-		}
-	}
-	return mp, ma, nil
 }
 
 func uniq(ids []uint64) []uint64 {
@@ -355,76 +225,19 @@ func uniq(ids []uint64) []uint64 {
 	return slices.Compact(out)
 }
 
-// applyChoices stores each choice on the holder of its segment. Two choices
-// for segments with the same holder must agree.
-func applyChoices(elements []Element, l Layout, choices []SegmentChoice) error {
-	errs := &validation.Error{}
-	chosen := map[int]int{} // holder → choice index
-	for i, ch := range choices {
-		field := fmt.Sprintf("segments[%d].segment", i)
-		if ch.Segment < 0 || ch.Segment >= len(l.Segments) {
-			errs.Add(field, validation.Range, "the clock has segments 0 to %d", len(l.Segments)-1)
-			continue
-		}
-		h := l.Segments[ch.Segment].Holder
-		if j, ok := chosen[h]; ok {
-			if !sameFiller(choices[j].Filler, ch.Filler) {
-				errs.Add(field, validation.Invalid,
-					"segments %d and %d are filled by the same element, so they need the same filler",
-					choices[j].Segment, ch.Segment)
-			}
-			continue
-		}
-		chosen[h] = i
-		elements[h].Filler = ch.Filler
-	}
-	return errs.Err()
-}
-
-func sameFiller(a, b Filler) bool {
-	if a.Mode != b.Mode || (a.SourceID == nil) != (b.SourceID == nil) {
-		return false
-	}
-	return a.SourceID == nil || *a.SourceID == *b.SourceID
-}
-
-// checkPool refuses the pool filler mode while the pool has no unused track.
-func (s *Service) checkPool(ctx context.Context, st Store, c Clock) error {
-	usesPool := slices.ContainsFunc(c.Elements, func(e Element) bool { return e.Filler.Mode == FillerPool })
-	if !usesPool {
-		return nil
-	}
-	pool, err := st.Pool(ctx, c.ID)
-	if err != nil {
-		return fmt.Errorf("read filler pool of clock %d: %w", c.ID, err)
-	}
-	if !slices.ContainsFunc(pool, func(p PoolEntry) bool { return p.UsedAt == nil }) {
-		return validation.Field("pool_track_ids", validation.Required, "the pool filler mode needs at least one unused track in the pool")
-	}
-	return nil
-}
-
-func shortSegments(segs []Segment) string {
-	parts := make([]string, len(segs))
-	for i, s := range segs {
-		parts[i] = fmt.Sprintf("segment %d is short by %d s", s.Index, (s.ShortfallMS+999)/1000)
-	}
-	return strings.Join(parts, "; ") + ": choose a filler for each, or save the clock as incomplete"
-}
-
 // result reads the saved clock and runs the dry check on it.
-func (s *Service) result(ctx context.Context, id uint64, replaced []Element) (Result, error) {
-	v, err := s.Get(ctx, id)
+func (s *Service) result(ctx context.Context, id uint64) (Result, error) {
+	c, err := s.Get(ctx, id)
 	if err != nil {
 		return Result{}, err
 	}
 	cctx, cancel := context.WithTimeout(ctx, checkTimeout)
 	defer cancel()
-	warnings, err := s.warnings(cctx, v.Clock, v.Layout)
+	warnings, err := s.warnings(cctx, c)
 	if err != nil {
 		return Result{}, fmt.Errorf("dry check of clock %d: %w", id, err)
 	}
-	return Result{Clock: v.Clock, Layout: v.Layout, Warnings: warnings, Replaced: replaced}, nil
+	return Result{Clock: c, Warnings: warnings}, nil
 }
 
 var weekdayNames = [...]string{"", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
@@ -443,8 +256,11 @@ func slotName(sl SlotRef) string {
 	return fmt.Sprintf("%s %02d:00, %s to %s", day, sl.Hour, sl.ValidFrom.Format(time.DateOnly), to)
 }
 
+// clockTime formats an offset into the hour as MM:SS.
+func clockTime(ms int) string { return fmt.Sprintf("%02d:%02d", ms/60_000, ms/1000%60) }
+
 // fieldErrors maps store errors to the request field they concern. FK
-// errors from a race after checkRefs cannot name the element.
+// errors from a race after the checks cannot name the row.
 var fieldErrors = []struct {
 	err   error
 	field string
@@ -452,9 +268,8 @@ var fieldErrors = []struct {
 	msg   string
 }{
 	{ErrNameTaken, "name", validation.Taken, "another clock has this name"},
-	{ErrUnknownPlaylist, "elements", validation.UnknownID, "a playlist was deleted while the clock was saved"},
-	{ErrUnknownArtist, "elements", validation.UnknownID, "an artist was deleted while the clock was saved"},
-	{ErrUnknownTrack, "pool_track_ids", validation.UnknownID, "a track ID does not exist"},
+	{ErrUnknownPlaylist, "playlists", validation.UnknownID, "a playlist was deleted while the clock was saved"},
+	{ErrUnknownTrack, "inserts", validation.UnknownID, "a track was deleted while the clock was saved"},
 }
 
 func asFieldError(err error) error {

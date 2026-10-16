@@ -94,8 +94,7 @@ func (s *Artists) Rename(ctx context.Context, id uint64, name string) error {
 	return nil
 }
 
-// Delete removes an artist. Tracks, clock filler sources, and the play log
-// refuse it (RESTRICT).
+// Delete removes an artist. Tracks and the play log refuse it (RESTRICT).
 func (s *Artists) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM artists WHERE id = ?`, id)
 	if res.Error != nil {
@@ -107,19 +106,12 @@ func (s *Artists) Delete(ctx context.Context, id uint64) error {
 	return nil
 }
 
-// Users returns the tracks of the artist and the clocks that use it as
-// filler, at most limit of each kind.
+// Users returns the tracks of the artist, at most limit
+// (ix_tracks_artist_id).
 func (s *Artists) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
 	var rows []refRow
 	err := s.g.WithContext(ctx).Raw(`
-(SELECT 'track' AS kind, id, title AS name FROM tracks WHERE artist_id = ? ORDER BY title, id LIMIT ?)
-UNION ALL
-(SELECT 'clock' AS kind, c.id, c.name
- FROM clocks c
- WHERE c.default_filler_artist_id = ?
-    OR EXISTS (SELECT 1 FROM clock_elements e WHERE e.clock_id = c.id AND e.filler_artist_id = ?)
- ORDER BY c.name, c.id
- LIMIT ?)`, id, limit, id, id, limit).Scan(&rows).Error
+SELECT 'track' AS kind, id, title AS name FROM tracks WHERE artist_id = ? ORDER BY title, id LIMIT ?`, id, limit).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("select users of artist %d: %w", id, err)
 	}

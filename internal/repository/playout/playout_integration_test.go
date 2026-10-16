@@ -66,7 +66,7 @@ func (f *fixture) exec(sql string, args ...any) {
 // item plans a track at hour+offset.
 func (f *fixture) item(track uint64, offset time.Duration, outMS int, truncated bool) uint64 {
 	return f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, truncated, source)
-VALUES ($1, $2, $3, $4, $5, 'clock') RETURNING id`, f.clock, track, hour.Add(offset), outMS, truncated)
+VALUES ($1, $2, $3, $4, $5, 'fill') RETURNING id`, f.clock, track, hour.Add(offset), outMS, truncated)
 }
 
 type logRow struct {
@@ -203,7 +203,7 @@ func TestStartAndEnd(t *testing.T) {
 	// An item with an in point: the planned length is out - in, and the
 	// in point moves to the play log.
 	inPoint := f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, source)
-VALUES ($1, $2, $3, 5000, 45000, 'clock') RETURNING id`, f.clock, f.tracks[0], hour.Add(9*time.Minute))
+VALUES ($1, $2, $3, 5000, 45000, 'fill') RETURNING id`, f.clock, f.tracks[0], hour.Add(9*time.Minute))
 	moved, err = f.store.Start(ctx, inPoint, started)
 	require.NoError(t, err)
 	require.True(t, moved)

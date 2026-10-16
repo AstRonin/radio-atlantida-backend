@@ -1,5 +1,5 @@
-// Package rotation stores the track plan, the built hours, and the filler
-// reminders, and reads what a build needs (§7 of the design). It implements
+// Package rotation stores the track plan, the built hours, and the one-time
+// inserts, and reads what a build needs (§7 of the design). It implements
 // rotation.Store of the domain package with the same name; import it as
 // rotationrepo next to the domain. pgx: rotation is a hot path (§5).
 package rotation
@@ -48,12 +48,14 @@ type trackRow struct {
 	CueInMS     int32    `db:"cue_in_ms"`
 	PlaylistIDs []uint64 `db:"playlist_ids"`
 	RuleIDs     []uint64 `db:"rule_ids"`
+	Title       string   `db:"title"`
+	ArtistName  *string  `db:"artist_name"`
 }
 
 func (r trackRow) domain() rotation.Track {
 	return rotation.Track{
 		ID: r.ID, ArtistID: r.ArtistID, DurationMS: int(r.AirMS), CueInMS: int(r.CueInMS),
-		PlaylistIDs: r.PlaylistIDs, RuleIDs: r.RuleIDs,
+		PlaylistIDs: r.PlaylistIDs, RuleIDs: r.RuleIDs, Title: r.Title, ArtistName: r.ArtistName,
 	}
 }
 
@@ -63,6 +65,7 @@ type ruleRow struct {
 	WindowTo           pgtype.Time `db:"window_to"`
 	Weekdays           []int16     `db:"weekdays"`
 	MinIntervalMinutes *int32      `db:"min_interval_minutes"`
+	ArtistMinInterval  *int32      `db:"artist_min_interval_minutes"`
 	MaxPerHour         *int32      `db:"max_per_hour"`
 }
 
@@ -83,6 +86,9 @@ func (r ruleRow) domain() playrules.RuleInput {
 	if r.MinIntervalMinutes != nil {
 		out.MinIntervalMinutes = new(int(*r.MinIntervalMinutes))
 	}
+	if r.ArtistMinInterval != nil {
+		out.ArtistMinIntervalMinutes = new(int(*r.ArtistMinInterval))
+	}
 	if r.MaxPerHour != nil {
 		out.MaxPerHour = new(int(*r.MaxPerHour))
 	}
@@ -91,8 +97,8 @@ func (r ruleRow) domain() playrules.RuleInput {
 
 // Library returns every track with a duration, in ID order, with its
 // length on air (between its cue points, docs/phase-22-plan.md), its
-// playlists, the play rules of the track and of its playlists, and every
-// play rule. Tracks without a duration cannot be planned, nor can a track
+// playlists, the play rules of the track and of its playlists, its title
+// and artist (for the sample hour), and every play rule. Tracks without a duration cannot be planned, nor can a track
 // whose cue no longer fits its file (a duration entered by hand; an
 // analysis resets such a cue). The playlist and
 // rule lookups use pk_track_playlists, pk_track_play_rules, and
@@ -105,8 +111,10 @@ SELECT t.id, t.artist_id, COALESCE(t.cue_out_ms, t.duration_ms) - t.cue_in_ms AS
              UNION
              SELECT pr.rule_id FROM track_playlists tp2
              JOIN playlist_play_rules pr ON pr.playlist_id = tp2.playlist_id
-             WHERE tp2.track_id = t.id) AS rule_ids
+             WHERE tp2.track_id = t.id) AS rule_ids,
+       t.title, a.name AS artist_name
 FROM tracks t
+LEFT JOIN artists a ON a.id = t.artist_id
 WHERE t.duration_ms IS NOT NULL AND COALESCE(t.cue_out_ms, t.duration_ms) > t.cue_in_ms
   AND (t.cue_out_ms IS NULL OR t.cue_out_ms <= t.duration_ms)
 ORDER BY t.id`)
@@ -119,7 +127,8 @@ ORDER BY t.id`)
 	}
 
 	rows, err = s.q.Query(ctx, `
-SELECT id, window_from, window_to, weekdays, min_interval_minutes, max_per_hour FROM play_rules`)
+SELECT id, window_from, window_to, weekdays, min_interval_minutes, artist_min_interval_minutes, max_per_hour
+FROM play_rules`)
 	if err != nil {
 		return rotation.Library{}, fmt.Errorf("select play rules: %w", err)
 	}
@@ -132,19 +141,6 @@ SELECT id, window_from, window_to, weekdays, min_interval_minutes, max_per_hour 
 		out.Rules[r.ID] = r.domain()
 	}
 	return out, nil
-}
-
-// Separation returns the longest interval of each scope.
-func (s *Store) Separation(ctx context.Context) (rotation.Separation, error) {
-	var track, artist int
-	err := s.q.QueryRow(ctx, `
-SELECT COALESCE(max(min_interval_hours) FILTER (WHERE scope = 'track'), 0),
-       COALESCE(max(min_interval_hours) FILTER (WHERE scope = 'artist'), 0)
-FROM separation_rules`).Scan(&track, &artist)
-	if err != nil {
-		return rotation.Separation{}, fmt.Errorf("select separation: %w", err)
-	}
-	return rotation.Separation{Track: time.Duration(track) * time.Hour, Artist: time.Duration(artist) * time.Hour}, nil
 }
 
 type playRow struct {
@@ -196,26 +192,4 @@ WHERE si.status IN ('planned', 'queued')
 		return nil, fmt.Errorf("scan history: %w", err)
 	}
 	return plays, nil
-}
-
-type poolRow struct {
-	ID      uint64 `db:"id"`
-	TrackID uint64 `db:"track_id"`
-}
-
-// Pool returns the unused rows of a clock's pool in position order
-// (ix_clock_filler_pool_clock_id_position_unused).
-func (s *Store) Pool(ctx context.Context, clockID uint64) ([]rotation.PoolRow, error) {
-	rows, err := s.q.Query(ctx, `
-SELECT id, track_id FROM clock_filler_pool
-WHERE clock_id = $1 AND used_at IS NULL
-ORDER BY position`, clockID)
-	if err != nil {
-		return nil, fmt.Errorf("select pool of clock %d: %w", clockID, err)
-	}
-	out, err := db.CollectAll(rows, func(r poolRow) rotation.PoolRow { return rotation.PoolRow{ID: r.ID, TrackID: r.TrackID} })
-	if err != nil {
-		return nil, fmt.Errorf("scan pool of clock %d: %w", clockID, err)
-	}
-	return out, nil
 }

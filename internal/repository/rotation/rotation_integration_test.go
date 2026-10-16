@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/dbtest"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
@@ -28,7 +27,7 @@ type fixture struct {
 	artist   uint64
 	playlist uint64
 	rule     uint64
-	pool     []uint64
+	insert   uint64
 }
 
 var hour = time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
@@ -51,13 +50,11 @@ SELECT $1, $2, $3, $4, id FROM playlist_types WHERE code = 'music' RETURNING id`
 	for _, tr := range f.tracks[:2] {
 		f.exec(`INSERT INTO track_playlists (track_id, playlist_id) VALUES ($1, $2)`, tr, f.playlist)
 	}
-	f.rule = f.id(`INSERT INTO play_rules (name, window_from, window_to, max_per_hour) VALUES ('Day', '06:00', '22:00', 2) RETURNING id`)
+	f.rule = f.id(`INSERT INTO play_rules (name, window_from, window_to, max_per_hour, artist_min_interval_minutes)
+VALUES ('Day', '06:00', '22:00', 2, 120) RETURNING id`)
 	f.exec(`INSERT INTO playlist_play_rules (playlist_id, rule_id) VALUES ($1, $2)`, f.playlist, f.rule)
 	f.clock = f.id(`INSERT INTO clocks (name) VALUES ('C') RETURNING id`)
-	for i, tr := range f.tracks[:2] {
-		f.pool = append(f.pool, f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, $3) RETURNING id`,
-			f.clock, tr, i))
-	}
+	f.insert = f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 1800000, $2) RETURNING id`, f.clock, f.tracks[2])
 	return f
 }
 
@@ -85,14 +82,11 @@ func (f *fixture) inTx(fn func(ctx context.Context, st rotation.Store) error) {
 	}))
 }
 
-func (f *fixture) planHour(start time.Time, reqID *uint64) rotation.PlanHour {
-	return rotation.PlanHour{
-		Start: start, ClockID: f.clock, ClockUpdatedAt: hour, Seed: start.Unix(), BuiltAt: hour.Add(-time.Hour),
-		FillerRequestID: reqID,
-	}
+func (f *fixture) planHour(start time.Time) rotation.PlanHour {
+	return rotation.PlanHour{Start: start, ClockID: f.clock, ClockUpdatedAt: hour, Seed: start.Unix(), BuiltAt: hour.Add(-time.Hour)}
 }
 
-func TestLibraryAndSeparation(t *testing.T) {
+func TestLibrary(t *testing.T) {
 	f := newFixture(t)
 	lib, err := f.store.Library(t.Context())
 	require.NoError(t, err)
@@ -101,17 +95,19 @@ func TestLibraryAndSeparation(t *testing.T) {
 	require.Equal(t, []uint64{f.playlist}, lib.Tracks[0].PlaylistIDs)
 	require.Equal(t, []uint64{f.rule}, lib.Tracks[0].RuleIDs, "the rules of its playlists")
 	require.Equal(t, f.artist, *lib.Tracks[0].ArtistID)
+	require.Equal(t, "T0", lib.Tracks[0].Title)
+	require.Equal(t, "A", *lib.Tracks[0].ArtistName)
 	require.Nil(t, lib.Tracks[2].ArtistID)
+	require.Nil(t, lib.Tracks[2].ArtistName)
 	require.Empty(t, lib.Tracks[2].PlaylistIDs)
 	r := lib.Rules[f.rule]
 	require.Equal(t, "06:00", r.WindowFrom.String())
 	require.Equal(t, "22:00", r.WindowTo.String())
 	require.Equal(t, 2, *r.MaxPerHour)
+	require.Equal(t, 120, *r.ArtistMinIntervalMinutes)
 	require.Nil(t, r.MinIntervalMinutes)
-
-	sep, err := f.store.Separation(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, rotation.Separation{Track: 72 * time.Hour, Artist: 72 * time.Hour}, sep)
+	// "Music rotation", created by migration 0013 from the separation rules.
+	require.Len(t, lib.Rules, 2)
 }
 
 // The snapshot carries the length on air and the cue in point
@@ -142,19 +138,16 @@ VALUES ($1, $2, 'aired', $3, $3, 180000, 180000, $4)`, f.tracks[0], f.artist, ho
 VALUES ($1, 'missed', $2, 180000, $3, $4, 'open')`, f.tracks[1], hour.Add(-2*time.Hour), f.clock, outage)
 
 	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		return st.ReplaceHour(ctx, f.planHour(hour, nil), []rotation.Item{
-			{TrackID: f.tracks[1], ElementID: nil, OffsetMS: 0, OutMS: 200000, Source: rotation.SourceClock},
-			{TrackID: f.tracks[0], OffsetMS: 200000, InMS: 5000, OutMS: 100000, Truncated: true, Source: rotation.SourceFillerPool, PoolRowID: &f.pool[0]},
+		return st.ReplaceHour(ctx, f.planHour(hour), []rotation.Item{
+			{TrackID: f.tracks[1], OffsetMS: 0, OutMS: 200000, Source: rotation.SourceFill},
+			{TrackID: f.tracks[0], OffsetMS: 200000, InMS: 5000, OutMS: 100000, Truncated: true, Source: rotation.SourceRule},
 		})
 	})
 	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		return st.ReplaceHour(ctx, f.planHour(hour.Add(time.Hour), nil), []rotation.Item{
-			{TrackID: f.tracks[2], OffsetMS: 0, OutMS: 30000, Source: rotation.SourceFillerRandom},
+		return st.ReplaceHour(ctx, f.planHour(hour.Add(time.Hour)), []rotation.Item{
+			{TrackID: f.tracks[2], OffsetMS: 0, OutMS: 30000, Source: rotation.SourceInsert, ClockInsertID: &f.insert},
 		})
 	})
-	pool, err := f.store.Pool(ctx, f.clock)
-	require.NoError(t, err)
-	require.Equal(t, []rotation.PoolRow{{ID: f.pool[1], TrackID: f.tracks[1]}}, pool, "the planned pool row is used")
 
 	// Rebuilding the hour sees the aired play and the next hour, not its
 	// own planned items.
@@ -178,16 +171,15 @@ VALUES ($1, 'missed', $2, 180000, $3, $4, 'open')`, f.tracks[1], hour.Add(-2*tim
 	require.Equal(t, 100000, it.OutMS)
 	require.Equal(t, 180000, it.DurationMS)
 	require.Equal(t, hour.Add(200*time.Second), it.Start)
-	require.Equal(t, "filler_pool", it.Source)
+	require.Equal(t, "rule", it.Source)
 	require.Len(t, plan[1].Items, 1)
+	require.Equal(t, f.insert, *plan[1].Items[0].InsertID)
+	require.Equal(t, "insert", plan[1].Items[0].Source)
 
-	// A rebuild releases the pool row; a cleared hour is gone.
+	// A rebuild replaces the items; a cleared hour is gone.
 	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		return st.ReplaceHour(ctx, f.planHour(hour, nil), nil)
+		return st.ReplaceHour(ctx, f.planHour(hour), nil)
 	})
-	pool, err = f.store.Pool(ctx, f.clock)
-	require.NoError(t, err)
-	require.Len(t, pool, 2)
 	f.inTx(func(ctx context.Context, st rotation.Store) error { return st.ClearHour(ctx, hour.Add(time.Hour)) })
 	_, found, err := f.store.PlanHour(ctx, hour.Add(time.Hour))
 	require.NoError(t, err)
@@ -195,74 +187,7 @@ VALUES ($1, 'missed', $2, 180000, $3, $4, 'open')`, f.tracks[1], hour.Add(-2*tim
 	ph, found, err := f.store.PlanHour(ctx, hour)
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Equal(t, f.planHour(hour, nil), ph)
-}
-
-func TestFillerRequests(t *testing.T) {
-	f := newFixture(t)
-	ctx := t.Context()
-	newReq := func(start time.Time, reason string) rotation.NewRequest {
-		return rotation.NewRequest{
-			ClockID: f.clock, HourStart: start, Reason: reason, Mode: clocks.FillerNone,
-			Status: rotation.RequestPending, CreatedAt: hour.Add(-24 * time.Hour), DeadlineAt: start.Add(-2 * time.Hour),
-		}
-	}
-	var first uint64
-	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		id, ok, err := st.CreateRequest(ctx, newReq(hour, rotation.ReasonShortClock))
-		require.True(t, ok)
-		first = id
-		if err != nil {
-			return err
-		}
-		// One pending request per clock hour.
-		_, ok, err = st.CreateRequest(ctx, newReq(hour, rotation.ReasonPoolEmpty))
-		require.False(t, ok)
-		if err != nil {
-			return err
-		}
-		_, ok, err = st.CreateRequest(ctx, newReq(hour.Add(5*time.Hour), rotation.ReasonPoolEmpty))
-		require.True(t, ok)
-		return err
-	})
-
-	due, err := f.store.DueRequests(ctx, hour.Add(-2*time.Hour), 10)
-	require.NoError(t, err)
-	require.Len(t, due, 1)
-	require.Equal(t, first, due[0].ID)
-	require.Equal(t, "C", due[0].ClockName)
-
-	n, err := f.store.AnswerPoolEmpty(ctx, f.clock)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), n)
-
-	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		locked, lockErr := st.LockRequest(ctx, first)
-		require.NoError(t, lockErr)
-		require.Equal(t, rotation.RequestPending, locked.Status)
-		return st.SetRequestStatus(ctx, first, rotation.RequestAnswered, &f.tracks[2])
-	})
-	r, err := f.store.Request(ctx, first)
-	require.NoError(t, err)
-	require.Equal(t, rotation.RequestAnswered, r.Status)
-	require.Equal(t, f.tracks[2], *r.AnswerTrackID)
-
-	f.inTx(func(ctx context.Context, st rotation.Store) error {
-		if _, _, createErr := st.CreateRequest(ctx, newReq(hour, rotation.ReasonShortClock)); createErr != nil {
-			return createErr
-		}
-		return st.ExpirePending(ctx, hour)
-	})
-	all, err := f.store.Requests(ctx, rotation.RequestFilter{Limit: 10})
-	require.NoError(t, err)
-	require.Len(t, all, 3)
-	require.Equal(t, hour.Add(5*time.Hour), all[0].HourStart, "newest hour first")
-	expired, err := f.store.Requests(ctx, rotation.RequestFilter{Status: rotation.RequestExpired, Limit: 10})
-	require.NoError(t, err)
-	require.Len(t, expired, 1)
-
-	_, err = f.store.Request(ctx, 999999)
-	require.ErrorIs(t, err, rotation.ErrRequestNotFound)
+	require.Equal(t, f.planHour(hour), ph)
 }
 
 // TestExplainHistory prints the plan of the history query over a realistic
@@ -276,7 +201,7 @@ SELECT $1, $2, 'aired', g, g, 180000, 180000, $3
 FROM generate_series($4::timestamptz - interval '10 days', $4::timestamptz, interval '4 minutes') g`,
 		f.tracks[0], f.artist, f.clock, hour)
 	f.exec(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
-SELECT $1, $2, g, 180000, 'clock'
+SELECT $1, $2, g, 180000, 'fill'
 FROM generate_series($3::timestamptz, $3::timestamptz + interval '48 hours', interval '4 minutes') g`,
 		f.clock, f.tracks[1], hour)
 	f.exec(`ANALYZE play_log`)

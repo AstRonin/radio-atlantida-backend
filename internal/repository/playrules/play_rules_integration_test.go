@@ -40,7 +40,7 @@ func TestStore(t *testing.T) {
 	t.Run("round trip of every column", func(t *testing.T) {
 		in := playrules.RuleInput{
 			Name: "Night", WindowFrom: tod("22:00"), WindowTo: tod("02:30"), Weekdays: []int{1, 5},
-			MinIntervalMinutes: new(10), MaxPerHour: new(1), Notes: "n",
+			MinIntervalMinutes: new(10), ArtistMinIntervalMinutes: new(120), MaxPerHour: new(1), Notes: "n",
 		}
 		rid, err := store.Create(ctx, in)
 		require.NoError(t, err)
@@ -58,6 +58,17 @@ func TestStore(t *testing.T) {
 
 		_, err = store.Create(ctx, playrules.RuleInput{Name: "Night", MaxPerHour: new(1)})
 		require.ErrorIs(t, err, playrules.ErrNameTaken)
+
+		// The migration created "Music rotation" (72 h) from the separation
+		// rules; the longest interval counts track and artist intervals.
+		longest, err := store.LongestInterval(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 72*60, longest)
+		_, err = store.Create(ctx, playrules.RuleInput{Name: "Artists", ArtistMinIntervalMinutes: new(5 * 1440)})
+		require.NoError(t, err)
+		longest, err = store.LongestInterval(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 5*1440, longest)
 		_, err = store.Get(ctx, 9999)
 		require.ErrorIs(t, err, playrules.ErrNotFound)
 		require.ErrorIs(t, store.Update(ctx, 9999, in), playrules.ErrNotFound)

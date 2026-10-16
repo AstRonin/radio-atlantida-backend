@@ -26,17 +26,14 @@ const (
 	UnknownID Rule = "unknown_id"
 	// Invalid: any other problem with the value.
 	Invalid Rule = "invalid"
-	// Overlap: the value collides with another one (two fixed clock
-	// elements whose start windows overlap).
+	// Overlap: the value collides with another one.
 	Overlap Rule = "overlap"
-	// DoesNotFit: the content does not fit into its time (material before
-	// a fixed clock element, a fixed element past the end of the hour).
+	// DoesNotFit: the content does not fit into its time (a one-time
+	// insert that runs past the end of the hour).
 	DoesNotFit Rule = "does_not_fit"
-	// Order: the items are out of the required order (fixed clock elements
-	// not in minute order).
+	// Order: the items are out of the required order.
 	Order Rule = "order"
-	// Blocked: the track breaks separation or a play rule at the time it
-	// would play.
+	// Blocked: the track breaks a play rule at the time it would play.
 	Blocked Rule = "blocked"
 	// Length: a text is too long once cleaned (a title over 500
 	// characters).
@@ -54,6 +51,27 @@ const (
 	// FadesTooLong: the fade in and the fade out together are longer than
 	// the on-air part of a track.
 	FadesTooLong Rule = "fades_too_long"
+	// IntervalBeyondRetention: a play rule interval is longer than the play
+	// log keeps aired history, or the retention would become shorter than
+	// an existing interval.
+	IntervalBeyondRetention Rule = "interval_beyond_retention"
+	// FillPlaylistRequired: a clock has no playlist whose rule is fill.
+	FillPlaylistRequired Rule = "fill_playlist_required"
+	// FillWeightsPartial: some fill playlists of a clock have a weight and
+	// some do not.
+	FillWeightsPartial Rule = "fill_weights_partial"
+	// ClockCountRequired: the spread rule needs its count.
+	ClockCountRequired Rule = "clock_count_required"
+	// ClockCountNotAllowed: only the spread rule has a count.
+	ClockCountNotAllowed Rule = "clock_count_not_allowed"
+	// FillWeightNotAllowed: only a fill playlist of a clock has a weight.
+	FillWeightNotAllowed Rule = "fill_weight_not_allowed"
+	// InsertOffsetTaken: another insert of the clock starts at the same
+	// time.
+	InsertOffsetTaken Rule = "insert_offset_taken"
+	// InsertSourceRequired: an insert names neither or both of a track and
+	// a playlist.
+	InsertSourceRequired Rule = "insert_source_required"
 )
 
 // FieldError is the error of one request field.

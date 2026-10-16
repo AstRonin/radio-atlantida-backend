@@ -19,7 +19,7 @@ type Library interface {
 	ListPlaylists(ctx context.Context, typeID uint64) ([]library.Playlist, error)
 	GetPlaylist(ctx context.Context, id uint64) (library.Playlist, error)
 	CreatePlaylist(ctx context.Context, in library.PlaylistInput) (library.Playlist, error)
-	UpdatePlaylist(ctx context.Context, id uint64, in library.PlaylistInput) (library.Playlist, error)
+	UpdatePlaylist(ctx context.Context, id uint64, in library.PlaylistInput) (library.PlaylistResult, error)
 	DeletePlaylist(ctx context.Context, id uint64) error
 	SetPlaylistTracks(ctx context.Context, id uint64, trackIDs []uint64) (library.Playlist, error)
 
@@ -54,7 +54,7 @@ func playlistTypeDTO(t library.PlaylistType) dto.PlaylistType {
 
 func playlistDTO(p library.Playlist) dto.Playlist {
 	return dto.Playlist{
-		ID: p.ID, Name: p.Name, Type: typeRefDTO(p.Type), TrackCount: p.TrackCount,
+		ID: p.ID, Name: p.Name, Type: typeRefDTO(p.Type), ClockRule: p.ClockRule, ClockCount: p.ClockCount, TrackCount: p.TrackCount,
 		PlayRuleIDs: emptyIDs(p.PlayRuleIDs), CreatedAt: p.CreatedAt.UTC(),
 	}
 }

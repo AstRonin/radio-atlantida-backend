@@ -2,21 +2,23 @@
 // tracks of every grid hour within the plan horizon (24 to 48 hours), kept
 // in scheduled_items.
 //
-// Build is a pure function of its input and a seed: the clock and its
-// layout, the library, the history of aired and planned plays, the
-// separation intervals, the filler pool, and how waiting segments are
-// resolved. It picks a track for every element from the union of its
-// playlists, honouring separation and play rules (never relaxed) and the
-// duration tolerance, fills short segments with filler, truncates the track
-// that crosses a segment end, and applies the emergency steps when nothing
-// fits. Audio is never altered.
+// Build is a pure function of its input and a seed: the clock (its
+// playlists with their effective placement rules and its timed inserts),
+// the one-time inserts of the hour, the library, and the history of aired
+// and planned plays. It places the inserts as anchors, reserves the slots
+// of the rule playlists, and fills the rest from the fill playlists, every
+// track passing the play rules of the track and its playlists (never
+// relaxed). The last track before a hard point is the best fit to the time
+// left; when none lands in the window, the crossing track is cut at the
+// target and faded out. Audio is never altered.
 //
 // The Service keeps the plan in step with the grid (Sync): it builds missing
-// and stale hours, clears hours the grid no longer assigns, creates filler
-// reminders, and resolves them when the operator answers or the deadline
-// passes. Every hour is written in its own short transaction under an
-// advisory lock. The plan job (internal/jobs) and the clock_build operation
-// started by clock and grid changes both call Sync.
+// and stale hours and clears hours the grid no longer assigns. One-time
+// inserts (hour_inserts: a track the manager adds to an hour, a rescheduled
+// missed item) survive every rebuild of their hour. Every hour is written
+// in its own short transaction under an advisory lock. The plan job
+// (internal/jobs) and the operations started by clock, grid, and insert
+// changes all go through it.
 //
 // Persistence goes through internal/repository/rotation.
 package rotation
@@ -42,13 +44,9 @@ type Track struct {
 	PlaylistIDs []uint64
 	// RuleIDs are the play rules of the track and of all its playlists.
 	RuleIDs []uint64
-}
-
-func (t Track) inAny(playlistIDs []uint64) bool {
-	return slices.ContainsFunc(playlistIDs, func(id uint64) bool {
-		_, found := slices.BinarySearch(t.PlaylistIDs, id)
-		return found
-	})
+	// Title and ArtistName are shown in the sample hour of a clock save.
+	Title      string
+	ArtistName *string
 }
 
 // Library is the snapshot of the library a build reads.
@@ -75,37 +73,28 @@ func (l *Library) track(id uint64) (Track, bool) {
 	return l.Tracks[i], true
 }
 
-// maxRuleInterval is the longest minimum interval of the play rules.
+// maxRuleInterval is the longest track or artist interval of the play
+// rules: the history a build reads on each side of the hour.
 func (l *Library) maxRuleInterval() time.Duration {
 	longest := 0
 	for _, r := range l.Rules {
 		if r.MinIntervalMinutes != nil {
 			longest = max(longest, *r.MinIntervalMinutes)
 		}
+		if r.ArtistMinIntervalMinutes != nil {
+			longest = max(longest, *r.ArtistMinIntervalMinutes)
+		}
 	}
 	return time.Duration(longest) * time.Minute
 }
 
-// Play is a start of a track that counts for separation and play rules:
-// aired or truncated in the play log, planned or queued in the plan. Missed
-// items do not count (§7).
+// Play is a start of a track that counts for the play rules: aired or
+// truncated in the play log, planned or queued in the plan. Missed items do
+// not count (§7).
 type Play struct {
 	TrackID  uint64
 	ArtistID *uint64
 	Start    time.Time
-}
-
-// Separation are the separation intervals (separation_rules): the longest
-// rule of each scope. Zero means no separation.
-type Separation struct {
-	Track  time.Duration
-	Artist time.Duration
-}
-
-// PoolRow is an unused row of a clock's filler pool.
-type PoolRow struct {
-	ID      uint64
-	TrackID uint64
 }
 
 // Source says why an item is in the plan (scheduled_items.source).
@@ -113,22 +102,51 @@ type Source string
 
 // Sources.
 const (
-	SourceClock          Source = "clock"
-	SourceFillerPool     Source = "filler_pool"
-	SourceFillerRandom   Source = "filler_random"
-	SourceFillerPlaylist Source = "filler_playlist"
-	SourceFillerArtist   Source = "filler_artist"
-	SourceFillerAnswer   Source = "filler_answer"
+	// SourceFill: a track of a fill playlist.
+	SourceFill Source = "fill"
+	// SourceRule: a track of a playlist with a placement rule other than
+	// fill.
+	SourceRule Source = "rule"
+	// SourceInsert: a timed insert of the clock template.
+	SourceInsert Source = "insert"
+	// SourceHourInsert: a one-time insert the manager added to the hour.
+	SourceHourInsert Source = "hour_insert"
 	// SourceReschedule: a missed item placed into this hour by the manager
 	// (§7.1).
 	SourceReschedule Source = "reschedule"
+	// SourceGeneral: no fill track was allowed; taken from the whole
+	// library (emergency, §7).
+	SourceGeneral Source = "general"
 )
+
+// Placement says where a one-time insert goes in its hour.
+type Placement string
+
+// Placements of a one-time insert.
+const (
+	PlacementStart Placement = "start"
+	PlacementEnd   Placement = "end"
+	PlacementFixed Placement = "fixed"
+)
+
+// Insert is a one-time insert of one hour (hour_inserts): a track the
+// manager added, or a missed item rescheduled into it (§7.1, §7.2).
+type Insert struct {
+	ID        uint64
+	HourStart time.Time
+	TrackID   uint64
+	// MissedID is the missed play log row; nil for a track the manager
+	// added, and when retention deleted the row.
+	MissedID  *uint64
+	Placement Placement
+	// OffsetMS is the target start of a fixed insert, whole seconds.
+	OffsetMS    *int
+	ToleranceMS int
+}
 
 // Item is a planned track.
 type Item struct {
 	TrackID uint64
-	// ElementID is the element the track was planned for; nil for filler.
-	ElementID *uint64
 	// OffsetMS is the planned start, from the start of the hour.
 	OffsetMS int
 	// InMS and OutMS are the in and out points from the start of the file
@@ -137,52 +155,50 @@ type Item struct {
 	OutMS     int
 	Truncated bool
 	Source    Source
-	// PoolRowID is the pool row a filler_pool item took.
-	PoolRowID *uint64
+	// PlaylistID is the fill or rule playlist the track was drawn from.
+	PlaylistID *uint64
+	// ClockInsertID and InsertIndex name the template insert of an insert
+	// item (its ID and its index in the clock).
+	ClockInsertID *uint64
+	InsertIndex   *int
+	// HourInsertID is the one-time insert of an hour_insert or reschedule
+	// item.
+	HourInsertID *uint64
 	// RescheduleOfID is the missed play log row a reschedule item airs
 	// again.
 	RescheduleOfID *uint64
-}
-
-// Pin is an element whose track is fixed: a one-time insert of the hour
-// (hour_inserts), a rescheduled missed item (§7.1).
-type Pin struct {
-	InsertID uint64
-	TrackID  uint64
-	// MissedID is the missed play log row; nil when retention deleted it.
-	MissedID *uint64
 }
 
 // WarningCode is the stable code of a build warning; the panel translates by
 // code.
 type WarningCode string
 
-// Warning codes (docs/phase-8-plan.md §3).
+// Warning codes (docs/phase-23-plan.md §3.3).
 const (
-	// WarnBlockedByPlayRules: every candidate is blocked by play rules; the
-	// element is skipped (§7.3).
-	WarnBlockedByPlayRules WarningCode = "element_blocked_by_play_rules"
-	// WarnToleranceRelaxed: the track was chosen with a relaxed tolerance.
-	WarnToleranceRelaxed WarningCode = "element_tolerance_relaxed"
-	// WarnGeneralPool: the track was chosen from the whole library.
-	WarnGeneralPool WarningCode = "element_general_pool"
-	// WarnEmergency: no track could be chosen; the element is skipped and
-	// the emergency playlist covers it (§8.6).
-	WarnEmergency WarningCode = "element_emergency"
-	// WarnPoolTrackRefused: a pool track breaks a rule; it is skipped and
-	// stays in the pool.
-	WarnPoolTrackRefused WarningCode = "pool_track_refused"
-	// WarnPoolEmpty: the pool has no unused track; the default mode filled
-	// the segment.
-	WarnPoolEmpty WarningCode = "pool_empty"
-	// WarnFillerWaiting: the segment waits for the answer of a filler
-	// reminder.
-	WarnFillerWaiting WarningCode = "filler_waiting"
-	// WarnGapUnfilled: no filler track could close the gap.
+	// WarnInsertReplaced: a one-time insert at the offset of a template
+	// insert replaces it in this hour.
+	WarnInsertReplaced WarningCode = "insert_replaced"
+	// WarnInsertSkipped: a template insert has no allowed track, or the
+	// chain before it runs past its window.
+	WarnInsertSkipped WarningCode = "insert_skipped"
+	// WarnHourInsertDropped: a one-time insert of the manager can no
+	// longer be placed whole; it is removed.
+	WarnHourInsertDropped WarningCode = "hour_insert_dropped"
+	// WarnRuleSlotSkipped: a rule track could not be placed in its window,
+	// or its playlist has no track that can be planned.
+	WarnRuleSlotSkipped WarningCode = "rule_slot_skipped"
+	// WarnRuleBlocked: the play rules block every track of a rule playlist
+	// at its slot (§7.3).
+	WarnRuleBlocked WarningCode = "rule_blocked_by_play_rules"
+	// WarnGeneralPool: no fill track was allowed; the track was chosen from
+	// the whole library.
+	WarnGeneralPool WarningCode = "fill_general_pool"
+	// WarnEmergency: no track passes the rules; the gap is left for the
+	// emergency source (§8.6).
+	WarnEmergency WarningCode = "fill_emergency"
+	// WarnGapUnfilled: a gap no track can serve (it would play less than
+	// the shortest track on air).
 	WarnGapUnfilled WarningCode = "gap_unfilled"
-	// WarnElementReplaced: a rescheduled item at a fixed minute replaces
-	// the clock's fixed element in this hour (§7.2).
-	WarnElementReplaced WarningCode = "element_replaced"
 	// WarnRescheduleDropped: a rescheduled item no longer fits its hour or
 	// breaks a rule there; it is removed and its missed item is open again.
 	WarnRescheduleDropped WarningCode = "reschedule_dropped"
@@ -191,53 +207,47 @@ const (
 // WarningCodes lists every warning code.
 func WarningCodes() []WarningCode {
 	return []WarningCode{
-		WarnBlockedByPlayRules, WarnToleranceRelaxed, WarnGeneralPool, WarnEmergency,
-		WarnPoolTrackRefused, WarnPoolEmpty, WarnFillerWaiting, WarnGapUnfilled,
-		WarnElementReplaced, WarnRescheduleDropped,
+		WarnInsertReplaced, WarnInsertSkipped, WarnHourInsertDropped, WarnRuleSlotSkipped, WarnRuleBlocked,
+		WarnGeneralPool, WarnEmergency, WarnGapUnfilled, WarnRescheduleDropped,
 	}
 }
 
-// Warning is a problem of a build. Element and Segment are indexes into the
-// clock.
+// Warning is a problem of a build. PlaylistIndex and InsertIndex are
+// indexes into the clock.
 type Warning struct {
-	Code    WarningCode
-	Message string
-	Element *int
-	Segment *int
-	TrackID *uint64
+	Code          WarningCode
+	Message       string
+	PlaylistIndex *int
+	InsertIndex   *int
+	TrackID       *uint64
+	HourInsertID  *uint64
 }
 
-// filler reports whether the warning belongs to the filler (log component).
-func (w Warning) filler() bool {
-	switch w.Code {
-	case WarnPoolTrackRefused, WarnPoolEmpty, WarnFillerWaiting, WarnGapUnfilled:
-		return true
-	}
-	return false
-}
+// RefusalReason is why a one-time insert cannot be placed whole; the
+// failure reason of an hour_insert or reschedule operation.
+type RefusalReason string
 
-// Waiting says how a build fills the segments that wait for the operator: a
-// short segment of an incomplete clock (holder none) or of an ask holder.
-type Waiting int
-
-// Waiting modes.
+// Refusal reasons.
 const (
-	// WaitAsk leaves the gaps; a reminder asks the operator.
-	WaitAsk Waiting = iota
-	// WaitDefault fills them with the default mode (deadline passed).
-	WaitDefault
-	// WaitAnswer fills the first with the answer track, the others with the
-	// default mode.
-	WaitAnswer
+	// ReasonDoesNotFit: the insert does not fit its window or the hour.
+	ReasonDoesNotFit RefusalReason = "insert_does_not_fit"
+	// ReasonBlocked: the track breaks a play rule at its start.
+	ReasonBlocked RefusalReason = "insert_blocked"
 )
+
+// RefusalReasons lists every refusal reason.
+func RefusalReasons() []RefusalReason { return []RefusalReason{ReasonDoesNotFit, ReasonBlocked} }
+
+// Refusal is a one-time insert a build could not place.
+type Refusal struct {
+	Reason  RefusalReason
+	Message string
+}
 
 // Settings are the settings of a build.
 type Settings struct {
-	// MinFillerGapMS: a smaller gap gets no filler.
-	MinFillerGapMS int
-	// MaxRelaxedToleranceMS caps the relaxed tolerance of the emergency
-	// steps.
-	MaxRelaxedToleranceMS int
+	// MinGapMS: a smaller gap between anchors gets no music.
+	MinGapMS int
 }
 
 // HourInput is everything a build reads.
@@ -248,23 +258,12 @@ type HourInput struct {
 	// per-hour limit.
 	Location *time.Location
 	Clock    clocks.Clock
-	Layout   clocks.Layout
-	// DefaultFiller fills segments without a filler mode of their own, an
-	// empty pool, and expired reminders: the clock's default, else the
-	// global fallback (§7). Its mode is random, playlist, or artist.
-	DefaultFiller clocks.Filler
-	Library       *Library
+	// HourInserts are the one-time inserts of the hour, in ID order.
+	HourInserts []Insert
+	Library     *Library
 	// History are the plays around the hour, without the planned items of
 	// the hour itself.
-	History    []Play
-	Separation Separation
-	// Pool are the unused rows of the clock's filler pool, in order.
-	Pool    []PoolRow
-	Waiting Waiting
-	// AnswerTrackID is the answer of WaitAnswer.
-	AnswerTrackID uint64
-	// Pins are the elements with a fixed track, by element index.
-	Pins     map[int]Pin
+	History  []Play
 	Settings Settings
 	Seed     uint64
 }
@@ -274,19 +273,7 @@ type HourPlan struct {
 	// Items in time order.
 	Items    []Item
 	Warnings []Warning
-	// Asked are the segments that wait for the operator (WaitAsk) or were
-	// resolved for it (WaitDefault, WaitAnswer).
-	Asked []int
-	// AskMode is the filler mode of the first asked segment (none or ask).
-	AskMode clocks.FillerMode
-	// PoolEmpty: a pool segment found the pool empty; the operator is
-	// reminded to refill it.
-	PoolEmpty bool
-	// AnswerRefused: the answer track breaks separation or a play rule at
-	// its time, or is not in the library.
-	AnswerRefused bool
-	// PinsRefused are the inserts whose pinned track could not be placed
-	// whole: it breaks a rule at its start, does not fit its segment, or
-	// its segment was full.
-	PinsRefused []uint64
+	// Refused are the one-time inserts that could not be placed whole, by
+	// insert ID.
+	Refused map[uint64]Refusal
 }

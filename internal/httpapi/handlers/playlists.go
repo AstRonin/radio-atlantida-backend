@@ -15,6 +15,10 @@ type playlistOutput struct {
 	Body dto.Playlist
 }
 
+type playlistSavedOutput struct {
+	Body dto.PlaylistSaved
+}
+
 type playlistListOutput struct {
 	Body dto.PlaylistList
 }
@@ -46,7 +50,7 @@ type playRuleIDsOutput struct {
 	Body dto.PlayRuleIDs
 }
 
-func registerPlaylists(api huma.API, log *slog.Logger, svc Library, rules PlayRules) {
+func registerPlaylists(api huma.API, log *slog.Logger, svc Library, rules PlayRules, rot Rotation) {
 	tags := []string{"Playlists"}
 
 	register(api, log, huma.Operation{
@@ -94,7 +98,7 @@ func registerPlaylists(api huma.API, log *slog.Logger, svc Library, rules PlayRu
 		DefaultStatus: http.StatusCreated,
 		Errors:        errorsWith(http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *createPlaylistInput) (*playlistOutput, error) {
-		p, err := svc.CreatePlaylist(ctx, library.PlaylistInput{Name: in.Body.Name, TypeID: in.Body.TypeID})
+		p, err := svc.CreatePlaylist(ctx, playlistInput(in.Body))
 		if err != nil {
 			return nil, err
 		}
@@ -106,15 +110,19 @@ func registerPlaylists(api huma.API, log *slog.Logger, svc Library, rules PlayRu
 		Method:      http.MethodPut,
 		Path:        "/api/playlists/{id}",
 		Summary:     "Update a playlist",
-		Description: "Renames the playlist or changes its type.",
+		Description: "Renames the playlist, changes its type, or its placement rule in clocks. A changed rule rebuilds the planned hours of the clocks that use the playlist (build_operation_id).",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity),
-	}, func(ctx context.Context, in *updatePlaylistInput) (*playlistOutput, error) {
-		p, err := svc.UpdatePlaylist(ctx, in.ID, library.PlaylistInput{Name: in.Body.Name, TypeID: in.Body.TypeID})
+	}, func(ctx context.Context, in *updatePlaylistInput) (*playlistSavedOutput, error) {
+		r, err := svc.UpdatePlaylist(ctx, in.ID, playlistInput(in.Body))
 		if err != nil {
 			return nil, err
 		}
-		return &playlistOutput{Body: playlistDTO(p)}, nil
+		out := &playlistSavedOutput{Body: dto.PlaylistSaved{Playlist: playlistDTO(r.Playlist)}}
+		if r.RuleChanged {
+			out.Body.BuildOperationID = startRebuild(ctx, log, rot)
+		}
+		return out, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -122,7 +130,7 @@ func registerPlaylists(api huma.API, log *slog.Logger, svc Library, rules PlayRu
 		Method:      http.MethodDelete,
 		Path:        "/api/playlists/{id}",
 		Summary:     "Delete a playlist",
-		Description: "Its tracks stay in the library. Refused while a clock uses the playlist in an element or as filler (playlist_in_use, with used_by naming the clocks).",
+		Description: "Its tracks stay in the library. Refused while a clock uses the playlist as a clock playlist or an insert source (playlist_in_use, with used_by naming the clocks).",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *idInput) (*struct{}, error) {
@@ -160,4 +168,8 @@ func registerPlaylists(api huma.API, log *slog.Logger, svc Library, rules PlayRu
 		}
 		return &playRuleIDsOutput{Body: dto.PlayRuleIDs{RuleIDs: emptyIDs(ids)}}, nil
 	})
+}
+
+func playlistInput(b dto.PlaylistBody) library.PlaylistInput {
+	return library.PlaylistInput{Name: b.Name, TypeID: b.TypeID, ClockRule: b.ClockRule, ClockCount: b.ClockCount}
 }

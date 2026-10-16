@@ -17,7 +17,7 @@ import (
 func (f *fixture) item(clock, track uint64, start time.Time, status string) {
 	f.t.Helper()
 	f.exec(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
-	        VALUES ($1, $2, $3, 200000, 'clock', $4)`, clock, track, start, status)
+	        VALUES ($1, $2, $3, 200000, 'fill', $4)`, clock, track, start, status)
 }
 
 // hour records a built plan hour.

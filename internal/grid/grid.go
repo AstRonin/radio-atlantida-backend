@@ -40,9 +40,8 @@ var ErrUnknownClock = errors.New("unknown clock")
 
 // ClockRef is the clock of a slot.
 type ClockRef struct {
-	ID     uint64
-	Name   string
-	Status clocks.Status
+	ID   uint64
+	Name string
 }
 
 // Slot assigns a clock to a weekday and hour for a range of dates. Dates

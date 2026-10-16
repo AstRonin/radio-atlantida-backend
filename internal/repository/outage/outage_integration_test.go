@@ -59,7 +59,7 @@ func (f *fixture) count(sql string, args ...any) int {
 // item plans a 3-minute item at hour+offset.
 func (f *fixture) item(offset time.Duration, status string) uint64 {
 	return f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
-VALUES ($1, $2, $3, 180000, 'clock', $4) RETURNING id`, f.clock, f.track, hour.Add(offset), status)
+VALUES ($1, $2, $3, 180000, 'fill', $4) RETURNING id`, f.clock, f.track, hour.Add(offset), status)
 }
 
 // aired logs an aired row started at hour+offset.
@@ -168,10 +168,8 @@ func TestDropStale(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	ctx := t.Context()
-	pool := f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position, used_at) VALUES ($1, $2, 0, $3) RETURNING id`,
-		f.clock, f.track, hour)
-	stale := f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, filler_pool_id)
-VALUES ($1, $2, $3, 180000, 'filler_pool', $4) RETURNING id`, f.clock, f.track, hour, pool)
+	stale := f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
+VALUES ($1, $2, $3, 180000, 'fill') RETURNING id`, f.clock, f.track, hour)
 	missedRow := f.id(`INSERT INTO broadcast_outages (started_at, ended_at, reconciled_at, detected_by, component)
 VALUES ($1, $1, $1, 'icecast', 'icecast') RETURNING id`, hour.Add(-48*time.Hour))
 	missed := f.id(`INSERT INTO play_log (track_id, status, planned_start_utc, outage_id, resolution, resolved_at, resolved_item_id)
@@ -191,7 +189,6 @@ VALUES ($1, $2, $3, 180000, 'reschedule', $4) RETURNING id`, f.clock, f.track, h
 	require.Equal(t, 2, n)
 	require.Zero(t, f.count(`SELECT count(*) FROM scheduled_items WHERE id = ANY($1)`, []uint64{stale, rescheduled}))
 	require.Equal(t, 2, f.count(`SELECT count(*) FROM scheduled_items WHERE id = ANY($1)`, []uint64{waiting, future}))
-	require.Equal(t, 1, f.count(`SELECT count(*) FROM clock_filler_pool WHERE id = $1 AND used_at IS NULL`, pool))
 	require.Equal(t, 1, f.count(`SELECT count(*) FROM play_log WHERE id = $1 AND resolution = 'open' AND resolved_at IS NULL`, missed))
 	require.Zero(t, f.count(`SELECT count(*) FROM play_log WHERE status <> 'missed'`), "dropped items are not logged")
 }

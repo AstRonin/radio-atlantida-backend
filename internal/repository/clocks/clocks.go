@@ -1,10 +1,10 @@
-// Package clocks stores the clock templates: clocks, their elements, the
-// playlists of each element, and the filler pool (§4 of the design). It
-// implements the stores of the domain package with the same name; import it
-// as clocksrepo next to the domain.
+// Package clocks stores the clock templates: clocks, their playlists, and
+// their timed inserts (§4 of the design). It implements the stores of the
+// domain package with the same name; import it as clocksrepo next to the
+// domain.
 //
 // Store is GORM (admin CRUD, §5). CheckStore is pgx: the dry check reads
-// play rules (time and smallint[] columns) and the tracks of the elements'
+// play rules (time and smallint[] columns) and the tracks of the clock's
 // playlists, the same tables rotation reads on its hot path.
 package clocks
 
@@ -33,13 +33,10 @@ func New(d *db.DB) *Store { return &Store{g: d.Gorm} }
 func (s *Store) WithTx(tx db.Tx) clocks.Store { return &Store{g: tx.Gorm()} }
 
 var writeErrors = map[string]error{
-	"uq_clocks_name":                         clocks.ErrNameTaken,
-	"fk_clock_element_playlists_playlist_id": clocks.ErrUnknownPlaylist,
-	"fk_clock_elements_filler_playlist_id":   clocks.ErrUnknownPlaylist,
-	"fk_clocks_default_filler_playlist_id":   clocks.ErrUnknownPlaylist,
-	"fk_clock_elements_filler_artist_id":     clocks.ErrUnknownArtist,
-	"fk_clocks_default_filler_artist_id":     clocks.ErrUnknownArtist,
-	"fk_clock_filler_pool_track_id":          clocks.ErrUnknownTrack,
+	"uq_clocks_name":                 clocks.ErrNameTaken,
+	"fk_clock_playlists_playlist_id": clocks.ErrUnknownPlaylist,
+	"fk_clock_inserts_playlist_id":   clocks.ErrUnknownPlaylist,
+	"fk_clock_inserts_track_id":      clocks.ErrUnknownTrack,
 }
 
 // deleteErrors map the foreign keys that refuse a clock delete.
@@ -59,20 +56,21 @@ func writeError(op string, err error) error {
 }
 
 type summaryRow struct {
-	ID           uint64
-	Name         string
-	Status       string
-	ElementCount int
-	UpdatedAt    time.Time
+	ID            uint64
+	Name          string
+	PlaylistCount int
+	InsertCount   int
+	UpdatedAt     time.Time
 }
 
-// List returns the clocks in name order. The element count uses
-// uq_clock_elements_clock_id_position.
+// List returns the clocks in name order. The counts use pk_clock_playlists
+// and uq_clock_inserts_clock_id_offset_ms.
 func (s *Store) List(ctx context.Context) ([]clocks.Summary, error) {
 	var rows []summaryRow
 	err := s.g.WithContext(ctx).Raw(`
-SELECT c.id, c.name, c.status, c.updated_at,
-       (SELECT count(*) FROM clock_elements e WHERE e.clock_id = c.id) AS element_count
+SELECT c.id, c.name, c.updated_at,
+       (SELECT count(*) FROM clock_playlists p WHERE p.clock_id = c.id) AS playlist_count,
+       (SELECT count(*) FROM clock_inserts i WHERE i.clock_id = c.id) AS insert_count
 FROM clocks c
 ORDER BY c.name, c.id`).Scan(&rows).Error
 	if err != nil {
@@ -81,122 +79,81 @@ ORDER BY c.name, c.id`).Scan(&rows).Error
 	out := make([]clocks.Summary, len(rows))
 	for i, r := range rows {
 		out[i] = clocks.Summary{
-			ID: r.ID, Name: r.Name, Status: clocks.Status(r.Status),
-			ElementCount: r.ElementCount, UpdatedAt: r.UpdatedAt.UTC(),
+			ID: r.ID, Name: r.Name, PlaylistCount: r.PlaylistCount, InsertCount: r.InsertCount, UpdatedAt: r.UpdatedAt.UTC(),
 		}
 	}
 	return out, nil
 }
 
 type clockRow struct {
-	ID                      uint64
-	Name                    string
-	Status                  string
-	DefaultFillerMode       *string
-	DefaultFillerPlaylistID *uint64
-	DefaultFillerArtistID   *uint64
-	UpdatedAt               time.Time
+	ID        uint64
+	Name      string
+	UpdatedAt time.Time
 }
 
-type elementRow struct {
-	ID                  uint64
-	Position            int
-	Placement           string
-	FixedMinute         *int
-	FixedToleranceMS    int `gorm:"column:fixed_tolerance_ms"`
-	NominalDurationMS   int `gorm:"column:nominal_duration_ms"`
-	DurationToleranceMS int `gorm:"column:duration_tolerance_ms"`
-	FillerMode          string
-	FillerPlaylistID    *uint64
-	FillerArtistID      *uint64
+type playlistRow struct {
+	PlaylistID uint64
+	ClockRule  *string
+	ClockCount *int
+	FillWeight *int
+	OwnRule    string
+	OwnCount   *int
 }
 
-type linkRow struct {
-	OwnerID uint64
-	OtherID uint64
+type insertRow struct {
+	ID          uint64
+	OffsetMS    int `gorm:"column:offset_ms"`
+	ToleranceMS int `gorm:"column:tolerance_ms"`
+	TrackID     *uint64
+	PlaylistID  *uint64
 }
 
-// source returns the typed filler column that matches the mode.
-func source(mode string, playlistID, artistID *uint64) *uint64 {
-	switch clocks.FillerMode(mode) {
-	case clocks.FillerPlaylist:
-		return playlistID
-	case clocks.FillerArtist:
-		return artistID
-	}
-	return nil
-}
-
-// columns splits a filler source into the typed columns.
-func columns(f clocks.Filler) (playlistID, artistID *uint64) {
-	switch f.Mode {
-	case clocks.FillerPlaylist:
-		return f.SourceID, nil
-	case clocks.FillerArtist:
-		return nil, f.SourceID
-	}
-	return nil, nil
-}
-
-// Get returns a clock with its elements in position order, or
-// clocks.ErrNotFound.
+// Get returns a clock with its playlists in position order (with each
+// playlist's own rule) and its inserts by offset, or clocks.ErrNotFound.
 func (s *Store) Get(ctx context.Context, id uint64) (clocks.Clock, error) {
 	g := s.g.WithContext(ctx)
 	var cs []clockRow
-	err := g.Raw(`
-SELECT id, name, status, default_filler_mode, default_filler_playlist_id, default_filler_artist_id, updated_at
-FROM clocks WHERE id = ?`, id).Scan(&cs).Error
-	if err != nil {
+	if err := g.Raw(`SELECT id, name, updated_at FROM clocks WHERE id = ?`, id).Scan(&cs).Error; err != nil {
 		return clocks.Clock{}, fmt.Errorf("select clock %d: %w", id, err)
 	}
 	if len(cs) == 0 {
 		return clocks.Clock{}, clocks.ErrNotFound
 	}
-	c := cs[0]
-
-	var es []elementRow
-	err = g.Raw(`
-SELECT id, position, placement, fixed_minute, fixed_tolerance_ms, nominal_duration_ms,
-       duration_tolerance_ms, filler_mode, filler_playlist_id, filler_artist_id
-FROM clock_elements WHERE clock_id = ? ORDER BY position`, id).Scan(&es).Error
+	var ps []playlistRow
+	err := g.Raw(`
+SELECT cp.playlist_id, cp.clock_rule, cp.clock_count, cp.fill_weight, p.clock_rule AS own_rule, p.clock_count AS own_count
+FROM clock_playlists cp
+JOIN playlists p ON p.id = cp.playlist_id
+WHERE cp.clock_id = ?
+ORDER BY cp.position`, id).Scan(&ps).Error
 	if err != nil {
-		return clocks.Clock{}, fmt.Errorf("select elements of clock %d: %w", id, err)
+		return clocks.Clock{}, fmt.Errorf("select playlists of clock %d: %w", id, err)
 	}
-	var links []linkRow
+	var is []insertRow
 	err = g.Raw(`
-SELECT ep.clock_element_id AS owner_id, ep.playlist_id AS other_id
-FROM clock_element_playlists ep
-JOIN clock_elements e ON e.id = ep.clock_element_id
-WHERE e.clock_id = ?
-ORDER BY ep.playlist_id`, id).Scan(&links).Error
+SELECT id, offset_ms, tolerance_ms, track_id, playlist_id FROM clock_inserts
+WHERE clock_id = ? ORDER BY offset_ms`, id).Scan(&is).Error
 	if err != nil {
-		return clocks.Clock{}, fmt.Errorf("select element playlists of clock %d: %w", id, err)
-	}
-	playlists := map[uint64][]uint64{}
-	for _, l := range links {
-		playlists[l.OwnerID] = append(playlists[l.OwnerID], l.OtherID)
+		return clocks.Clock{}, fmt.Errorf("select inserts of clock %d: %w", id, err)
 	}
 
 	out := clocks.Clock{
-		ID: c.ID, Name: c.Name, Status: clocks.Status(c.Status),
-		UpdatedAt: c.UpdatedAt.UTC(), Elements: make([]clocks.Element, len(es)),
+		ID: cs[0].ID, Name: cs[0].Name, UpdatedAt: cs[0].UpdatedAt.UTC(),
+		Playlists: make([]clocks.ClockPlaylist, len(ps)), Inserts: make([]clocks.Insert, len(is)),
 	}
-	if c.DefaultFillerMode != nil {
-		out.DefaultFiller = &clocks.Filler{
-			Mode:     clocks.FillerMode(*c.DefaultFillerMode),
-			SourceID: source(*c.DefaultFillerMode, c.DefaultFillerPlaylistID, c.DefaultFillerArtistID),
+	for i, p := range ps {
+		cp := clocks.ClockPlaylist{
+			PlaylistID: p.PlaylistID, Count: p.ClockCount, FillWeight: p.FillWeight,
+			Own: clocks.PlaylistRule{Rule: clocks.Rule(p.OwnRule), Count: p.OwnCount},
 		}
+		if p.ClockRule != nil {
+			cp.Rule = new(clocks.Rule(*p.ClockRule))
+		}
+		out.Playlists[i] = cp
 	}
-	for i, e := range es {
-		out.Elements[i] = clocks.Element{
-			ID: e.ID, Placement: clocks.Placement(e.Placement), FixedMinute: e.FixedMinute,
-			FixedToleranceMS: e.FixedToleranceMS, NominalDurationMS: e.NominalDurationMS,
-			DurationToleranceMS: e.DurationToleranceMS,
-			Filler: clocks.Filler{
-				Mode:     clocks.FillerMode(e.FillerMode),
-				SourceID: source(e.FillerMode, e.FillerPlaylistID, e.FillerArtistID),
-			},
-			PlaylistIDs: playlists[e.ID],
+	for i, r := range is {
+		out.Inserts[i] = clocks.Insert{
+			ID: r.ID, OffsetMS: r.OffsetMS, ToleranceMS: r.ToleranceMS, TrackID: r.TrackID, PlaylistID: r.PlaylistID,
 		}
 	}
 	return out, nil
@@ -216,81 +173,44 @@ func (s *Store) Lock(ctx context.Context, id uint64) error {
 }
 
 type clockWrite struct {
-	ID                      uint64 `gorm:"primaryKey"`
-	Name                    string
-	Status                  string
-	DefaultFillerMode       *string
-	DefaultFillerPlaylistID *uint64
-	DefaultFillerArtistID   *uint64
+	ID   uint64 `gorm:"primaryKey"`
+	Name string
 }
 
 func (clockWrite) TableName() string { return "clocks" }
 
-type elementWrite struct {
-	ID                  uint64 `gorm:"primaryKey"`
-	ClockID             uint64
-	Position            int
-	Placement           string
-	FixedMinute         *int
-	FixedToleranceMS    int `gorm:"column:fixed_tolerance_ms"`
-	NominalDurationMS   int `gorm:"column:nominal_duration_ms"`
-	DurationToleranceMS int `gorm:"column:duration_tolerance_ms"`
-	FillerMode          string
-	FillerPlaylistID    *uint64
-	FillerArtistID      *uint64
+type playlistWrite struct {
+	ClockID    uint64
+	PlaylistID uint64
+	Position   int
+	ClockRule  *string
+	ClockCount *int
+	FillWeight *int
 }
 
-func (elementWrite) TableName() string { return "clock_elements" }
+func (playlistWrite) TableName() string { return "clock_playlists" }
 
-type elementPlaylistWrite struct {
-	ClockElementID uint64
-	PlaylistID     uint64
-}
-
-func (elementPlaylistWrite) TableName() string { return "clock_element_playlists" }
-
-func clockFields(c clocks.Clock) clockWrite {
-	w := clockWrite{ID: c.ID, Name: c.Name, Status: string(c.Status)}
-	if c.DefaultFiller != nil {
-		w.DefaultFillerMode = new(string(c.DefaultFiller.Mode))
-		w.DefaultFillerPlaylistID, w.DefaultFillerArtistID = columns(*c.DefaultFiller)
-	}
-	return w
-}
-
-func elementFields(clockID uint64, position int, e clocks.Element) elementWrite {
-	w := elementWrite{
-		ID: e.ID, ClockID: clockID, Position: position, Placement: string(e.Placement),
-		FixedMinute: e.FixedMinute, FixedToleranceMS: e.FixedToleranceMS,
-		NominalDurationMS: e.NominalDurationMS, DurationToleranceMS: e.DurationToleranceMS,
-		FillerMode: string(e.Filler.Mode),
-	}
-	w.FillerPlaylistID, w.FillerArtistID = columns(e.Filler)
-	return w
-}
-
-// Create adds a clock with its elements and their playlists. It runs
-// several statements: call it in a transaction.
+// Create adds a clock with its playlists and inserts. It runs several
+// statements: call it in a transaction.
 func (s *Store) Create(ctx context.Context, c clocks.Clock) (uint64, error) {
 	g := s.g.WithContext(ctx)
-	w := clockFields(c)
+	w := clockWrite{Name: c.Name}
 	if err := g.Create(&w).Error; err != nil {
 		return 0, writeError("insert clock", err)
 	}
-	return w.ID, writeElements(g, w.ID, c.Elements)
+	if err := writePlaylists(g, w.ID, c.Playlists); err != nil {
+		return 0, err
+	}
+	return w.ID, writeInserts(g, w.ID, c.Inserts)
 }
 
-// Update replaces the clock row and its elements. Elements with an ID keep
-// it; elements left out are deleted with their playlists (CASCADE). It runs
+// Update replaces the clock row, its playlists, and its inserts, and
+// touches updated_at so the planned hours of the clock are stale. It runs
 // several statements: call it in a transaction.
 func (s *Store) Update(ctx context.Context, c clocks.Clock) error {
 	g := s.g.WithContext(ctx)
-	w := clockFields(c)
 	res := g.Model(&clockWrite{}).Where("id = ?", c.ID).Updates(map[string]any{
-		"name": w.Name, "status": w.Status, "default_filler_mode": w.DefaultFillerMode,
-		"default_filler_playlist_id": w.DefaultFillerPlaylistID,
-		"default_filler_artist_id":   w.DefaultFillerArtistID,
-		"updated_at":                 gorm.Expr("now()"),
+		"name": c.Name, "updated_at": gorm.Expr("now()"),
 	})
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("update clock %d", c.ID), res.Error)
@@ -298,73 +218,63 @@ func (s *Store) Update(ctx context.Context, c clocks.Clock) error {
 	if res.RowsAffected == 0 {
 		return clocks.ErrNotFound
 	}
-	keep := []uint64{0}
-	for _, e := range c.Elements {
-		if e.ID != 0 {
-			keep = append(keep, e.ID)
-		}
+	if err := g.Exec(`DELETE FROM clock_playlists WHERE clock_id = ?`, c.ID).Error; err != nil {
+		return fmt.Errorf("delete playlists of clock %d: %w", c.ID, err)
 	}
-	if err := g.Exec(`DELETE FROM clock_elements WHERE clock_id = ? AND id NOT IN ?`, c.ID, keep).Error; err != nil {
-		return fmt.Errorf("delete elements of clock %d: %w", c.ID, err)
+	if err := writePlaylists(g, c.ID, c.Playlists); err != nil {
+		return err
 	}
-	// Positions are unique per clock and not deferrable: move the kept
-	// elements out of the way before they take their new positions.
-	if err := g.Exec(`UPDATE clock_elements SET position = position + ? WHERE clock_id = ?`, positionShift, c.ID).Error; err != nil {
-		return fmt.Errorf("shift elements of clock %d: %w", c.ID, err)
+	// Inserts at a kept offset keep their ID, so plan items still name
+	// them until the rebuild.
+	keep := []int{-1}
+	for _, ins := range c.Inserts {
+		keep = append(keep, ins.OffsetMS)
 	}
-	return writeElements(g, c.ID, c.Elements)
+	if err := g.Exec(`DELETE FROM clock_inserts WHERE clock_id = ? AND offset_ms NOT IN ?`, c.ID, keep).Error; err != nil {
+		return fmt.Errorf("delete inserts of clock %d: %w", c.ID, err)
+	}
+	return writeInserts(g, c.ID, c.Inserts)
 }
 
-// positionShift is above any real position (a clock has at most a few
-// hundred elements).
-const positionShift = 1_000_000
-
-// writeElements inserts new elements, updates kept ones, and replaces the
-// playlists of all of them.
-func writeElements(g *gorm.DB, clockID uint64, elements []clocks.Element) error {
-	ids := make([]uint64, len(elements))
-	for i, e := range elements {
-		w := elementFields(clockID, i, e)
-		if e.ID == 0 {
-			if err := g.Omit("id").Create(&w).Error; err != nil {
-				return writeError(fmt.Sprintf("insert element %d of clock %d", i, clockID), err)
-			}
-		} else {
-			err := g.Model(&elementWrite{}).Where("id = ? AND clock_id = ?", e.ID, clockID).Updates(map[string]any{
-				"position": w.Position, "placement": w.Placement, "fixed_minute": w.FixedMinute,
-				"fixed_tolerance_ms": w.FixedToleranceMS, "nominal_duration_ms": w.NominalDurationMS,
-				"duration_tolerance_ms": w.DurationToleranceMS, "filler_mode": w.FillerMode,
-				"filler_playlist_id": w.FillerPlaylistID, "filler_artist_id": w.FillerArtistID,
-			}).Error
-			if err != nil {
-				return writeError(fmt.Sprintf("update element %d of clock %d", e.ID, clockID), err)
-			}
-		}
-		ids[i] = w.ID
-	}
-	if len(ids) > 0 {
-		if err := g.Exec(`DELETE FROM clock_element_playlists WHERE clock_element_id IN ?`, ids).Error; err != nil {
-			return fmt.Errorf("delete element playlists of clock %d: %w", clockID, err)
-		}
-	}
-	var links []elementPlaylistWrite
-	for i, e := range elements {
-		for _, p := range e.PlaylistIDs {
-			links = append(links, elementPlaylistWrite{ClockElementID: ids[i], PlaylistID: p})
-		}
-	}
-	if len(links) == 0 {
+func writePlaylists(g *gorm.DB, clockID uint64, ps []clocks.ClockPlaylist) error {
+	if len(ps) == 0 {
 		return nil
 	}
-	if err := g.Create(&links).Error; err != nil {
-		return writeError(fmt.Sprintf("insert element playlists of clock %d", clockID), err)
+	rows := make([]playlistWrite, len(ps))
+	for i, p := range ps {
+		rows[i] = playlistWrite{
+			ClockID: clockID, PlaylistID: p.PlaylistID, Position: i, ClockCount: p.Count, FillWeight: p.FillWeight,
+		}
+		if p.Rule != nil {
+			rows[i].ClockRule = new(string(*p.Rule))
+		}
+	}
+	if err := g.Create(&rows).Error; err != nil {
+		return writeError(fmt.Sprintf("insert playlists of clock %d", clockID), err)
 	}
 	return nil
 }
 
-// Delete removes a clock; its elements and pool go with it (CASCADE). Grid
-// slots refuse it (clocks.ErrInUse), the play log and the track plan for
-// good (clocks.ErrHasHistory).
+// writeInserts adds the inserts, or updates the one stored at the same
+// offset (uq_clock_inserts_clock_id_offset_ms).
+func writeInserts(g *gorm.DB, clockID uint64, is []clocks.Insert) error {
+	for _, ins := range is {
+		err := g.Exec(`
+INSERT INTO clock_inserts (clock_id, offset_ms, tolerance_ms, track_id, playlist_id)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (clock_id, offset_ms) DO UPDATE SET
+    tolerance_ms = EXCLUDED.tolerance_ms, track_id = EXCLUDED.track_id, playlist_id = EXCLUDED.playlist_id`,
+			clockID, ins.OffsetMS, ins.ToleranceMS, ins.TrackID, ins.PlaylistID).Error
+		if err != nil {
+			return writeError(fmt.Sprintf("store insert at %d ms of clock %d", ins.OffsetMS, clockID), err)
+		}
+	}
+	return nil
+}
+
+// Delete removes a clock; its playlists and inserts go with it (CASCADE).
+// Grid slots refuse it (clocks.ErrInUse), the play log and the track plan
+// for good (clocks.ErrHasHistory).
 func (s *Store) Delete(ctx context.Context, id uint64) error {
 	res := s.g.WithContext(ctx).Exec(`DELETE FROM clocks WHERE id = ?`, id)
 	if res.Error != nil {
@@ -407,23 +317,36 @@ LIMIT ?`, id, limit).Scan(&rows).Error
 	return out, nil
 }
 
-// MissingPlaylists returns the IDs that are not playlists.
-func (s *Store) MissingPlaylists(ctx context.Context, ids []uint64) ([]uint64, error) {
-	return s.missing(ctx, `SELECT id FROM playlists WHERE id IN ?`, ids)
+type ownRuleRow struct {
+	ID         uint64
+	ClockRule  string
+	ClockCount *int
 }
 
-// MissingArtists returns the IDs that are not artists.
-func (s *Store) MissingArtists(ctx context.Context, ids []uint64) ([]uint64, error) {
-	return s.missing(ctx, `SELECT id FROM artists WHERE id IN ?`, ids)
+// PlaylistRules returns the placement rule of each existing playlist.
+func (s *Store) PlaylistRules(ctx context.Context, ids []uint64) (map[uint64]clocks.PlaylistRule, error) {
+	out := map[uint64]clocks.PlaylistRule{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []ownRuleRow
+	if err := s.g.WithContext(ctx).Raw(`SELECT id, clock_rule, clock_count FROM playlists WHERE id IN ?`, ids).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("select playlist rules: %w", err)
+	}
+	for _, r := range rows {
+		out[r.ID] = clocks.PlaylistRule{Rule: clocks.Rule(r.ClockRule), Count: r.ClockCount}
+	}
+	return out, nil
 }
 
-func (s *Store) missing(ctx context.Context, sql string, ids []uint64) ([]uint64, error) {
+// MissingTracks returns the IDs that are not tracks.
+func (s *Store) MissingTracks(ctx context.Context, ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	var found []uint64
-	if err := s.g.WithContext(ctx).Raw(sql, ids).Scan(&found).Error; err != nil {
-		return nil, fmt.Errorf("check ids: %w", err)
+	if err := s.g.WithContext(ctx).Raw(`SELECT id FROM tracks WHERE id IN ?`, ids).Scan(&found).Error; err != nil {
+		return nil, fmt.Errorf("check track ids: %w", err)
 	}
 	var out []uint64
 	for _, id := range ids {
@@ -432,67 +355,4 @@ func (s *Store) missing(ctx context.Context, sql string, ids []uint64) ([]uint64
 		}
 	}
 	return out, nil
-}
-
-type poolRow struct {
-	TrackID  uint64
-	Title    string
-	Position int
-	UsedAt   *time.Time
-}
-
-// Pool returns the filler pool in position order
-// (uq_clock_filler_pool_clock_id_position).
-func (s *Store) Pool(ctx context.Context, clockID uint64) ([]clocks.PoolEntry, error) {
-	var rows []poolRow
-	err := s.g.WithContext(ctx).Raw(`
-SELECT p.track_id, t.title, p.position, p.used_at
-FROM clock_filler_pool p
-JOIN tracks t ON t.id = p.track_id
-WHERE p.clock_id = ?
-ORDER BY p.position`, clockID).Scan(&rows).Error
-	if err != nil {
-		return nil, fmt.Errorf("select filler pool of clock %d: %w", clockID, err)
-	}
-	out := make([]clocks.PoolEntry, len(rows))
-	for i, r := range rows {
-		out[i] = clocks.PoolEntry{TrackID: r.TrackID, Title: r.Title, Position: r.Position, UsedAt: r.UsedAt}
-		if r.UsedAt != nil {
-			out[i].UsedAt = new(r.UsedAt.UTC())
-		}
-	}
-	return out, nil
-}
-
-type poolWrite struct {
-	ClockID  uint64
-	TrackID  uint64
-	Position int
-}
-
-func (poolWrite) TableName() string { return "clock_filler_pool" }
-
-// SetPool deletes the unused pool rows and appends trackIDs after the used
-// ones. Run it in a transaction.
-func (s *Store) SetPool(ctx context.Context, clockID uint64, trackIDs []uint64) error {
-	g := s.g.WithContext(ctx)
-	if err := g.Exec(`DELETE FROM clock_filler_pool WHERE clock_id = ? AND used_at IS NULL`, clockID).Error; err != nil {
-		return fmt.Errorf("delete unused pool of clock %d: %w", clockID, err)
-	}
-	if len(trackIDs) == 0 {
-		return nil
-	}
-	var next int
-	err := g.Raw(`SELECT COALESCE(max(position) + 1, 0) FROM clock_filler_pool WHERE clock_id = ?`, clockID).Scan(&next).Error
-	if err != nil {
-		return fmt.Errorf("select pool position of clock %d: %w", clockID, err)
-	}
-	rows := make([]poolWrite, len(trackIDs))
-	for i, t := range trackIDs {
-		rows[i] = poolWrite{ClockID: clockID, TrackID: t, Position: next + i}
-	}
-	if err := g.Create(&rows).Error; err != nil {
-		return writeError(fmt.Sprintf("insert pool of clock %d", clockID), err)
-	}
-	return nil
 }

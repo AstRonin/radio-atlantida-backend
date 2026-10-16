@@ -5,9 +5,9 @@
 Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 - **Library**: tracks, artists, and playlists. A playlist is a pool, not a queue: track order is irrelevant, rotation picks the track. A track can be in several playlists. Every playlist has a type (`music`, `jingle`, `news`, `segment` are system types; the manager can add more). A type is only a label.
-- **Clocks**: 60-minute templates of elements. An element draws from one or more playlists (union, any types) and has a target duration and tolerance. Placement: `flow`, `start`, `end`, or `fixed` minute (±1 min). Fixed elements split the hour into segments that are fitted separately. Audio is never stretched.
+- **Clocks**: 60-minute templates made of playlists and timed inserts. Every playlist has a placement rule (`fill`, `spread` N, `start`, `end`, `start_end`, `middle`), stored on the playlist and overridable per clock; a clock needs at least one fill playlist, and fill playlists may have shares (`fill_weight`, all or none). A timed insert plays a track, or a track of a playlist, at `mm:ss` with a start tolerance (±1 min by default); a one-time insert does the same in one planned hour. Tracks of any length are used; audio is never stretched.
 - **Grid**: which clock plays in which hour, up to 30 days ahead, in station local time (`Asia/Yerevan` by default).
-- **Rotation**: a rolling 24–48 h track plan that honours separation rules (e.g. a track at most once per 72 h) and play rules (time windows, minimum interval, max per hour — these replace dayparting and are never relaxed). Short clocks get filler (blocking dialog on save, pools, reminders); overflow keeps the crossing track and fades it out at the segment end. Hour boundaries are hard.
+- **Rotation**: a rolling 24–48 h track plan that honours play rules (time windows, track and artist intervals, max per hour — these replace dayparting and separation, are never relaxed; "Music rotation" is the 72 h rule). The inserts are anchors, rule tracks take their slots, and the fill playlists fill the rest; the last track before a hard point is the best fit, else it is cut at the target and faded out. There is no filler. Hour boundaries are hard.
 - **Playout**: the backend pushes the next 2–3 items to Liquidsoap (`request.push`), which streams to Icecast and reports track start/end by HTTP callback and in a local playout journal.
 - **Live voice**: WebRTC from the browser through a Go bridge into a Liquidsoap harbor input, mixed over music.
 - **Outages**: detected automatically (Icecast mount, callbacks heartbeat, control link while items are due); items that did not air are marked *missed*, kept until the manager reschedules or dismisses them; after backend downtime the journal is reconciled.
@@ -18,7 +18,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort), `docs/phase-21-plan.md` for Phase 21 (on-air titles, reviewed mark, bulk rename), `docs/phase-22-plan.md` for Phase 22 (track cue points, waveform, usage marks).
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort), `docs/phase-21-plan.md` for Phase 21 (on-air titles, reviewed mark, bulk rename), `docs/phase-22-plan.md` for Phase 22 (track cue points, waveform, usage marks), `docs/phase-23-plan.md` for Phase 23 (playlist placement rules, clock inserts, no filler, separation in play rules).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -57,7 +57,7 @@ Release: push a tag `vX.Y.Z` from `main`. `.github/workflows/release.yml` runs t
 cmd/backend/          subcommand dispatch (main.go) and serve wiring
 internal/
   config/             env config (caarlos0/env + godotenv); the only place that reads env
-  settings/           admin settings: typed registry (defaults, limits, apply mode, secrets), Service, Value/OnChange
+  settings/           admin settings: typed registry (defaults, limits, apply mode, secrets), Service, Value/OnChange, Guard (cross-checks before a save)
   logging/            slog JSON, components, secret masking, async writer, daily UTC rotator
   db/                 pgx pool (UTC session, timeouts), GORM on the same pool, DB.WithTx (one Tx for pgx and GORM), ConstraintError, CollectOne/CollectAll
   dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)
@@ -73,12 +73,11 @@ internal/
   retention/          retention rules (play log, operations); jobs schedules it
   workerpool/         bounded worker pool (Pool: fixed workers + bounded queue) and ForEach for batches
   validation/         validation.Error: per-field refusals of domain services (rule → field code in problemFor)
-  library/            playlist types, playlists, artists, tracks; track preview; *InUseError names what blocks a delete; title rule, reviewed mark, bulk rename; cue points and fades (SetCue, Cue.Check), usage marks (next planned, on air)
-  playrules/          play rules (window, weekdays, min interval, max per hour) and their track/playlist targets
-  separation/         separation rules (edit only; capped at the play log retention)
-  clocks/             clock templates: Arrange/LayoutOf (segments, shortfall, fixed replacement, filler holders), WithInsert (one-time element of an hour), save flow, dry check warnings
+  library/            playlist types, playlists (placement rule in clocks), artists, tracks; track preview; *InUseError names what blocks a delete; title rule, reviewed mark, bulk rename; cue points and fades (SetCue, Cue.Check), usage marks (next planned, on air)
+  playrules/          play rules (window, weekdays, track and artist intervals capped at the play log retention, max per hour) and their track/playlist targets
+  clocks/             clock templates: playlists with placement rules (EffectiveRule), timed inserts, Check (field validation), one-step save, dry check warnings
   grid/               grid slots (station local weekday/hour/dates), assign/unassign with trim/split/delete, Schedule, Hours, ClockHours
-  rotation/           track plan: Build (pure, seeded: selection, separation and play rules, crossing, filler, emergency), Service.Sync (missing/stale hours, plan_hours), filler reminders (answer, deadline), Reschedule (hour_inserts pinned in the build), planner queue for clock_build and reschedule
+  rotation/           track plan: Build (pure, seeded: insert anchors and chains, rule slots, weighted fill, best fit and crossing, play rules, emergency), Service.Sync (missing/stale hours, plan_hours), one-time inserts (AddInsert, RemoveInsert, Reschedule; hour_inserts survive rebuilds), Sample (the hour of a clock save), planner queue for clock_build, hour_insert, and reschedule
   liquidsoap/         telnet control client (push, queue, var.set, ping), link state and connection generation; Annotate (quoted request annotations)
   playout/            pusher (hour queues by parity, lookahead, pre-push, resync), callbacks → play log (Replay for journal lines), now playing, music gain, emergency picks
   broadcast/          Tracker: derived broadcast state (connected, reconnecting, unreachable, unknown) from output reports, outages, mount checks, heartbeat; since stored on change (broadcast_state), broadcast.state events
@@ -88,10 +87,10 @@ internal/
   ingest/             import of a folder in place (folders and files with counts and statuses, title and artist from tags or the file name, originals of .optimal copies skipped), analysis against the broadcast standard (quality issues), transcodes (Fix loudness, Optimize; replace or .optimal copy); one media operation at a time on its worker; cached track waveforms (beside the operations, two decodes at a time)
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
     operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
-    library/ separation/                           (GORM; library: one store per aggregate)
+    library/                                       (GORM; one store per aggregate)
     playrules/                                     (pgx: time and smallint[] columns, array-parameter link sets)
     clocks/ grid/                                  (GORM CRUD; clocks.CheckStore is pgx for the dry check reads)
-    rotation/                                      (pgx: library snapshot, history window, plan hours, CopyFrom of items, reminders)
+    rotation/                                      (pgx: library snapshot, history window, plan hours, CopyFrom of items, hour inserts)
     playout/                                       (pgx: items to push, queued marks, move to play_log, ends, emergency tracks)
     broadcast/                                     (pgx: the one broadcast_state row)
     airwindow/                                     (pgx: last play log rows by due time, next plan items)
@@ -119,7 +118,7 @@ docs/                 requirements, design, phase plans
 - All instants are `time.Time` in UTC; DB columns `timestamptz`; PostgreSQL session timezone UTC. API timestamps ISO 8601 UTC ending in `Z`.
 - Database structs are never API payloads. Every endpoint has its own request/response DTOs. Validate DTOs before any write; return field errors per field.
 - Multi-table writes use explicit transactions.
-- GORM for admin CRUD; pgx for hot paths (play log, rotation, separation, reconciliation). Never GORM auto-migrate.
+- GORM for admin CRUD; pgx for hot paths (play log, rotation, play rule checks, reconciliation). Never GORM auto-migrate.
 - **Repository layer (§5.1).** All SQL lives in `internal/repository/<domain>`; domain code, handlers, jobs, and `cmd` contain none and import neither `gorm.io/...` nor `github.com/jackc/pgx...`. `internal/architecture` enforces it (only `internal/repository`, `internal/db`, `internal/dbtest`, `internal/migrations` are exempt; an exception needs an `allowList` entry with a reason and a comment at the code).
 - Logging never blocks. Secrets are never logged (the handler masks keys matching `password|secret|token|credential`).
 - No authentication anywhere. Listen on localhost or a private network.

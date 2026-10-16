@@ -1,8 +1,10 @@
 // Package errcodes holds the stable machine-readable error codes of the API
 // (init plan §9.6).
 //
-// The panel translates messages by code, so a code is never renamed or
-// removed once released; new codes are added. A new refusal rule adds its
+// The panel translates messages by code, so a code is never renamed; new
+// codes are added. A code is removed only with the feature it belongs to,
+// and the release notes list it (phase 23 removed the separation and filler
+// codes). A new refusal rule adds its
 // code here in the same change. The English title and detail of a problem are
 // for logs and developers only.
 //
@@ -54,19 +56,19 @@ const (
 	PlaylistTypeInUse Problem = "playlist_type_in_use"
 	// PlaylistNotFound: no playlist has the requested ID.
 	PlaylistNotFound Problem = "playlist_not_found"
-	// PlaylistInUse: clocks use the playlist in an element or as filler;
-	// see used_by.
+	// PlaylistInUse: clocks use the playlist as a clock playlist or as an
+	// insert source; see used_by.
 	PlaylistInUse Problem = "playlist_in_use"
 	// ArtistNotFound: no artist has the requested ID.
 	ArtistNotFound Problem = "artist_not_found"
-	// ArtistInUse: tracks or clocks (as filler) refer to the artist; see
-	// used_by.
+	// ArtistInUse: tracks refer to the artist; see used_by.
 	ArtistInUse Problem = "artist_in_use"
 	// ArtistHasHistory: the play log refers to the artist, so it is kept.
 	ArtistHasHistory Problem = "artist_has_history"
 	// TrackNotFound: no track has the requested ID.
 	TrackNotFound Problem = "track_not_found"
-	// TrackInUse: clock filler pools hold the track; see used_by.
+	// TrackInUse: clock inserts or one-time inserts of the plan use the
+	// track; see used_by.
 	TrackInUse Problem = "track_in_use"
 	// TrackHasHistory: the play log or the track plan refers to the track,
 	// so it is kept.
@@ -85,8 +87,6 @@ const (
 	// PlayRuleInUse: the rule is applied to tracks or playlists; see
 	// used_by.
 	PlayRuleInUse Problem = "play_rule_in_use"
-	// SeparationRuleNotFound: no separation rule has the requested ID.
-	SeparationRuleNotFound Problem = "separation_rule_not_found"
 	// ClockNotFound: no clock has the requested ID.
 	ClockNotFound Problem = "clock_not_found"
 	// ClockInUse: grid slots assign the clock; see used_by.
@@ -99,14 +99,8 @@ const (
 	// GridConflict: another change of the same grid hours was saved at the
 	// same time; reload the grid and try again.
 	GridConflict Problem = "grid_conflict"
-	// FillerRequestNotFound: no filler reminder has the requested ID.
-	FillerRequestNotFound Problem = "filler_request_not_found"
-	// FillerRequestClosed: the reminder was already answered, defaulted, or
-	// expired.
-	FillerRequestClosed Problem = "filler_request_closed"
-	// FillerRequestNotAnswerable: a pool_empty reminder is closed by
-	// refilling the clock's filler pool, not by a track.
-	FillerRequestNotAnswerable Problem = "filler_request_not_answerable"
+	// HourInsertNotFound: no one-time insert has the requested ID.
+	HourInsertNotFound Problem = "hour_insert_not_found"
 	// HourStarted: the hour is on air, over, or about to start (its items
 	// may be in Liquidsoap's queue); its plan is not changed.
 	HourStarted Problem = "hour_started"
@@ -154,10 +148,9 @@ func Problems() []Problem {
 		ArtistNotFound, ArtistInUse, ArtistHasHistory,
 		TrackNotFound, TrackInUse, TrackHasHistory, TrackFileNotFound, TitleEmpty, TitleTooLong,
 		PlayRuleNotFound, PlayRuleInUse,
-		SeparationRuleNotFound,
 		ClockNotFound, ClockInUse, ClockHasHistory,
 		GridSlotNotFound, GridConflict,
-		FillerRequestNotFound, FillerRequestClosed, FillerRequestNotAnswerable, HourStarted,
+		HourInsertNotFound, HourStarted,
 		LiquidsoapUnavailable,
 		MissedItemNotFound, MissedItemResolved,
 		MediaOperationRunning, MediaToolsUnavailable,
@@ -195,17 +188,14 @@ const (
 	Taken Field = "taken"
 	// UnknownID: the field refers to an entity that does not exist.
 	UnknownID Field = "unknown_id"
-	// Overlap: the value collides with another one (two fixed clock
-	// elements whose start windows overlap).
+	// Overlap: the value collides with another one.
 	Overlap Field = "overlap"
-	// DoesNotFit: the content does not fit into its time (material before
-	// a fixed clock element, a fixed element past the end of the hour).
+	// DoesNotFit: the content does not fit into its time (a one-time
+	// insert that runs past the end of the hour).
 	DoesNotFit Field = "does_not_fit"
-	// Order: the items are out of order (fixed clock elements not in
-	// minute order).
+	// Order: the items are out of order.
 	Order Field = "order"
-	// Blocked: the track breaks separation or a play rule at the time it
-	// would play.
+	// Blocked: the track breaks a play rule at the time it would play.
 	Blocked Field = "blocked"
 	// InvalidCharacters: the text contains characters it must not have
 	// (control characters such as line breaks and tabs in a title).
@@ -219,6 +209,27 @@ const (
 	// FadesTooLong: the fade in and the fade out together are longer than
 	// the part between the cue points.
 	FadesTooLong Field = "fades_too_long"
+	// IntervalBeyondRetention: a play rule interval is longer than the play
+	// log keeps aired history (retention.play_log_days), or the retention
+	// would become shorter than an existing interval.
+	IntervalBeyondRetention Field = "interval_beyond_retention"
+	// FillPlaylistRequired: a clock needs at least one playlist whose
+	// placement rule is fill.
+	FillPlaylistRequired Field = "fill_playlist_required"
+	// FillWeightsPartial: either every fill playlist of a clock has a
+	// weight or none has.
+	FillWeightsPartial Field = "fill_weights_partial"
+	// ClockCountRequired: the spread placement rule needs clock_count.
+	ClockCountRequired Field = "clock_count_required"
+	// ClockCountNotAllowed: clock_count is set only for the spread rule.
+	ClockCountNotAllowed Field = "clock_count_not_allowed"
+	// FillWeightNotAllowed: fill_weight is set only on fill playlists.
+	FillWeightNotAllowed Field = "fill_weight_not_allowed"
+	// InsertOffsetTaken: another insert of the clock starts at this time.
+	InsertOffsetTaken Field = "insert_offset_taken"
+	// InsertSourceRequired: an insert names exactly one of track_id and
+	// playlist_id.
+	InsertSourceRequired Field = "insert_source_required"
 )
 
 // Fields lists every field error code, in declaration order.
@@ -226,6 +237,8 @@ func Fields() []Field {
 	return []Field{
 		Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit,
 		Order, Blocked, InvalidCharacters, CueOrder, CueBeyondEnd, AirTooShort, FadesTooLong,
+		IntervalBeyondRetention, FillPlaylistRequired, FillWeightsPartial, ClockCountRequired, ClockCountNotAllowed,
+		FillWeightNotAllowed, InsertOffsetTaken, InsertSourceRequired,
 	}
 }
 

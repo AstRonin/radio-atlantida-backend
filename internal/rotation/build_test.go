@@ -14,7 +14,12 @@ const (
 	music   uint64 = 1
 	jingles uint64 = 2
 	extra   uint64 = 3
+	news    uint64 = 4
 	mn      int    = 60_000
+	sec     int    = 1000
+	// rotationRule is "Music rotation": a track once per 72 h, an artist
+	// once per 2 h.
+	rotationRule uint64 = 1
 )
 
 var yerevan = func() *time.Location {
@@ -28,7 +33,7 @@ var yerevan = func() *time.Location {
 // hour10 is 10:00 station time (06:00 UTC).
 var hour10 = time.Date(2026, 10, 15, 6, 0, 0, 0, time.UTC)
 
-// lib builds a library; each track is (id, duration, playlist, artist).
+// trackSpec is a track of a test library.
 type trackSpec struct {
 	id       uint64
 	duration int
@@ -38,7 +43,9 @@ type trackSpec struct {
 }
 
 func library(specs ...trackSpec) *Library {
-	l := &Library{Rules: map[uint64]playrules.RuleInput{}}
+	l := &Library{Rules: map[uint64]playrules.RuleInput{
+		rotationRule: {Name: "Music rotation", MinIntervalMinutes: new(72 * 60), ArtistMinIntervalMinutes: new(120)},
+	}}
 	for _, s := range specs {
 		t := Track{ID: s.id, DurationMS: s.duration, PlaylistIDs: []uint64{s.playlist}, RuleIDs: s.rules}
 		if s.artist != 0 {
@@ -50,54 +57,41 @@ func library(specs ...trackSpec) *Library {
 }
 
 // songs returns n tracks of the playlist with ids from first, each with its
-// own artist.
+// own artist and the rotation rule; their lengths step by 30 s from
+// duration, five steps.
 func songs(first uint64, n, duration int, playlist uint64) []trackSpec {
 	var out []trackSpec
 	for i := range n {
 		id := first + uint64(i)
-		out = append(out, trackSpec{id: id, duration: duration, playlist: playlist, artist: id})
+		out = append(out, trackSpec{
+			id: id, duration: duration + (i%5)*30*sec, playlist: playlist, artist: id, rules: []uint64{rotationRule},
+		})
 	}
 	return out
 }
 
-func flow(nominal int, playlists ...uint64) clocks.Element {
-	return clocks.Element{
-		Placement: clocks.PlacementFlow, NominalDurationMS: nominal, DurationToleranceMS: 30_000,
-		Filler: clocks.Filler{Mode: clocks.FillerNone}, PlaylistIDs: playlists,
+func rule(r clocks.Rule) *clocks.Rule { return &r }
+
+// pl is a playlist of a test clock with its own rule.
+func pl(id uint64, r clocks.Rule, count ...int) clocks.ClockPlaylist {
+	p := clocks.ClockPlaylist{PlaylistID: id, Own: clocks.PlaylistRule{Rule: r}}
+	if len(count) > 0 {
+		p.Own.Count = new(count[0])
 	}
+	return p
 }
 
-// withFiller sets the element's filler mode.
-func withFiller(e clocks.Element, mode clocks.FillerMode) clocks.Element {
-	e.Filler = clocks.Filler{Mode: mode}
-	return e
+func trackInsert(id uint64, offset, tolerance int, trackID uint64) clocks.Insert {
+	return clocks.Insert{ID: id, OffsetMS: offset, ToleranceMS: tolerance, TrackID: new(trackID)}
 }
 
-// noFiller is a minimum filler gap larger than any gap.
-const noFiller = clocks.HourMS + 1
-
-func fixed(minute, nominal int, playlists ...uint64) clocks.Element {
-	e := flow(nominal, playlists...)
-	e.Placement, e.FixedMinute, e.FixedToleranceMS = clocks.PlacementFixed, new(minute), 60_000
-	return e
-}
-
-func input(t *testing.T, l *Library, elements ...clocks.Element) HourInput {
-	t.Helper()
-	for i := range elements {
-		elements[i].ID = uint64(i + 1)
-	}
-	layout, err := clocks.LayoutOf(elements)
-	require.NoError(t, err)
+func input(l *Library, playlists []clocks.ClockPlaylist, inserts ...clocks.Insert) HourInput {
 	return HourInput{
 		Start: hour10, Location: yerevan,
-		Clock:         clocks.Clock{ID: 7, Name: "Day", Elements: elements},
-		Layout:        layout,
-		DefaultFiller: clocks.Filler{Mode: clocks.FillerRandom},
-		Library:       l,
-		Separation:    Separation{Track: 72 * time.Hour, Artist: 2 * time.Hour},
-		Settings:      Settings{MinFillerGapMS: 10_000, MaxRelaxedToleranceMS: 120_000},
-		Seed:          42,
+		Clock:    clocks.Clock{ID: 7, Name: "Day", Playlists: playlists, Inserts: inserts},
+		Library:  l,
+		Settings: Settings{MinGapMS: 10 * sec},
+		Seed:     42,
 	}
 }
 
@@ -111,320 +105,375 @@ func codes(p HourPlan) []WarningCode {
 
 func end(it Item) int { return it.OffsetMS + it.OutMS - it.InMS }
 
-func TestBuildFillsTheHour(t *testing.T) {
-	t.Parallel()
-	l := library(append(songs(1, 10, 19*mn, music), songs(100, 5, 3*mn+5000, extra)...)...)
-	in := input(t, l, flow(19*mn, music), flow(19*mn, music), withFiller(flow(19*mn, music), clocks.FillerRandom))
-	p := Build(in)
-
-	require.Empty(t, p.Warnings)
-	require.Len(t, p.Items, 4)
-	for i, it := range p.Items[:3] {
-		require.Equal(t, SourceClock, it.Source)
-		require.Equal(t, uint64(i+1), *it.ElementID)
-		require.Equal(t, i*19*mn, it.OffsetMS)
+// requireTimeline checks that the items are in time order, never overlap,
+// and stay inside the hour.
+func requireTimeline(t *testing.T, p HourPlan) {
+	t.Helper()
+	at := 0
+	for i, it := range p.Items {
+		require.GreaterOrEqual(t, it.OffsetMS, at, "item %d overlaps the one before", i)
+		require.Greater(t, it.OutMS, it.InMS)
+		at = end(it)
+		require.LessOrEqual(t, at, clocks.HourMS)
 	}
-	// 3 minutes left: the best fit from the whole library, cut at the hour.
-	f := p.Items[3]
-	require.Equal(t, SourceFillerRandom, f.Source)
-	require.Nil(t, f.ElementID)
-	require.GreaterOrEqual(t, f.TrackID, uint64(100))
-	require.True(t, f.Truncated)
-	require.Equal(t, clocks.HourMS, end(f))
-	// Every track at most once, every artist separated.
+}
+
+func TestBuildFillsTheHourWithLongTracks(t *testing.T) {
+	t.Parallel()
+	l := library(songs(1, 40, 6*mn, music)...) // 6:00 to 8:00
+	p := Build(input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)}))
+
+	requireTimeline(t, p)
+	require.Empty(t, p.Warnings)
+	require.Equal(t, clocks.HourMS, end(p.Items[len(p.Items)-1]), "the hour ends at 60:00")
+	for i, it := range p.Items[:len(p.Items)-1] {
+		require.Equal(t, it.OffsetMS+it.OutMS-it.InMS, p.Items[i+1].OffsetMS, "back to back")
+		require.False(t, it.Truncated)
+		require.Equal(t, SourceFill, it.Source)
+		require.Equal(t, music, *it.PlaylistID)
+	}
 	seen := map[uint64]bool{}
 	for _, it := range p.Items {
-		require.False(t, seen[it.TrackID])
+		require.False(t, seen[it.TrackID], "the rotation rule forbids a repeat")
 		seen[it.TrackID] = true
 	}
 }
 
+func TestBuildCutsTheLastTrackWhenNoneFits(t *testing.T) {
+	t.Parallel()
+	// Every track is 7 minutes: 8 fill 56:00, the 9th is cut at 60:00.
+	var specs []trackSpec
+	for i := range 20 {
+		specs = append(specs, trackSpec{id: uint64(i + 1), duration: 7 * mn, playlist: music, artist: uint64(i + 1)})
+	}
+	p := Build(input(library(specs...), []clocks.ClockPlaylist{pl(music, clocks.RuleFill)}))
+
+	requireTimeline(t, p)
+	require.Len(t, p.Items, 9)
+	last := p.Items[8]
+	require.True(t, last.Truncated)
+	require.Equal(t, 56*mn, last.OffsetMS)
+	require.Equal(t, 4*mn, last.OutMS-last.InMS)
+}
+
+func TestBuildSpreadsRuleTracks(t *testing.T) {
+	t.Parallel()
+	l := library(append(songs(1, 40, 3*mn, music), songs(100, 10, 20*sec, jingles)...)...)
+	for seed := range uint64(30) {
+		in := input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(jingles, clocks.RuleSpread, 2)})
+		in.Seed = seed
+		p := Build(in)
+		requireTimeline(t, p)
+		require.Empty(t, p.Warnings, "seed %d", seed)
+		var rules []int
+		for i, it := range p.Items {
+			if it.Source != SourceRule {
+				continue
+			}
+			rules = append(rules, it.OffsetMS)
+			require.Equal(t, SourceFill, p.Items[i-1].Source, "seed %d: a fill track before it", seed)
+			require.Equal(t, SourceFill, p.Items[i+1].Source, "seed %d: a fill track after it", seed)
+		}
+		require.Len(t, rules, 2, "seed %d", seed)
+		require.Less(t, rules[0], 30*mn+3*mn, "seed %d: first half (a fill track late at most)", seed)
+		require.Greater(t, rules[1], 30*mn, "seed %d: second half", seed)
+	}
+}
+
+func TestBuildStartEndAndMiddle(t *testing.T) {
+	t.Parallel()
+	l := library(append(append(songs(1, 40, 3*mn, music), songs(100, 5, 20*sec, jingles)...),
+		songs(200, 5, 2*mn, news)...)...)
+
+	t.Run("start and end", func(t *testing.T) {
+		t.Parallel()
+		p := Build(input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(jingles, clocks.RuleStartEnd)}))
+		requireTimeline(t, p)
+		require.Empty(t, p.Warnings)
+		first, last := p.Items[0], p.Items[len(p.Items)-1]
+		require.Equal(t, SourceRule, first.Source)
+		require.Zero(t, first.OffsetMS)
+		require.Equal(t, SourceRule, last.Source)
+		require.Equal(t, clocks.HourMS, end(last), "the end track ends at 60:00")
+		require.False(t, last.Truncated)
+	})
+	t.Run("end after start of another playlist", func(t *testing.T) {
+		t.Parallel()
+		p := Build(input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(news, clocks.RuleStart), pl(jingles, clocks.RuleEnd)}))
+		requireTimeline(t, p)
+		require.Equal(t, news, *p.Items[0].PlaylistID)
+		require.Equal(t, jingles, *p.Items[len(p.Items)-1].PlaylistID)
+	})
+	t.Run("middle", func(t *testing.T) {
+		t.Parallel()
+		for seed := range uint64(20) {
+			in := input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(news, clocks.RuleMiddle)})
+			in.Seed = seed
+			p := Build(in)
+			requireTimeline(t, p)
+			require.Empty(t, p.Warnings, "seed %d", seed)
+			n := 0
+			for _, it := range p.Items {
+				if it.Source == SourceRule {
+					n++
+					require.GreaterOrEqual(t, it.OffsetMS, 25*mn, "seed %d", seed)
+					require.LessOrEqual(t, it.OffsetMS, 35*mn, "seed %d", seed)
+				}
+			}
+			require.Equal(t, 1, n, "seed %d", seed)
+		}
+	})
+	t.Run("middle skipped when an insert covers its window", func(t *testing.T) {
+		t.Parallel()
+		long := library(append(append(songs(1, 40, 3*mn, music), songs(200, 5, 2*mn, news)...),
+			trackSpec{id: 300, duration: 12 * mn, playlist: extra, artist: 300})...)
+		p := Build(input(long, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(news, clocks.RuleMiddle)},
+			trackInsert(1, 24*mn, 0, 300)))
+		requireTimeline(t, p)
+		require.Equal(t, []WarningCode{WarnRuleSlotSkipped}, codes(p))
+		require.Equal(t, 1, *p.Warnings[0].PlaylistIndex)
+	})
+}
+
+func TestBuildFillWeights(t *testing.T) {
+	t.Parallel()
+	// 4-minute tracks: 15 per hour, every one drawn by the weights.
+	share := func(a, b []trackSpec, playlists []clocks.ClockPlaylist, hours int) float64 {
+		l := library(append(a, b...)...)
+		first, total := 0, 0
+		for h := range hours {
+			in := input(l, playlists)
+			in.Seed = uint64(h)
+			for _, it := range Build(in).Items {
+				total++
+				if *it.PlaylistID == music {
+					first++
+				}
+			}
+		}
+		return float64(first) / float64(total)
+	}
+	plain := func(first uint64, n int, playlist uint64) []trackSpec {
+		var out []trackSpec
+		for i := range n {
+			out = append(out, trackSpec{id: first + uint64(i), duration: 4 * mn, playlist: playlist})
+		}
+		return out
+	}
+
+	weighted := []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(extra, clocks.RuleFill)}
+	weighted[0].FillWeight, weighted[1].FillWeight = new(30), new(70)
+	got := share(plain(1, 50, music), plain(100, 50, extra), weighted, 1000)
+	require.InDelta(t, 0.30, got, 0.03)
+
+	// Without weights the playlist is drawn first: 5 tracks play as often
+	// as 500.
+	got = share(plain(1, 5, music), plain(100, 500, extra),
+		[]clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(extra, clocks.RuleFill)}, 200)
+	require.InDelta(t, 0.5, got, 0.05)
+}
+
+func TestBuildChainsInserts(t *testing.T) {
+	t.Parallel()
+	l := library(append(songs(1, 40, 3*mn, music),
+		trackSpec{id: 100, duration: 20 * sec, playlist: jingles, artist: 100},
+		trackSpec{id: 101, duration: 20 * sec, playlist: jingles, artist: 101},
+		trackSpec{id: 200, duration: 2 * mn, playlist: news, artist: 200},
+		trackSpec{id: 201, duration: 2 * mn, playlist: news, artist: 201})...)
+	for seed := range uint64(30) {
+		in := input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)},
+			trackInsert(11, 29*mn+40*sec, 20*sec, 100),
+			clocks.Insert{ID: 12, OffsetMS: 30 * mn, ToleranceMS: mn, PlaylistID: new(news)},
+			trackInsert(13, 32*mn, mn, 101),
+		)
+		in.Seed = seed
+		p := Build(in)
+		requireTimeline(t, p)
+		require.Empty(t, p.Warnings, "seed %d", seed)
+
+		var ins []int
+		for i, it := range p.Items {
+			if it.Source == SourceInsert {
+				ins = append(ins, i)
+			}
+		}
+		require.Len(t, ins, 3, "seed %d", seed)
+		require.Equal(t, []int{ins[0], ins[0] + 1, ins[0] + 2}, ins, "seed %d: no music between them", seed)
+		a, b, c := p.Items[ins[0]], p.Items[ins[1]], p.Items[ins[2]]
+		require.Equal(t, end(a), b.OffsetMS, "seed %d: back to back", seed)
+		require.Equal(t, end(b), c.OffsetMS, "seed %d: back to back", seed)
+		require.Equal(t, 0, *a.InsertIndex)
+		require.Equal(t, uint64(11), *a.ClockInsertID)
+		require.GreaterOrEqual(t, a.OffsetMS, 29*mn+20*sec, "seed %d: inside its window", seed)
+		require.LessOrEqual(t, a.OffsetMS, 30*mn, "seed %d: inside its window", seed)
+		before := p.Items[ins[0]-1]
+		if before.Truncated {
+			require.Equal(t, 29*mn+40*sec, end(before), "seed %d: cut at the target", seed)
+		}
+	}
+}
+
+func TestBuildOneTimeInserts(t *testing.T) {
+	t.Parallel()
+	l := library(append(songs(1, 40, 3*mn, music),
+		trackSpec{id: 100, duration: 20 * sec, playlist: jingles, artist: 100},
+		trackSpec{id: 300, duration: 15 * mn, playlist: extra, artist: 300},
+		trackSpec{id: 301, duration: 2 * mn, playlist: news, artist: 301})...)
+
+	t.Run("replaces the template insert at its offset", func(t *testing.T) {
+		t.Parallel()
+		in := input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)}, trackInsert(11, 30*mn, mn, 100))
+		in.HourInserts = []Insert{{ID: 5, TrackID: 301, Placement: PlacementFixed, OffsetMS: new(30 * mn), ToleranceMS: mn}}
+		p := Build(in)
+		requireTimeline(t, p)
+		require.Equal(t, []WarningCode{WarnInsertReplaced}, codes(p))
+		require.Empty(t, p.Refused)
+		var got []Source
+		for _, it := range p.Items {
+			if it.Source != SourceFill {
+				got = append(got, it.Source)
+				require.Equal(t, uint64(301), it.TrackID)
+				require.Equal(t, uint64(5), *it.HourInsertID)
+			}
+		}
+		require.Equal(t, []Source{SourceHourInsert}, got)
+	})
+	t.Run("a chain past the window skips a template insert and refuses a one-time one", func(t *testing.T) {
+		t.Parallel()
+		in := input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)},
+			trackInsert(11, 10*mn, 0, 300), trackInsert(12, 20*mn, mn, 100))
+		in.HourInserts = []Insert{{ID: 5, TrackID: 301, Placement: PlacementFixed, OffsetMS: new(22 * mn), ToleranceMS: 0}}
+		p := Build(in)
+		requireTimeline(t, p)
+		require.Equal(t, []WarningCode{WarnInsertSkipped}, codes(p))
+		require.Equal(t, 1, *p.Warnings[0].InsertIndex)
+		require.Equal(t, ReasonDoesNotFit, p.Refused[5].Reason)
+	})
+	t.Run("start, end, and a refused blocked track", func(t *testing.T) {
+		t.Parallel()
+		bl := library(append(songs(1, 40, 3*mn, music),
+			trackSpec{id: 301, duration: 2 * mn, playlist: news, artist: 301},
+			trackSpec{id: 302, duration: 2 * mn, playlist: news, artist: 302},
+			trackSpec{id: 303, duration: 2 * mn, playlist: news, artist: 303, rules: []uint64{rotationRule}})...)
+		missed := uint64(900)
+		in := input(bl, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)})
+		in.HourInserts = []Insert{
+			{ID: 5, TrackID: 301, MissedID: &missed, Placement: PlacementStart},
+			{ID: 6, TrackID: 302, Placement: PlacementEnd},
+			{ID: 7, TrackID: 303, Placement: PlacementFixed, OffsetMS: new(30 * mn), ToleranceMS: mn},
+		}
+		in.History = []Play{{TrackID: 303, ArtistID: new(uint64(303)), Start: hour10.Add(-time.Hour)}}
+		p := Build(in)
+		requireTimeline(t, p)
+		first, last := p.Items[0], p.Items[len(p.Items)-1]
+		require.Equal(t, SourceReschedule, first.Source)
+		require.Equal(t, &missed, first.RescheduleOfID)
+		require.Zero(t, first.OffsetMS)
+		require.Equal(t, SourceHourInsert, last.Source)
+		require.Equal(t, clocks.HourMS, end(last))
+		require.Equal(t, map[uint64]Refusal{7: p.Refused[7]}, p.Refused)
+		require.Equal(t, ReasonBlocked, p.Refused[7].Reason)
+	})
+}
+
+func TestBuildLeavesAShortGap(t *testing.T) {
+	t.Parallel()
+	l := library(append(songs(1, 40, 3*mn, music), trackSpec{id: 300, duration: 59*mn + 55*sec, playlist: extra})...)
+	p := Build(input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)}, trackInsert(1, 0, 0, 300)))
+	require.Len(t, p.Items, 1, "the 5 s gap is under rotation.min_gap_ms")
+	require.Empty(t, p.Warnings)
+}
+
+func TestBuildArtistInterval(t *testing.T) {
+	t.Parallel()
+	// Artist 9 has tracks in music and in jingles; the rotation rule keeps
+	// them 2 h apart, whichever playlist they come from.
+	specs := songs(1, 30, 3*mn, music)
+	specs = append(specs,
+		trackSpec{id: 90, duration: 3 * mn, playlist: music, artist: 9, rules: []uint64{rotationRule}},
+		trackSpec{id: 91, duration: 3 * mn, playlist: music, artist: 9, rules: []uint64{rotationRule}},
+		trackSpec{id: 92, duration: 20 * sec, playlist: jingles, artist: 9, rules: []uint64{rotationRule}})
+	l := library(specs...)
+	for seed := range uint64(50) {
+		in := input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(jingles, clocks.RuleSpread, 1)})
+		in.Seed = seed
+		n := 0
+		for _, it := range Build(in).Items {
+			if it.TrackID >= 90 {
+				n++
+			}
+		}
+		require.LessOrEqual(t, n, 1, "seed %d", seed)
+	}
+}
+
+func TestCheckerTrackInterval(t *testing.T) {
+	t.Parallel()
+	l := &Library{Rules: map[uint64]playrules.RuleInput{5: {Name: "Jingles", MinIntervalMinutes: new(20)}}}
+	jingle := Track{ID: 1, DurationMS: 20 * sec, RuleIDs: []uint64{5}}
+	c := newChecker(HourInput{Location: yerevan, Library: l, History: []Play{{TrackID: 1, Start: hour10.Add(-15 * time.Minute)}}})
+	require.False(t, c.allowed(jingle, hour10.Add(4*time.Minute)))
+	require.True(t, c.allowed(jingle, hour10.Add(5*time.Minute)), "20 minutes after the last start")
+}
+
+func TestBuildEmergency(t *testing.T) {
+	t.Parallel()
+	// Every music track may play only from 06:00 to 08:00.
+	morning := uint64(9)
+	specs := songs(1, 20, 3*mn, music)
+	for i := range specs {
+		specs[i].rules = []uint64{morning}
+	}
+	l := library(append(specs, songs(100, 30, 3*mn, extra)...)...)
+	l.Rules[morning] = playrules.RuleInput{Name: "Morning", WindowFrom: new(playrules.TimeOfDay(6 * 60)), WindowTo: new(playrules.TimeOfDay(8 * 60))}
+
+	p := Build(input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)}))
+	requireTimeline(t, p)
+	require.Equal(t, []WarningCode{WarnGeneralPool}, codes(p))
+	require.Equal(t, clocks.HourMS, end(p.Items[len(p.Items)-1]))
+	for _, it := range p.Items {
+		require.Equal(t, SourceGeneral, it.Source)
+		require.Nil(t, it.PlaylistID)
+	}
+
+	only := library(specs...)
+	only.Rules[morning] = l.Rules[morning]
+	p = Build(input(only, []clocks.ClockPlaylist{pl(music, clocks.RuleFill)}))
+	require.Empty(t, p.Items)
+	require.Equal(t, []WarningCode{WarnEmergency}, codes(p))
+}
+
+func TestBuildRuleBlocked(t *testing.T) {
+	t.Parallel()
+	morning := uint64(9)
+	specs := append(songs(1, 30, 3*mn, music), trackSpec{id: 100, duration: 20 * sec, playlist: jingles, rules: []uint64{morning}})
+	l := library(specs...)
+	l.Rules[morning] = playrules.RuleInput{Name: "Morning", WindowFrom: new(playrules.TimeOfDay(6 * 60)), WindowTo: new(playrules.TimeOfDay(8 * 60))}
+	p := Build(input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(jingles, clocks.RuleStart)}))
+	require.Equal(t, []WarningCode{WarnRuleBlocked}, codes(p))
+	require.Equal(t, SourceFill, p.Items[0].Source, "the fill covers its time")
+}
+
 func TestBuildIsDeterministic(t *testing.T) {
 	t.Parallel()
-	l := library(songs(1, 50, 4*mn, music)...)
-	elements := func() []clocks.Element {
-		var es []clocks.Element
-		for range 15 {
-			es = append(es, flow(4*mn, music))
-		}
-		return es
-	}
-	a := Build(input(t, l, elements()...))
-	b := Build(input(t, l, elements()...))
-	require.Equal(t, a, b)
-
-	other := input(t, l, elements()...)
+	l := library(append(songs(1, 40, 3*mn, music), songs(100, 10, 20*sec, jingles)...)...)
+	in := input(l, []clocks.ClockPlaylist{pl(music, clocks.RuleFill), pl(jingles, clocks.RuleSpread, 3)},
+		clocks.Insert{ID: 1, OffsetMS: 30 * mn, ToleranceMS: mn, PlaylistID: new(jingles)})
+	require.Equal(t, Build(in), Build(in))
+	other := in
 	other.Seed = 43
-	require.NotEqual(t, a.Items, Build(other).Items, "another seed picks other tracks")
+	require.NotEqual(t, Build(in).Items, Build(other).Items)
 }
 
-func TestBuildHonoursSeparation(t *testing.T) {
+func TestBuildOverride(t *testing.T) {
 	t.Parallel()
-	l := library(songs(1, 3, 20*mn, music)...)
-	in := input(t, l, flow(20*mn, music), withFiller(flow(20*mn, music), clocks.FillerRandom))
-	// Track 1 aired 71 hours ago; the artist of track 2 aired an hour ago.
-	in.History = []Play{
-		{TrackID: 1, ArtistID: new(uint64(1)), Start: hour10.Add(-71 * time.Hour)},
-		{TrackID: 9, ArtistID: new(uint64(2)), Start: hour10.Add(-time.Hour)},
+	// The jingles playlist is spread by itself; the clock makes it fill.
+	l := library(songs(100, 40, 3*mn, jingles)...)
+	p := pl(jingles, clocks.RuleSpread, 2)
+	p.Rule = rule(clocks.RuleFill)
+	plan := Build(input(l, []clocks.ClockPlaylist{p}))
+	requireTimeline(t, plan)
+	for _, it := range plan.Items {
+		require.Equal(t, SourceFill, it.Source)
 	}
-	p := Build(in)
-	require.Len(t, p.Items, 1)
-	require.Equal(t, uint64(3), p.Items[0].TrackID)
-	require.Equal(t, []WarningCode{WarnEmergency, WarnGapUnfilled}, codes(p))
-}
-
-func TestBuildPlayRules(t *testing.T) {
-	t.Parallel()
-	morning, oncePerHour := uint64(1), uint64(2)
-	l := library(
-		trackSpec{id: 1, duration: 30_000, playlist: jingles, rules: []uint64{morning}},
-		trackSpec{id: 2, duration: 30_000, playlist: jingles, rules: []uint64{oncePerHour}},
-	)
-	l.Rules[morning] = playrules.RuleInput{WindowFrom: new(playrules.TimeOfDay(6 * 60)), WindowTo: new(playrules.TimeOfDay(8 * 60))}
-	l.Rules[oncePerHour] = playrules.RuleInput{MaxPerHour: new(1)}
-
-	in := input(t, l, flow(30_000, jingles), flow(30_000, jingles))
-	in.Separation = Separation{}
-	in.Settings.MinFillerGapMS = noFiller
-	p := Build(in)
-	// At 10:00 the morning jingle is out of its window; the other plays
-	// once, then the per-hour limit blocks every jingle.
-	require.Len(t, p.Items, 1)
-	require.Equal(t, uint64(2), p.Items[0].TrackID)
-	require.Equal(t, []WarningCode{WarnBlockedByPlayRules}, codes(p))
-	require.Equal(t, 1, *p.Warnings[0].Element)
-
-	in.Start = time.Date(2026, 10, 15, 3, 0, 0, 0, time.UTC) // 07:00 station time
-	p = Build(in)
-	require.Len(t, p.Items, 2, "both jingles are allowed at 07:00")
-}
-
-func TestBuildMinInterval(t *testing.T) {
-	t.Parallel()
-	every10 := uint64(1)
-	l := library(trackSpec{id: 1, duration: 4 * mn, playlist: jingles, rules: []uint64{every10}})
-	l.Rules[every10] = playrules.RuleInput{MinIntervalMinutes: new(10)}
-	in := input(t, l, flow(4*mn, jingles), flow(4*mn, jingles), flow(4*mn, jingles), flow(4*mn, jingles))
-	in.Separation = Separation{}
-	in.Settings.MinFillerGapMS = noFiller
-	p := Build(in)
-	// After the start at 0, every slot is at 4:00, because a skipped slot
-	// does not advance the hour, and 4 minutes is within the interval.
-	require.Len(t, p.Items, 1)
-	require.Equal(t, []WarningCode{WarnBlockedByPlayRules, WarnBlockedByPlayRules, WarnBlockedByPlayRules}, codes(p))
-}
-
-func TestBuildCrossingTrackAtTheHour(t *testing.T) {
-	t.Parallel()
-	l := library(songs(1, 5, 21*mn, music)...)
-	in := input(t, l, flow(21*mn, music), flow(21*mn, music), flow(21*mn, music), flow(21*mn, music))
-	p := Build(in)
-	// 0, 21, 42: the third crosses 60:00 and is cut there; the fourth is
-	// removed, and overflow never asks for filler.
-	require.Len(t, p.Items, 3)
-	last := p.Items[2]
-	require.True(t, last.Truncated)
-	require.Equal(t, 18*mn, last.OutMS)
-	require.Empty(t, p.Warnings)
-}
-
-func TestBuildFixedElement(t *testing.T) {
-	t.Parallel()
-	news := uint64(9)
-	specs := append(songs(1, 10, 14*mn, music), trackSpec{id: 50, duration: 5 * mn, playlist: news})
-	specs = append(specs, songs(100, 3, 80_000, extra)...)
-	l := library(specs...)
-
-	t.Run("short segment gets filler before the window", func(t *testing.T) {
-		t.Parallel()
-		in := input(t, l, flow(14*mn, music), withFiller(flow(14*mn, music), clocks.FillerRandom), fixed(30, 5*mn, news),
-			flow(14*mn, music), flow(14*mn, music))
-		p := Build(in)
-		// 28 minutes of music, 1 minute short of the window (29:00 to
-		// 31:00): an 80 s filler ends at 29:20, inside the window, and the
-		// news starts there.
-		require.Len(t, p.Items, 6)
-		require.Equal(t, SourceFillerRandom, p.Items[2].Source)
-		require.Equal(t, uint64(50), p.Items[3].TrackID)
-		require.Equal(t, 29*mn+20_000, p.Items[3].OffsetMS)
-		require.Equal(t, 34*mn+20_000, p.Items[4].OffsetMS, "the next segment starts at the end of the news")
-	})
-
-	t.Run("crossing track is cut at the minute", func(t *testing.T) {
-		t.Parallel()
-		// Nominal 3 × 10 minutes fits before 31:00; the 14-minute tracks
-		// lie within the 5-minute tolerance but overrun.
-		loose := flow(10*mn, music)
-		loose.DurationToleranceMS = 5 * mn
-		in := input(t, l, loose, loose, loose, fixed(30, 5*mn, news))
-		in.Settings.MinFillerGapMS = noFiller
-		p := Build(in)
-		// 0, 14, 28: the third would end at 42:00, past 31:00; it is cut at
-		// 30:00 and the news starts there.
-		require.Len(t, p.Items, 4)
-		require.True(t, p.Items[2].Truncated)
-		require.Equal(t, 30*mn, end(p.Items[2]))
-		require.Equal(t, 30*mn, p.Items[3].OffsetMS)
-	})
-}
-
-func TestBuildEmergencySteps(t *testing.T) {
-	t.Parallel()
-	tight := flow(3*mn, music)
-	tight.DurationToleranceMS = 10_000
-
-	t.Run("relaxed tolerance", func(t *testing.T) {
-		t.Parallel()
-		in := input(t, library(trackSpec{id: 1, duration: 3*mn + 35_000, playlist: music}), tight)
-		in.Settings.MinFillerGapMS = noFiller
-		p := Build(in)
-		require.Len(t, p.Items, 1)
-		require.Equal(t, []WarningCode{WarnToleranceRelaxed}, codes(p))
-	})
-	t.Run("general pool", func(t *testing.T) {
-		t.Parallel()
-		l := library(trackSpec{id: 1, duration: 10 * mn, playlist: music}, trackSpec{id: 2, duration: 3 * mn, playlist: extra})
-		in := input(t, l, tight)
-		in.Settings.MinFillerGapMS = noFiller
-		p := Build(in)
-		require.Equal(t, uint64(2), p.Items[0].TrackID)
-		require.Equal(t, []WarningCode{WarnGeneralPool}, codes(p))
-	})
-	t.Run("nothing at all", func(t *testing.T) {
-		t.Parallel()
-		in := input(t, library(trackSpec{id: 1, duration: 3 * mn, playlist: music}), tight)
-		in.History = []Play{{TrackID: 1, Start: hour10.Add(-time.Hour)}}
-		in.Settings.MinFillerGapMS = noFiller
-		p := Build(in)
-		require.Empty(t, p.Items)
-		require.Equal(t, []WarningCode{WarnEmergency}, codes(p))
-	})
-}
-
-func TestBuildWaitingSegments(t *testing.T) {
-	t.Parallel()
-	l := library(append(songs(1, 5, 19*mn, music), songs(100, 3, 3*mn, extra)...)...)
-	short := func() HourInput {
-		// 3 × 19 minutes with holder none: the incomplete clock waits.
-		return input(t, l, flow(19*mn, music), flow(19*mn, music), flow(19*mn, music))
-	}
-	// The default holder filler none fills at random when the segment is
-	// short on real tracks only; on nominal durations it waits.
-	in := short()
-	p := Build(in)
-	require.Equal(t, []int{0}, p.Asked)
-	require.Equal(t, clocks.FillerNone, p.AskMode)
-	require.Len(t, p.Items, 3)
-	require.Equal(t, []WarningCode{WarnFillerWaiting}, codes(p))
-
-	in = short()
-	in.Waiting = WaitDefault
-	in.DefaultFiller = clocks.Filler{Mode: clocks.FillerPlaylist, SourceID: new(extra)}
-	p = Build(in)
-	require.Len(t, p.Items, 4)
-	require.Equal(t, SourceFillerPlaylist, p.Items[3].Source)
-
-	in = short()
-	in.Waiting, in.AnswerTrackID = WaitAnswer, 101
-	p = Build(in)
-	require.Len(t, p.Items, 4)
-	require.Equal(t, SourceFillerAnswer, p.Items[3].Source)
-	require.Equal(t, uint64(101), p.Items[3].TrackID)
-	require.False(t, p.AnswerRefused)
-
-	in = short()
-	in.Waiting, in.AnswerTrackID = WaitAnswer, 101
-	in.History = []Play{{TrackID: 101, Start: hour10.Add(-time.Hour)}}
-	p = Build(in)
-	require.True(t, p.AnswerRefused)
-}
-
-func TestBuildPool(t *testing.T) {
-	t.Parallel()
-	l := library(append(songs(1, 5, 19*mn, music), songs(100, 3, 3*mn, extra)...)...)
-	pooled := func() HourInput {
-		last := flow(19*mn, music)
-		last.Filler = clocks.Filler{Mode: clocks.FillerPool}
-		return input(t, l, flow(19*mn, music), flow(19*mn, music), last)
-	}
-
-	in := pooled()
-	in.Pool = []PoolRow{{ID: 11, TrackID: 101}, {ID: 12, TrackID: 102}}
-	in.History = []Play{{TrackID: 101, Start: hour10.Add(-time.Hour)}}
-	p := Build(in)
-	// 101 breaks separation: skipped, the next row is used.
-	require.Len(t, p.Items, 4)
-	require.Equal(t, SourceFillerPool, p.Items[3].Source)
-	require.Equal(t, uint64(102), p.Items[3].TrackID)
-	require.Equal(t, uint64(12), *p.Items[3].PoolRowID)
-	require.Equal(t, []WarningCode{WarnPoolTrackRefused}, codes(p))
-	require.False(t, p.PoolEmpty)
-
-	in = pooled()
-	p = Build(in)
-	require.True(t, p.PoolEmpty)
-	require.Equal(t, SourceFillerRandom, p.Items[3].Source, "an empty pool falls back to the default mode")
-	require.Equal(t, []WarningCode{WarnPoolEmpty}, codes(p))
-}
-
-func TestBuildSmallGapIsLeft(t *testing.T) {
-	t.Parallel()
-	l := library(append(songs(1, 3, 19*mn+56_000, music), songs(100, 3, 3*mn, extra)...)...)
-	in := input(t, l, flow(20*mn, music), flow(20*mn, music), flow(20*mn, music))
-	p := Build(in)
-	// 3 × 19:56 leaves 12 s: above the 10 s minimum, so filler, cut at the
-	// hour.
-	require.Len(t, p.Items, 4)
-	in.Settings.MinFillerGapMS = 15_000
-	p = Build(in)
-	require.Len(t, p.Items, 3, "a gap below the minimum gets no filler")
-	require.Empty(t, p.Warnings)
-}
-
-func TestCheckerWindows(t *testing.T) {
-	t.Parallel()
-	c := &checker{loc: yerevan, sep: Separation{Track: time.Hour}, byTrack: map[uint64][]time.Time{}, byArtist: map[uint64][]time.Time{}}
-	tr := Track{ID: 1}
-	c.add(1, nil, hour10)
-	require.False(t, c.separated(tr, hour10.Add(59*time.Minute)))
-	require.True(t, c.separated(tr, hour10.Add(time.Hour)), "an interval of exactly the separation passes")
-	require.False(t, c.separated(tr, hour10.Add(-59*time.Minute)), "a later play blocks too")
-}
-
-// A track with cue points is fitted by its length on air, and its item
-// carries the in and out points in the file (docs/phase-22-plan.md §3.2).
-func TestBuildUsesTheCut(t *testing.T) {
-	t.Parallel()
-	// Track 1: a 70 s file cut to 10 s ... 40 s, 30 s on air. Track 2: a
-	// 30 s file without a cut.
-	l := library(trackSpec{id: 1, duration: 30_000, playlist: music, artist: 1}, trackSpec{id: 2, duration: 50*mn + 30_000, playlist: extra, artist: 2})
-	l.Tracks[0].CueInMS = 10_000
-	el := flow(30_000, music)
-	el.DurationToleranceMS = 0
-	in := input(t, l, el, flow(59*mn+30_000, extra))
-	in.Settings.MinFillerGapMS = noFiller
-	p := Build(in)
-
-	require.Len(t, p.Items, 2)
-	require.Equal(t, Item{TrackID: 1, ElementID: new(uint64(1)), OffsetMS: 0, InMS: 10_000, OutMS: 40_000, Source: SourceClock}, p.Items[0])
-	require.Equal(t, 30_000, p.Items[1].OffsetMS, "the next item starts after the 30 s on air")
-	require.Zero(t, p.Items[1].InMS)
-}
-
-// A crossing track with a cue in point is cut at the segment end, counted
-// from its in point.
-func TestBuildCutsACrossingTrackFromItsCueIn(t *testing.T) {
-	t.Parallel()
-	l := library(trackSpec{id: 1, duration: 61 * mn, playlist: music, artist: 1})
-	l.Tracks[0].CueInMS = 5_000
-	in := input(t, l, flow(61*mn, music))
-	in.Settings.MinFillerGapMS = noFiller
-	p := Build(in)
-
-	require.Len(t, p.Items, 1)
-	it := p.Items[0]
-	require.True(t, it.Truncated)
-	require.Equal(t, 5_000, it.InMS)
-	require.Equal(t, 5_000+clocks.HourMS, it.OutMS)
-	require.Equal(t, clocks.HourMS, end(it))
 }

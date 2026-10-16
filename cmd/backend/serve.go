@@ -44,11 +44,9 @@ import (
 	playrulesrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/playrules"
 	retentionrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/retention"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
-	separationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/separation"
 	settingsrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
-	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
@@ -126,8 +124,8 @@ func serve(ctx context.Context) error {
 	if !ff.Available() {
 		apiLog.Warn("ffmpeg not found on PATH: import, analysis, and transcoding are refused")
 	}
-	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool))
-	separationSvc := separation.NewService(separationrepo.New(database), separationLimit(settingsSvc))
+	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool), intervalLimit(settingsSvc))
+	guardRetention(settingsSvc, playRulesSvc)
 	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
 	clocksSvc := clocks.NewService(database, clocksrepo.New(database), clocksrepo.NewCheck(database.Pool),
 		gridSvc, clockSettings(settingsSvc), time.Now)
@@ -174,7 +172,6 @@ func serve(ctx context.Context) error {
 		Settings:   settingsSvc,
 		Library:    librarySvc,
 		PlayRules:  playRulesSvc,
-		Separation: separationSvc,
 		Clocks:     clocksSvc,
 		Grid:       gridSvc,
 		Rotation:   rotationSvc,
@@ -394,17 +391,34 @@ func retentionPeriods(svc *settings.Service) retention.PeriodsFunc {
 	}
 }
 
-// separationLimit caps separation intervals at the play log retention:
-// separation is checked against aired history, which is kept only that long
-// (§4.1).
-func separationLimit(svc *settings.Service) separation.MaxHoursFunc {
+// intervalLimit caps the intervals of play rules at the play log
+// retention: they are checked against aired history, which is kept only
+// that long (§4.1).
+func intervalLimit(svc *settings.Service) playrules.MaxIntervalFunc {
 	return func(ctx context.Context) (int, error) {
 		days, err := settings.Value(ctx, svc, settings.RetentionPlayLogDays)
 		if err != nil {
 			return 0, err
 		}
-		return days * 24, nil
+		return days * 24 * 60, nil
 	}
+}
+
+// guardRetention refuses a play log retention shorter than the longest
+// interval of the play rules (§4.1).
+func guardRetention(svc *settings.Service, rules *playrules.Service) {
+	settings.Guard(svc, settings.RetentionPlayLogDays, func(ctx context.Context, days int) error {
+		longest, err := rules.LongestIntervalMinutes(ctx)
+		if err != nil {
+			return err
+		}
+		if longest > days*24*60 {
+			return settings.Refuse(settings.RetentionPlayLogDays.Name(), settings.RuleIntervalBeyondRetention,
+				fmt.Sprintf("a play rule has an interval of %d minutes; the play log must keep at least %d days",
+					longest, (longest+24*60-1)/(24*60)))
+		}
+		return nil
+	})
 }
 
 // forwardAlerts pushes ERROR log entries to the panels as error.alert events
@@ -440,14 +454,10 @@ func gridSettings(svc *settings.Service) grid.SettingsFunc {
 	}
 }
 
-// clockSettings reads the tolerance defaults of new elements and the grid
+// clockSettings reads the default tolerance of new inserts and the grid
 // horizon of the dry check.
 func clockSettings(svc *settings.Service) clocks.SettingsFunc {
 	return func(ctx context.Context) (clocks.Settings, error) {
-		dur, err := settings.Value(ctx, svc, settings.RotationDurationToleranceMS)
-		if err != nil {
-			return clocks.Settings{}, err
-		}
 		fixed, err := settings.Value(ctx, svc, settings.RotationFixedToleranceMS)
 		if err != nil {
 			return clocks.Settings{}, err
@@ -456,7 +466,7 @@ func clockSettings(svc *settings.Service) clocks.SettingsFunc {
 		if err != nil {
 			return clocks.Settings{}, err
 		}
-		return clocks.Settings{DurationToleranceMS: dur, FixedToleranceMS: fixed, GridHorizonDays: days}, nil
+		return clocks.Settings{FixedToleranceMS: fixed, GridHorizonDays: days}, nil
 	}
 }
 
@@ -476,19 +486,7 @@ func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
 		if err != nil {
 			return rotation.PlanSettings{}, err
 		}
-		deadline, err := settings.Value(ctx, svc, settings.FillerReminderDeadlineMinutes)
-		if err != nil {
-			return rotation.PlanSettings{}, err
-		}
-		fallback, err := settings.Value(ctx, svc, settings.FillerFallbackKey)
-		if err != nil {
-			return rotation.PlanSettings{}, err
-		}
-		minGap, err := settings.Value(ctx, svc, settings.RotationMinFillerGapMS)
-		if err != nil {
-			return rotation.PlanSettings{}, err
-		}
-		relaxed, err := settings.Value(ctx, svc, settings.RotationMaxRelaxedToleranceMS)
+		minGap, err := settings.Value(ctx, svc, settings.RotationMinGapMS)
 		if err != nil {
 			return rotation.PlanSettings{}, err
 		}
@@ -503,11 +501,9 @@ func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
 		return rotation.PlanSettings{
 			Location:                loc,
 			PlanHorizonHours:        horizon,
-			ReminderDeadline:        time.Duration(deadline) * time.Minute,
-			Fallback:                clocks.Filler{Mode: clocks.FillerMode(fallback.Mode), SourceID: fallback.SourceID},
 			Freeze:                  time.Duration(prepush) * time.Minute,
 			DefaultFixedToleranceMS: fixedTol,
-			Build:                   rotation.Settings{MinFillerGapMS: minGap, MaxRelaxedToleranceMS: relaxed},
+			Build:                   rotation.Settings{MinGapMS: minGap},
 		}, nil
 	}
 }

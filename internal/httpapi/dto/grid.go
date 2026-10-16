@@ -4,9 +4,8 @@ import "time"
 
 // GridClockRef is the clock of a grid slot.
 type GridClockRef struct {
-	ID     uint64 `json:"id"`
-	Name   string `json:"name"`
-	Status string `json:"status" enum:"complete,incomplete"`
+	ID   uint64 `json:"id"`
+	Name string `json:"name"`
 }
 
 // GridSlot assigns a clock to a weekday and hour for a range of dates, in

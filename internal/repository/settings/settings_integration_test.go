@@ -48,7 +48,7 @@ func TestStore(t *testing.T) {
 	})
 
 	t.Run("objects and null round-trip as JSON", func(t *testing.T) {
-		_, err := store.Upsert(ctx, settings.Stored{Key: "filler.fallback", Value: json.RawMessage(`{"mode":"playlist","source_id":3}`), UpdatedAt: t0})
+		_, err := store.Upsert(ctx, settings.Stored{Key: "test.object", Value: json.RawMessage(`{"mode":"playlist","source_id":3}`), UpdatedAt: t0})
 		require.NoError(t, err)
 		_, err = store.Upsert(ctx, settings.Stored{Key: "playout.emergency_playlist_id", Value: json.RawMessage(`null`), UpdatedAt: t0})
 		require.NoError(t, err)
@@ -56,13 +56,13 @@ func TestStore(t *testing.T) {
 		all, err := store.List(ctx)
 		require.NoError(t, err)
 		require.Len(t, all, 3)
-		require.Equal(t, []string{"filler.fallback", "liquidsoap.fade_out_ms", "playout.emergency_playlist_id"},
+		require.Equal(t, []string{"liquidsoap.fade_out_ms", "playout.emergency_playlist_id", "test.object"},
 			[]string{all[0].Key, all[1].Key, all[2].Key}, "key order")
-		require.JSONEq(t, `{"mode":"playlist","source_id":3}`, string(all[0].Value))
-		require.JSONEq(t, `null`, string(all[2].Value))
+		require.JSONEq(t, `{"mode":"playlist","source_id":3}`, string(all[2].Value))
+		require.JSONEq(t, `null`, string(all[1].Value))
 
 		var typ string
-		require.NoError(t, d.Pool.QueryRow(ctx, `SELECT jsonb_typeof(value) FROM settings WHERE key = 'filler.fallback'`).Scan(&typ))
+		require.NoError(t, d.Pool.QueryRow(ctx, `SELECT jsonb_typeof(value) FROM settings WHERE key = 'test.object'`).Scan(&typ))
 		require.Equal(t, "object", typ, "stored as jsonb, not as a JSON string")
 	})
 

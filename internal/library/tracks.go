@@ -283,13 +283,14 @@ type TrackStore interface {
 	SetPlaylists(ctx context.Context, id uint64, playlistIDs []uint64) error
 	// Delete removes a track, its memberships, and its play rule links.
 	// ErrTrackNotFound; ErrTrackHasHistory when the play log or the track
-	// plan refers to it; ErrInUse when a clock filler pool does.
+	// plan refers to it; ErrInUse when a clock insert or a one-time insert
+	// does.
 	Delete(ctx context.Context, id uint64) error
-	// Users returns the clocks whose filler pool holds the track, at most
-	// limit.
+	// Users returns the clocks with an insert of the track and its
+	// one-time inserts, at most limit.
 	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
 	// DeleteUnreferenced deletes, in one statement, the tracks of ids that
-	// no play log row, plan item, hour insert, or filler pool refers to,
+	// no play log row, plan item, clock insert, or one-time insert refers to,
 	// and returns their IDs. A reference added while it runs fails the
 	// whole statement with ErrInUse or ErrTrackHasHistory: nothing is
 	// deleted then.
@@ -321,10 +322,10 @@ type TrackStore interface {
 // TrackBlockers is what keeps a track from being deleted.
 type TrackBlockers struct {
 	Title string
-	// History: the play log, the track plan, or an hour insert refers to
-	// the track.
+	// History: the play log or the track plan refers to the track.
 	History bool
-	// UsedBy names the clocks whose filler pool holds the track.
+	// UsedBy names the clocks with an insert of the track and its one-time
+	// inserts.
 	UsedBy []Ref
 }
 
@@ -443,7 +444,7 @@ func (s *Service) UpdateTrack(ctx context.Context, id uint64, in TrackInput) (Tr
 }
 
 // DeleteTrack deletes a track that has no play history, is not planned, and
-// is in no filler pool. The file is not touched.
+// is in no clock insert or one-time insert. The file is not touched.
 func (s *Service) DeleteTrack(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
@@ -469,7 +470,7 @@ type TrackRefusal struct {
 	Title string
 	// Err is ErrTrackInUse, ErrTrackHasHistory, or ErrTrackNotFound.
 	Err error
-	// UsedBy names the clocks whose filler pool holds the track, for
+	// UsedBy names the clocks and one-time inserts that use the track, for
 	// ErrTrackInUse.
 	UsedBy []Ref
 }

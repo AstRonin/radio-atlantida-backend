@@ -1,7 +1,7 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-22)
-Last updated: 2026-10-16
+Status: Draft (v7-23)
+Last updated: 2026-10-17
 
 ## 1. Overview
 
@@ -9,11 +9,10 @@ The system manages a radio station's programming and broadcasts it online. It co
 
 - a content library (tracks, jingles, news, segments) organized into playlists, where every playlist has a type that the manager can extend;
 - hourly clock templates (60 minutes) and a weekly grid that assigns clocks to time slots, planned up to 30 days ahead;
-- a rolling track plan (24 to 48 hours) that respects separation rules and play rules;
+- a rolling track plan (24 to 48 hours) that respects play rules (time windows, track and artist intervals, plays per hour);
 - play rules (time windows, minimum intervals, plays per hour) that the manager creates on a separate page and applies to tracks or playlists, mostly for jingles;
 - a play button for tracks in the panel, so the manager can listen without leaving the admin;
-- clock fitting by track selection within tolerances, never by changing audio;
-- filler handling when a clock is short, including a blocking dialog on save;
+- clocks built from playlists with placement rules and timed inserts; the hour is laid out by track selection, never by changing audio;
 - clocks that start and end on exact hour boundaries; a track that overruns the boundary fades out over 2 to 3 seconds and is cut;
 - live voice from a web browser mixed over the music;
 - detection of broadcast outages, marking of items that did not air ("missed"), and rescheduling of missed content into later clocks;
@@ -29,7 +28,7 @@ The system is developed in three Git repositories. Each repository has one purpo
 
 | Repository | Contents | Used for |
 |------------|----------|----------|
-| `radio-atlantida-backend` | Go backend: REST API, WebSocket hub, clock/grid/rotation engine, filler and reminder service, outage detector, WebRTC live voice bridge, Liquidsoap control client, track preview audio endpoint (§6.6), play log writer, reconciliation job, retention job, versioned migrations (`.up.sql`), OpenAPI specification generation (§6.4) | Builds the `radio-atlantida-backend` image (§9.2) |
+| `radio-atlantida-backend` | Go backend: REST API, WebSocket hub, clock/grid/rotation engine, outage detector, WebRTC live voice bridge, Liquidsoap control client, track preview audio endpoint (§6.6), play log writer, reconciliation job, retention job, versioned migrations (`.up.sql`), OpenAPI specification generation (§6.4) | Builds the `radio-atlantida-backend` image (§9.2) |
 | `radio-atlantida-frontend` | Angular management panel, static help texts (§6.1), validation (§6.2), settings pages (§6.3), played-tracks list with missed items, track player (§6.6), TypeScript client generated from the backend OpenAPI specification (§6.4) | Builds the `radio-atlantida-frontend` image (§9.2) |
 | `radio-atlantida-deploy` | `docker-compose.yml`, `.env.example`, `update.bat`, `update.ps1`, `config/` (Liquidsoap script and Icecast configuration for the test stack), `README.md` | Runs the stack on the production Windows host. Contains no application code (§9.2) |
 
@@ -53,7 +52,6 @@ Rules for using the code:
  |  - REST API (JSON) + OpenAPI specification    |
  |  - WebSocket hub (UI events)                  |
  |  - Clock/grid/rotation engine                 |
- |  - Filler and reminder service                |
  |  - Outage detector and missed-item service    |
  |  - WebRTC live voice bridge                   |
  |  - Liquidsoap control client                  |
@@ -75,9 +73,9 @@ Responsibilities:
 
 | Component   | Responsibility |
 |-------------|----------------|
-| Angular     | Management UI: library with track preview player, playlists, playlist types, clocks (including each clock's default filler mode), grid, play rules, filler dialogs, played-tracks list (aired, truncated, missed), live control, monitoring. Uses a TypeScript client generated from the backend OpenAPI specification |
+| Angular     | Management UI: library with track preview player, playlists, playlist types, clocks (playlists with placement rules, timed inserts, sample hour), grid, play rules, one-time inserts in the track plan, played-tracks list (aired, truncated, missed), live control, monitoring. Uses a TypeScript client generated from the backend OpenAPI specification |
 | Go          | Decides what plays next, enforces rules, fills short clocks, detects outages, marks missed items, reconciles the play log, relays live voice, publishes the API contract |
-| PostgreSQL  | Source of truth for library metadata, rules, grid, track plan, filler pools, play history, missed items, outage periods, settings |
+| PostgreSQL  | Source of truth for library metadata, rules, grid, track plan, play history, missed items, outage periods, settings |
 | Repository layer (inside Go) | The only code that contains SQL: one package per domain under `internal/repository` (§5.1). Business logic reaches the database only through it |
 | Liquidsoap  | Plays audio in real time, mixes live voice with music, applies fades, handles fallback, keeps a local playout journal |
 | Icecast     | Distributes the audio stream to listeners and reports its own connection state |
@@ -90,9 +88,9 @@ Responsibilities:
 | Frontend          | Angular                                   | Consumes a TypeScript client generated from the backend contract (§6.4). Repository: `radio-atlantida-frontend` |
 | Backend           | Go                                        | REST API, WebSocket events, scheduling, rotation, outage handling, API contract. Repository: `radio-atlantida-backend` |
 | API contract      | OpenAPI specification generated from Go   | Single source of truth for REST and WebSocket payloads (§6.4) |
-| UI events         | WebSocket                                 | Now playing, progress, live state, alerts, filler requests, outage and missed-item events |
+| UI events         | WebSocket                                 | Now playing, progress, live state, alerts, plan warnings, outage and missed-item events |
 | Live voice        | WebRTC into a Go bridge                   | Feeds a Liquidsoap input |
-| Database          | PostgreSQL                                | Relational core, JSONB for optional element settings |
+| Database          | PostgreSQL                                | Relational core |
 | DB access         | GORM for admin CRUD; pgx for hot paths    | See §5 and §5.1 |
 | Playout           | Liquidsoap                                | Linux container |
 | Stream server     | Icecast                                   | Test instance in Docker; production server configured in the admin panel |
@@ -104,10 +102,10 @@ Responsibilities:
 | Purpose                     | Library                        | Notes |
 |-----------------------------|--------------------------------|-------|
 | HTTP router and middleware  | `github.com/go-chi/chi/v5`     | Built on `net/http`. Middleware for panic recovery, request ID, and request logging (§10.1) |
-| WebSocket                   | `github.com/coder/websocket`   | UI events, error alerts, filler requests, missed-item events (§6) |
+| WebSocket                   | `github.com/coder/websocket`   | UI events, error alerts, plan warnings, missed-item events (§6) |
 | Environment variables       | `github.com/caarlos0/env/v11`  | Config structs with `env` tags; supports required fields and defaults |
 | `.env` file loading         | `github.com/joho/godotenv`     | Loads `.env` at startup if present. Variables already set in the environment are not overridden |
-| PostgreSQL driver           | `github.com/jackc/pgx/v5`      | Hot paths: play log, rotation queries, separation checks, reconciliation (§5) |
+| PostgreSQL driver           | `github.com/jackc/pgx/v5`      | Hot paths: play log, rotation queries, play rule interval checks, reconciliation (§5) |
 | ORM                         | `gorm.io/gorm`                 | Admin CRUD (§5) |
 | Migrations                  | `golang-migrate`               | Versioned schema changes (§5). Migration files are kept in `radio-atlantida-backend` |
 | Logging                     | `log/slog` (standard library)  | JSON handler, daily file rotation (§10.1) |
@@ -134,44 +132,38 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **playlist_types**: id, code (unique slug, for example `music`), name (display name), is_system (bool, default false), created_at. The list of types is dynamic: the manager adds new types in the panel and assigns them to playlists.
   - Four system types are created by the first migration: `music`, `jingle`, `news`, `segment` (`is_system = true`). A system type can be renamed (display name) but not deleted. Its `code` never changes, because the engine and the help texts may refer to it.
   - A type that is used by any playlist or track cannot be deleted. The API refuses the request and names the playlists that use it.
-  - The type does not change how rotation works. It is a label for the manager (filters and badges in the panel). It does not limit what a clock element can combine: one element may use playlists of different types, for example music and jingle.
+  - The type does not change how rotation works. It is a label for the manager (filters and badges in the panel). It does not limit which playlists a clock combines: one clock may use playlists of different types, for example music and jingle.
 - **playlists**: id, name, type_id (FK to `playlist_types`), created_at.
-- **artists**: id, name. Used for artist separation rules.
+- **artists**: id, name. Used for the artist interval of play rules (§7.3).
 - **tracks**: id, title, artist_id, duration_ms, file_path (relative to the media root, see §8.7), format, bitrate, sample_rate, quality_ok (bool), quality_notes, type_id (FK to `playlist_types`), file_checksum, created_at.
   - `reviewed_at` (timestamptz, nullable; v7-21, `docs/phase-21-plan.md` §2): when the manager marked the track checked, set and cleared only in bulk (`POST /api/tracks/review`). A change of the track's content clears it in the same statement: a new title, artist, or file path, and an analysis or transcode that stores a different `file_checksum`. Playlists, type, notes, the quality override, and play rules do not. It is separate from `quality_ok`.
   - Cue points and fades (v7-22, `docs/phase-22-plan.md` §2): `cue_in_ms` (int, default 0), `cue_out_ms` (int, nullable: the end of the file), `fade_in_ms` and `fade_out_ms` (int 0 to 5000, default 0: a hard cut). They mark the part of the file that goes on air; the file is never changed. The on-air length is `cue_out_ms` (or `duration_ms`) minus `cue_in_ms`; `duration_ms` stays the length of the file. The database checks the order and the fade range (`ck_tracks_cue`, `ck_tracks_fades`); the checks against the duration are in the service. A cut leaves at least 5 s on air. An analysis that stores a different `file_checksum`, or an update with a new duration, keeps a cue that still fits and resets all four columns in the same statement otherwise. A cue change keeps `reviewed_at`.
   - Analysis columns (v7-14, `docs/phase-11-plan.md` §2): codec, channels, loudness_lufs, true_peak_dbtp, loudness_range_lu (EBU R128), source_bitrate (the lossy file a transcoded file was made from), quality_issues (`text[]` of `format`, `sample_rate`, `channels`, `loudness`, `true_peak`, `low_bitrate`, `file_missing`), analyzed_at. An analysis sets `quality_ok` to "no issues"; a manual value lasts until the next analysis. `file_checksum` is the SHA-256 of the file, indexed for the duplicate check of an import.
 - **track_playlists**: track_id, playlist_id (many-to-many). A track may belong to several playlists.
-- **clocks**: id, name, length_seconds (fixed at 3600), status (`complete` or `incomplete`), default_filler_mode (nullable: `random`, `playlist`, or `artist`; null falls back to the global filler setting, §6.3), default_filler_playlist_id (nullable, FK to `playlists`; set only for `playlist`), default_filler_artist_id (nullable, FK to `artists`; set only for `artist`), updated_at. The default mode is chosen in the clock editor (§6.2). It applies when the filler pool is empty or a filler reminder expires (§7); `ask` and `pool` are not allowed here because they would fall back to themselves.
-- **clock_elements**: id, clock_id, position, placement (enum: `flow` (default), `start`, `end`, `fixed`), fixed_minute (int 0 to 59, nullable; required when `placement = fixed`), fixed_tolerance_ms (int, default 60000; applies to the start of a fixed element), nominal_duration_ms, duration_tolerance_ms (int, default 30000), filler_mode (enum: `none`, `ask`, `random`, `playlist`, `artist`, `pool`), filler_playlist_id (nullable, FK to `playlists`; set only for `playlist` mode), filler_artist_id (nullable, FK to `artists`; set only for `artist` mode), created_at. Stored as rows; a JSONB column may hold optional per-element settings.
-  - `filler_mode` is required on a clock that is saved short. A clock with `filler_mode = none` cannot be saved as complete if it is short.
-  - The playlists of an element are stored in `clock_element_playlists`, not in this table.
-  - The filler source has one typed column per kind, so the database refuses to delete a playlist or an artist that a clock or an element uses as filler (`ON DELETE RESTRICT`). The API exposes a single `filler_source_id` field and maps it to the column that matches the mode.
-- **clock_element_playlists**: clock_element_id, playlist_id (composite primary key). The playlists from which an element takes its track.
-  - An element has at least one row. The playlists may be of different types, so one element can mix, for example, music and jingle.
-  - The engine selects a track from the union of all tracks of these playlists, without duplicates (see §7).
-- **clock_filler_pool**: id, clock_id, track_id, position, used_at (timestamptz, nullable). A pool of specific tracks chosen for a clock. Used in position order; `used_at` is set when a track is taken for filler. Rows are not deleted when used, so the history stays visible.
-- **filler_requests**: id, clock_id, hour_start_utc, reason (`short_clock`, `pool_empty`), created_at, deadline_at, mode, answer_track_id (nullable), status (`pending`, `answered`, `defaulted`, `expired`).
-  - At most one `pending` request per `(clock_id, hour_start_utc)`, enforced by a partial unique index.
+- **playlists** gain (v7-23, `docs/phase-23-plan.md` §3.1): clock_rule (`fill` (default), `spread`, `start`, `end`, `start_end`, `middle`), clock_count (smallint 1 to 12; set only and required for `spread`). The placement rule of the playlist in clocks (§7.2); a clock may override it.
+- **clocks**: id, name, length_seconds (fixed at 3600), updated_at. Since v7-23 a clock has no elements, status, or filler settings; it is a set of playlists and timed inserts.
+- **clock_playlists** (v7-23): clock_id (FK, `ON DELETE CASCADE`), playlist_id (FK, `ON DELETE RESTRICT`: a playlist in a clock cannot be deleted), position, clock_rule (nullable: the playlist's own rule), clock_count (nullable; `spread` only), fill_weight (smallint 1 to 100, nullable). Primary key (clock_id, playlist_id), unique (clock_id, position).
+  - A clock has at least one playlist whose effective rule is `fill`. Either every fill row of a clock has a `fill_weight` or none has (checked by the service, which knows the effective rule).
+- **clock_inserts** (v7-23): id, clock_id (FK, `ON DELETE CASCADE`), offset_ms (0 to 3 599 000, whole seconds), tolerance_ms (default 60000, 0 to 600000), track_id (nullable, FK `ON DELETE RESTRICT`), playlist_id (nullable, FK `ON DELETE RESTRICT`). Exactly one of track_id and playlist_id is set; unique (clock_id, offset_ms). A timed insert of the template: it plays in every hour of the clock (§7.2).
 - **grid_slots**: id, weekday (1 = Monday to 7 = Sunday), hour, clock_id, valid_from, valid_to (dates, both inclusive; null `valid_to` is open-ended). Weekday and hour are in station local time (see §10.2). Covers up to 30 days ahead.
   - At most one clock per weekday and hour on any date: an exclusion constraint forbids two slots with the same weekday and hour and overlapping date ranges.
   - Saving a slot that overlaps an existing one replaces the existing slot for the overlapping dates, in one transaction, and the result names the replaced slot. A partly covered slot is trimmed or split to the dates outside the new one. A fully covered slot is deleted, whether or not it has aired; its history rows keep their `clock_id` and lose only `grid_slot_id` (`ON DELETE SET NULL`).
-- **scheduled_items**: id, grid_slot_id, clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, truncated (bool, default false), source (`clock`, `filler_pool`, `filler_random`, `filler_playlist`, `filler_artist`, `filler_answer`, `reschedule`), status (`planned`, `queued`, `aired`, `missed`, `replaced`), outage_id (nullable, FK to `broadcast_outages`), missed_at (timestamptz, nullable), reschedule_of_id (nullable, FK to `play_log`: the missed item this item replaces; set only when `source = reschedule`), created_at. The rolling track plan, covering 24 to 48 hours ahead.
+- **scheduled_items**: id, grid_slot_id, clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, truncated (bool, default false), source (`fill`, `rule`, `insert`, `hour_insert`, `reschedule`, `general`; v7-23), status (`planned`, `queued`, `aired`, `missed`, `replaced`), outage_id (nullable, FK to `broadcast_outages`), missed_at (timestamptz, nullable), reschedule_of_id (nullable, FK to `play_log`: the missed item this item replaces; set only when `source = reschedule`), created_at. The rolling track plan, covering 24 to 48 hours ahead.
   - `reschedule_of_id` points to `play_log`, not to `scheduled_items`, because a missed item is moved to `play_log` and removed from `scheduled_items` (§4.1).
   - `missed` means the item was planned but did not reach the air because of a broadcast outage (see §7.1).
-  - `clock_element_id` (nullable, FK to `clock_elements`, `ON DELETE SET NULL`): the element the item was planned for; null for filler. `filler_pool_id` (nullable, FK to `clock_filler_pool`, `ON DELETE SET NULL`): the pool row a `filler_pool` item took; a rebuild of the hour sets that row's `used_at` back to null (v7-11).
-- **plan_hours**: hour_start_utc (primary key), clock_id (FK, `ON DELETE CASCADE`), clock_updated_at, grid_slot_id (nullable, `ON DELETE SET NULL`), seed, built_at, filler_request_id (nullable, `ON DELETE SET NULL`). One row per built hour of the track plan (v7-11, `docs/phase-8-plan.md` §2). An hour is stale when the grid now assigns another clock or none, or the clock's `updated_at` changed; the seed makes a rebuild after a reminder answer reproducible.
-- **hour_inserts**: id, hour_start_utc, track_id (FK, `ON DELETE RESTRICT`), missed_id (nullable, FK to `play_log`, `ON DELETE SET NULL`), placement (`start`, `end`, `fixed`), fixed_minute, fixed_tolerance_ms, created_at. One-time elements of a single hour: a missed item rescheduled into it (§7.1, §7.2). Every build of the hour places them; the clock template is not changed (v7-13, `docs/phase-10-plan.md` §2).
+  - `clock_insert_id` (nullable, FK to `clock_inserts`, `ON DELETE SET NULL`): the template insert of an `insert` item. `hour_insert_id` (nullable, FK to `hour_inserts`, `ON DELETE SET NULL`): the one-time insert of an `hour_insert` or `reschedule` item (v7-23).
+- **plan_hours**: hour_start_utc (primary key), clock_id (FK, `ON DELETE CASCADE`), clock_updated_at, grid_slot_id (nullable, `ON DELETE SET NULL`), seed, built_at. One row per built hour of the track plan (v7-11, `docs/phase-8-plan.md` §2). An hour is stale when the grid now assigns another clock or none, or the clock's `updated_at` changed (a change of a playlist's placement rule touches the `updated_at` of the clocks that use it); the seed makes a rebuild reproducible.
+- **hour_inserts**: id, hour_start_utc, track_id (FK, `ON DELETE RESTRICT`), missed_id (nullable, FK to `play_log`, `ON DELETE SET NULL`), placement (`start`, `end`, `fixed`), offset_ms (whole seconds; set only for `fixed`; v7-23, was fixed_minute), tolerance_ms, created_at. One-time inserts of a single hour: a track the manager adds to a planned hour (for example, today's news) or a missed item rescheduled into it (§7.1, §7.2). Every build of the hour places them; the clock template is not changed (v7-13, `docs/phase-10-plan.md` §2; v7-23).
 - **broadcast_state**: one row (`id = 1`): state (`connected`, `reconnecting`, `unreachable`), since (the last change of the derived broadcast state), reason (nullable: the open outage's reason or component), updated_at. Written only when the state changes, so the panel's timer survives a restart of the backend (§7.1, v7-16, `docs/phase-16-plan.md`). An empty table means the state is unknown; `unknown` is never stored.
 - **backend_heartbeat**: one row, alive_at. Written by the outage detector every 30 seconds, so a restart can tell how long the backend was down (v7-13).
 - **broadcast_outages**: id, started_at (timestamptz, UTC), ended_at (timestamptz, UTC, nullable while the outage is open), detected_by (`icecast`, `liquidsoap_callback`, `liquidsoap_control`, `backend`), component (`icecast`, `liquidsoap`, `backend`, `network`), reason (short text, nullable), reconciled_at (timestamptz, nullable). One row per interruption. An open outage has `ended_at` null.
-- **play_rules**: id, name, window_from (time, nullable), window_to (time, nullable), weekdays (array of 1 to 7, nullable; null means every day), min_interval_minutes (int, nullable), max_per_hour (int, nullable), notes, created_at. A reusable, named rule (see §7.3). Times are station local time (§10.2).
+- **play_rules**: id, name, window_from (time, nullable), window_to (time, nullable), weekdays (array of 1 to 7, nullable; null means every day), min_interval_minutes (int, nullable), artist_min_interval_minutes (int, nullable; v7-23), max_per_hour (int, nullable), notes, created_at. A reusable, named rule (see §7.3). Times are station local time (§10.2).
   - Every constraint is optional, but at least one must be set. `window_from` and `window_to` are set together or not at all. A window may cross midnight (for example, 22:00 to 02:00); the weekday then refers to the day on which the window starts.
 - **track_play_rules**: track_id, rule_id (composite primary key). Rules applied to a single track.
 - **playlist_play_rules**: playlist_id, rule_id (composite primary key). Rules applied to every track of a playlist. The rule is checked for each track separately.
   - A rule that is applied to any track or playlist cannot be deleted. The API refuses the request and lists the tracks and playlists that use it.
   - These tables replace the old `daypart_rules` table. A time window is one kind of play rule.
-- **separation_rules**: id, scope (track or artist), min_interval_hours (default 72), notes. The values are copied from the reference software and entered into this table. Rotation reads all separation values from here; none are hard-coded.
+- **separation_rules**: removed in v7-23 (`docs/phase-23-plan.md` decision 10). Separation is a play rule: the migration created "Music rotation" from the old values and attached it to the music playlists (§7.3).
 - **play_log**: id, track_id, artist_id, status (`aired`, `truncated`, `missed`), planned_start_utc, started_at (nullable for missed items), planned_in_ms (int, default 0; v7-22: the in point the item was planned with, so its planned length is `planned_out_ms − planned_in_ms`), planned_out_ms, actual_duration_ms (nullable for missed items), truncated (bool, default false), source (`auto`, `live`, or `emergency`; see §8.6), clock_id, grid_slot_id, scheduled_item_id (nullable), outage_id (nullable, set for missed items), resolution (`open`, `rescheduled`, `dismissed`, nullable; used only for missed items), resolved_at (timestamptz, nullable), resolved_item_id (nullable, set when rescheduled). Records what aired and what did not.
   - `ended_at` (timestamptz, nullable): set when the end of the track is recorded; null while it plays and for missed items. The first recorded end wins, because Liquidsoap may report the end of a track twice (v7-12, `docs/phase-9-plan.md` §2). A unique partial index on `scheduled_item_id` makes a repeated start a no-op.
   - `scheduled_item_id` and `resolved_item_id` are trace ids of `scheduled_items` rows, without a foreign key: those rows are deleted once they air or are missed (§4.1), so a foreign key would point at nothing. Aired rows are kept for 10 days (see §4.1). Missed rows are kept until resolved.
@@ -182,17 +174,15 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 
 Indexes:
 
-- `play_log (track_id, started_at DESC)` for track separation checks. Only rows with status `aired` or `truncated` count.
-- `play_log (artist_id, started_at DESC)` for artist separation checks. Same status filter.
+- `play_log (track_id, started_at DESC)` for track interval checks of play rules. Only rows with status `aired` or `truncated` count.
+- `play_log (artist_id, started_at DESC)` for artist interval checks of play rules. Same status filter.
 - `play_log (status, planned_start_utc)` and `play_log (outage_id)` for the played-tracks list and missed-item handling.
 - `playlists (type_id)` and `tracks (type_id)` for the check that a playlist type is unused before deletion.
 - `track_playlists (playlist_id)` for candidate selection, and `track_playlists (track_id)`.
 - `track_play_rules (track_id)`, `track_play_rules (rule_id)`, `playlist_play_rules (playlist_id)`, and `playlist_play_rules (rule_id)` for rule lookup during planning and for the in-use check.
-- `clock_elements (clock_id, position)`.
-- `clock_element_playlists (playlist_id)` for the check that a playlist is unused before deletion.
-- `clock_filler_pool (clock_id, position)` and `clock_filler_pool (clock_id) WHERE used_at IS NULL`.
-- `filler_requests (clock_id, hour_start_utc) WHERE status = 'pending'` (unique).
-- `scheduled_items (planned_start_utc)` and `scheduled_items (track_id, planned_start_utc DESC)` for separation checks against planned items.
+- `clock_playlists (clock_id, position)` and `clock_playlists (playlist_id)` for the check that a playlist is unused before deletion.
+- `clock_inserts (track_id)` and `clock_inserts (playlist_id)` (partial, not null) for the in-use checks.
+- `scheduled_items (planned_start_utc)` and `scheduled_items (track_id, planned_start_utc DESC)` for play rule interval checks against planned items.
 - `scheduled_items (status, outage_id)` for outage reconciliation.
 - `broadcast_outages (started_at)` and a partial unique index `broadcast_outages (ended_at) NULLS NOT DISTINCT WHERE ended_at IS NULL` so there is at most one open outage. `NULLS NOT DISTINCT` is required, because in a plain unique index two NULLs never collide.
 - `grid_slots (weekday, hour)`.
@@ -205,14 +195,14 @@ The play log keeps aired history only for the last 10 days. Missed items are an 
 - Rows with status `missed` and `resolution = 'open'` are never deleted by retention. They stay until the manager resolves them (see §7.1). Resolved missed rows follow the 10-day rule, counted from `resolved_at`.
 - The table holds at most millions of rows for this library size. PostgreSQL handles that without partitioning, and autovacuum reclaims the space.
 - The retention job is a scheduled job, not a trigger on insert.
-- Rotation only needs the separation window (default 3 days), so a 10-day retention covers it with margin. If a separation rule ever exceeds 10 days, the retention period must be revisited.
+- Rotation only needs the longest interval of the play rules ("Music rotation": 3 days by default), so a 10-day retention covers it with margin. A play rule interval longer than the retention is refused, and the retention cannot be lowered below an existing interval (v7-23).
 - `scheduled_items` is not subject to this retention. Rows with status `aired` are moved to `play_log` and removed from `scheduled_items` after they air. Rows with status `missed` are moved to `play_log` in the same way, with `resolution = 'open'`, and removed from `scheduled_items`.
 
 ## 5. Database Access
 
 - Every query is written in the repository layer (§5.1), never in domain code, handlers, or jobs.
-- **GORM** is used for administrative CRUD: tracks, playlists, playlist types, clocks, clock elements, filler pools, grid, separation rules, play rules. It fits well because these are simple entities with associations. Nested inserts (for example, a track with its playlists, or a clock with its elements, their playlists, and the pool) run inside explicit transactions.
-- **pgx** (optionally with **sqlc** for generated type-safe queries) is used for hot paths: play log writes, track plan generation, rotation candidate queries, separation and play rule checks against both `play_log` and `scheduled_items`, and outage reconciliation.
+- **GORM** is used for administrative CRUD: tracks, playlists, playlist types, clocks with their playlists and inserts, grid, play rules. It fits well because these are simple entities with associations. Nested inserts (for example, a track with its playlists, or a clock with its playlists and inserts) run inside explicit transactions.
+- **pgx** (optionally with **sqlc** for generated type-safe queries) is used for hot paths: play log writes, track plan generation, rotation candidate queries, play rule checks against both `play_log` and `scheduled_items`, and outage reconciliation.
 - Inserts that touch several tables are always done in an explicit transaction, so order and rollback are under control.
 - Migrations are versioned and forward-only (golang-migrate, `.up.sql` files only; see §9.2). GORM auto-migrate is not used.
 
@@ -220,9 +210,9 @@ The play log keeps aired history only for the last 10 days. Missed items are an 
 
 All database access goes through a repository layer. Business logic never contains SQL, and SQL never leaves the repository layer.
 
-- **Location and naming.** Repositories live in `internal/repository/<domain>`. The package name equals the name of the domain package it serves (`library`, `playrules`, `separation`, `clocks`, `grid`, `rotation`, `filler`, `playout`, `outage`, `live`, `settings`, `operations`, `retention`). When a domain is renamed, its repository is renamed in the same change. The layer is organized by layer, but it uses the domain vocabulary only, so it adds no second set of names.
+- **Location and naming.** Repositories live in `internal/repository/<domain>`. The package name equals the name of the domain package it serves (`library`, `playrules`, `clocks`, `grid`, `rotation`, `playout`, `outage`, `live`, `settings`, `operations`, `retention`). When a domain is renamed, its repository is renamed in the same change. The layer is organized by layer, but it uses the domain vocabulary only, so it adds no second set of names.
 - **What a repository contains.** The SQL of its domain (GORM and pgx code, sqlc-generated code included), the row structs used for scanning, and the mapping from rows to domain types. One file per aggregate, for example `playlists.go` and `tracks.go`.
-- **What a repository must not contain.** Business rules (eligibility, separation, fitting, tolerance decisions), HTTP or DTO types, network calls, and transaction boundaries. A repository never begins or commits a transaction.
+- **What a repository must not contain.** Business rules (eligibility, play rule intervals, fitting), HTTP or DTO types, network calls, and transaction boundaries. A repository never begins or commits a transaction.
 - **Interfaces.** The domain package declares the interface it needs, next to where it is used (for example `library.PlaylistStore`). The repository implements it. Interfaces are small and contain only the methods that domain uses.
 - **Transactions.** The domain service opens a transaction with `db.WithTx` and passes the transaction handle to each repository it touches through `WithTx(tx)`. A multi-table write therefore has one transaction that spans every repository involved (§5, explicit transactions).
 - **Errors.** Repositories map SQLSTATE codes and constraint names to the domain's sentinel errors (`ErrNotFound`, `ErrInUse`, `ErrValidation`) and wrap every other error with context. A domain never sees a driver error (`pgconn.PgError`) or a GORM error.
@@ -232,7 +222,7 @@ All database access goes through a repository layer. Business logic never contai
 ## 6. API and Data Transfer
 
 - REST over JSON for commands and data queries.
-- WebSocket for UI events from the backend to the panel: now playing, track progress, live on/off, Liquidsoap state, Icecast connection state, broadcast state, outage start and end, missed-item updates, error alerts, filler requests, and the outcome of asynchronous operations (§6.5). The panel does not poll for these.
+- WebSocket for UI events from the backend to the panel: now playing, track progress, live on/off, Liquidsoap state, Icecast connection state, broadcast state, outage start and end, missed-item updates, error alerts, plan warnings, and the outcome of asynchronous operations (§6.5). The panel does not poll for these.
 - Error alerts are shown in the panel as a popup window with the error text. Errors are also written to the log file (see §10.1).
 - All timestamps in the API are ISO 8601 in UTC (ending with `Z`).
 - Database structs are never sent to or accepted from the frontend directly.
@@ -242,30 +232,24 @@ All database access goes through a repository layer. Business logic never contai
 
 ### 6.0 Clock save flow
 
-Saving a clock is a two-step exchange, so the operator cannot miss a shortfall.
+Saving a clock is one synchronous step (v7-23, `docs/phase-23-plan.md`). A clock cannot be short, so no dialog follows.
 
-1. `POST /api/clocks` or `PUT /api/clocks/{id}` runs the dry check and returns:
-   - `shortfall_ms` (0 if the clock is full);
-   - `warnings` (for example, a playlist with too few tracks for the separation window, or an hour of the day in which no track passes the play rules, see §7.3);
-   - `requires_filler_choice: true` when a segment is short and its holder element has no filler mode yet (a choice already stored with the clock is not asked again); `short_segments` lists those segments.
+1. `POST /api/clocks` or `PUT /api/clocks/{id}`. The body has `name`, `playlists` (each `playlist_id`, optional `clock_rule`, `clock_count`, and `fill_weight`), and `inserts` (each `offset_ms`, optional `tolerance_ms`, and `track_id` or `playlist_id`). The backend validates every field (§7.2), stores the clock, and returns:
+   - `clock`, with the effective rule of each playlist;
+   - `sample`: an hour built with the real library and history but not stored (the next grid hour of the clock inside the plan horizon, else the next station hour), as items with offset, length, track, and source (`fill`, `rule`, `insert`), so the operator sees how the hour is laid out;
+   - `warnings` (a playlist without a playable track, too few fill tracks for the minimum interval of their rules, a fill playlist without a minimum interval, an hour of the day in which a rule or insert playlist has no track that passes its play rules (§7.3), and the warnings of the sample build);
+   - `build_operation_id`: the `clock_build` operation that rebuilds the clock's planned hours (§6.5). Grid assignments return it too.
+2. Warnings never block the save.
 
-   The dry check and the save are synchronous. Shortfall is measured on the elements' nominal durations (decisions of 2026-10-14, `docs/phase-7-plan.md` §2). The response also carries `build_operation_id`: the `clock_build` operation that rebuilds the clock's planned hours (§6.5). Grid assignments return it too.
-
-   The request body lists the elements, and each element carries `playlist_ids` (one or more). The clock itself may carry `default_filler_mode` with its `default_filler_playlist_id` or `default_filler_artist_id`.
-2. If `requires_filler_choice` is true, the panel opens a blocking dialog. The operator chooses a mode and then calls one of:
-   - `POST /api/clocks/{id}/save-with-filler`: body includes `segments`, one choice per short segment (`segment`, `filler_mode`, `filler_source_id` if needed), and optionally `pool_track_ids` (ordered list, for `pool` mode). Each choice is stored on the segment's holder element (§7.2). The clock is saved with `status = complete`.
-   - `POST /api/clocks/{id}/save-incomplete`: the clock is saved with `status = incomplete`. The backend creates reminders (see §7).
-3. Closing the dialog without a choice is treated the same as `save-incomplete`.
-
-Validation errors from the dry check are returned per field, so the panel can highlight the element that causes them.
+Validation errors are returned per field (`playlists[2].fill_weight`, `inserts[0].offset_ms`), so the panel can highlight the row that causes them.
 
 ### 6.1 Admin Panel Help
 
-Every admin page (library, playlists, playlist types, clocks, grid, play rules, separation rules, play log, track plan, filler reminders, missed items, logs, settings) has a help button in its header. The manager may forget what a page is for, so the help explains it on demand.
+Every admin page (library, playlists, playlist types, clocks, grid, play rules, play log, track plan, missed items, logs, settings) has a help button in its header. The manager may forget what a page is for, so the help explains it on demand.
 
-- **Help panel**: clicking the help button opens a side panel or popover with what the page is, what its entities mean, how to use them, typical steps, and common mistakes. For example, the Clocks page explains what a clock is, what its 60-minute structure means, how tolerances work, how an element can use several playlists, what filler modes do, and what the clock's default filler mode is: it is used when the filler pool is empty or a filler reminder expires, and if the clock has none, the global fallback applies. The Playlists page explains that a playlist is a pool and not a queue (the order of tracks inside it is not important, the system chooses the track), that a track can be in several playlists, and how playlists feed clock elements and rotation. The Playlist types page explains what a type is and how to add one. The Play rules page explains that a rule limits when a track may play, how the time window, the minimum interval, and the per-hour limit combine, how to apply a rule to tracks or playlists, and that how often a jingle appears is set by the clock, not by the rule. The Played tracks page explains what "missed" means and how to reschedule or dismiss a missed item.
-- **Per-operation notes**: create, edit, and delete modes can each show a short note. For example, deleting a playlist that is used by clock elements is blocked, deleting a playlist type that is used by playlists or tracks is blocked, and deleting a play rule that is applied to tracks or playlists is blocked. The note says why.
-- **Field hints**: individual form fields show short tooltips (for example, "nominal duration", "tolerance", "filler mode", "default filler mode", "min interval hours", "playlist type", "minimum interval", "plays per hour") and link to the full page help.
+- **Help panel**: clicking the help button opens a side panel or popover with what the page is, what its entities mean, how to use them, typical steps, and common mistakes. For example, the Clocks page explains what a clock is, how its playlists and their placement rules fill the hour, what the shares of fill playlists do, how timed inserts and their tolerance work, and how to read the sample hour. The Playlists page explains that a playlist is a pool and not a queue (the order of tracks inside it is not important, the system chooses the track), that a track can be in several playlists, what its placement rule for clocks means (fill, spread, start, end, start and end, middle), and how its play rules limit repeats. The Playlist types page explains what a type is and how to add one. The Play rules page explains that a rule limits when a track may play, how the time window, the track and artist intervals, and the per-hour limit combine, how to apply a rule to tracks or playlists, that separation is such a rule ("Music rotation"), and that how often a jingle appears is set by its playlist's placement rule, not by the play rule. The Track plan page explains how to add a one-time insert (today's news) to a planned hour. The Played tracks page explains what "missed" means and how to reschedule or dismiss a missed item.
+- **Per-operation notes**: create, edit, and delete modes can each show a short note. For example, deleting a playlist that is used by clocks is blocked, deleting a playlist type that is used by playlists or tracks is blocked, and deleting a play rule that is applied to tracks or playlists is blocked. The note says why.
+- **Field hints**: individual form fields show short tooltips (for example, "placement rule", "share", "insert time", "insert tolerance", "playlist type", "minimum interval", "artist interval", "plays per hour") and link to the full page help.
 - **Content location**: help texts are static content in the Angular project (for example, i18n JSON files keyed by page ID such as `help.clocks`). They ship with each release and stay in sync with the UI, and they do not depend on the backend or the database. The files live in `radio-atlantida-frontend`.
 - **Writing style**: plain language, one short worked example per page.
 
@@ -277,33 +261,32 @@ Validation happens in two layers. The frontend gives immediate feedback, and the
 
 - Forms use Angular Reactive Forms with validators (`required`, `min`, `max`, `pattern`) on each control.
 - Fields use HTML5 input types so the browser restricts input where it can:
-  - `type="number"` with `min`, `max`, and `step` for numeric values (nominal duration, tolerance, bitrate, sample rate, min interval hours, play rule interval in minutes, plays per hour, outage thresholds). Text cannot be typed into these fields.
+  - `type="number"` with `min`, `max`, and `step` for numeric values (insert tolerance, fill share, spread count, bitrate, sample rate, plays per hour, outage thresholds). Play rule intervals are entered as hours and minutes and stored as minutes; insert times as `mm:ss`. Text cannot be typed into these fields.
   - A Material timepicker (`MatTimepicker`, a list in 15-minute steps; any minute can be typed) for the play rule `window_from` and `window_to`. Its adapter keeps the value `HH:MM` or null, and text that is not a time fails validation.
   - A Material datepicker (`MatDatepicker`) for `valid_from` and `valid_to` in grid slots and for the date ranges of the views, so a date can be typed or chosen in a calendar. Its adapter keeps the value a station date as `YYYY-MM-DD` (§10.2), never a `Date` in the browser's zone. (A native `type="date"` was used first; Angular Material hides its calendar button.)
   - Checkboxes or a multi-select for weekdays, instead of free text.
   - A select for the timezone, populated from IANA names, instead of typing.
-  - A select for `filler_mode`, with options that match the backend enum.
-  - In the clock editor, a select for the clock's default filler mode (`random`, `playlist`, `artist`, or none, meaning the global fallback). A playlist or artist picker is shown only for the matching mode. `ask` and `pool` are not offered, because they cannot be a fallback (§4).
+  - A select for the placement rule of a playlist (`clock_rule`), with options that match the backend enum; the count field appears only for `spread`.
+  - In the clock editor, each playlist row shows the inherited rule and may override it; fill rows have an optional share.
   - A select for the playlist type, populated from `GET /api/playlist-types`, so a new type appears in the lists as soon as it is added.
-  - A multi-select for the playlists of a clock element. It offers playlists of all types, so one element can combine, for example, music and jingle playlists.
+  - A playlist picker for the playlists of a clock. It offers playlists of all types, so one clock can combine, for example, music and jingle playlists.
   - A multi-select for play rules on the track form and the playlist form, and a multi-select of tracks and playlists on the play rule page.
-  - A select for the target clock and element when rescheduling a missed item, populated from the grid, so only valid targets can be chosen.
+  - A select for the target hour when rescheduling a missed item or adding a one-time insert, populated from the plan, so only future hours with a clock can be chosen.
   - `type="checkbox"` for boolean fields such as `quality_ok` overrides.
 - Error messages appear next to the field, in plain language (for example, "Enter a number between 1 and 3600").
 - The Save button stays disabled while the form has errors.
-- The filler dialog (§6.0) cannot be dismissed by clicking outside it. It can only be closed by choosing a mode or by the explicit "save incomplete" action.
 
 **Backend (Go)**
 
 - Every request is validated again on the DTO before any database write (§6). Frontend checks can be bypassed, so the server never trusts them.
 - The API returns validation errors per field, so the panel can show them next to the right input.
 - Business rules that need data are checked in the backend, not only in the form. For example:
-  - a playlist used by clock elements cannot be deleted;
+  - a playlist used by a clock (as a clock playlist or an insert source) cannot be deleted;
   - a playlist type used by playlists or tracks cannot be deleted, and a system type cannot be deleted at all;
-  - a clock element must have at least one playlist;
+  - a clock must have at least one fill playlist, and its fill shares are set for all fill playlists or for none;
   - a play rule must set at least one constraint, and a rule that is in use cannot be deleted;
-  - a pool track that breaks separation is refused;
-  - a missed item is rescheduled into a clock that has no room.
+  - a play rule interval longer than the play log retention is refused;
+  - a one-time insert or a rescheduled missed item that cannot be placed whole in its hour is refused.
 
 ### 6.3 Settings Administration
 
@@ -321,16 +304,15 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Playlist types**: the list of types (system and custom). The manager can add a type, rename it, and delete a custom type that is not in use. System types can be renamed but not deleted (§4).
 - **Stream output (Icecast)**: host, port, mount point, codec, bitrate, sample rate, channels, loudness target, stream metadata, HLS on or off.
 - **Liquidsoap**: default music gain, the music level under live voice (`liquidsoap.duck_gain`, default 0.2; v7-15), fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
-- **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and its reminders cannot be answered.
+- **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and one-time inserts cannot be added to it or removed from it.
 - **Air window** (v7-17): how many played items (`air.played_count`, default 10, allowed 1 to 50) and queued items (`air.queued_count`, default 9, allowed 0 to 50) `GET /api/air-window` returns around the item on air. A change applies to the next request.
-- **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), default separation values, tolerance defaults, the shortest gap that gets filler (`rotation.min_filler_gap_ms`, default 10 s), and the limit of the emergency tolerance relaxation (`rotation.max_relaxed_tolerance_ms`, default 120 s). The global fallback filler mode, used when a clock has no default filler mode of its own (§4, §6.2).
-- **Filler**: default deadline for filler reminders (default 2 hours before air), default fallback mode (`random`).
+- **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), the default start tolerance of a new insert (`rotation.default_fixed_tolerance_ms`, default 60 s), and the shortest gap that gets music (`rotation.min_gap_ms`, default 10 s). Separation values, duration tolerances, the filler settings, and the tolerance relaxation are removed in v7-23: separation is a play rule (§7.3).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
 - **Retention**: play log days (default 10), application log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1).
 - **Import** (v7-14; the inbox and library folder settings are removed in v7-18, the import registers files where they lie, §8.7): the broadcast standard of track files: target codec (`mp3`, `aac`, or `vorbis`; default `mp3`), bitrate (320 kbps), sample rate (44100 Hz), channels (2); the lowest acceptable bitrate of a lossy file (128 kbps), the loudness tolerance around `stream.loudness_target_lufs` (2 LU), and the highest true peak (−1 dBTP).
 - Any future backend setting follows the same pattern.
 
-Playlist types are data in the `playlist_types` table, not entries in the `settings` table. They are listed on the settings pages for convenience, and they are served by their own endpoints (§6.4). A clock's default filler mode is data of the clock (§4), so it is edited in the clock editor, not on the settings pages.
+Playlist types are data in the `playlist_types` table, not entries in the `settings` table. They are listed on the settings pages for convenience, and they are served by their own endpoints (§6.4). A playlist's placement rule and a clock's playlists and inserts are data (§4), so they are edited on the playlist and clock pages, not on the settings pages.
 
 **Storage and validation**
 
@@ -366,7 +348,7 @@ The backend is the single source of truth for the API. There is no separate fron
 |-----------------|---------|
 | `GET /api/play-history?from=&to=&status=` | Played-tracks list: aired, truncated, and missed items in one list, newest first. `status` filter is optional. Times in UTC |
 | `GET /api/missed-items?resolution=open` | Missed items awaiting a decision (default: open items) |
-| `POST /api/missed-items/{id}/reschedule` | Body: `target_hour_start_utc`, `placement` (`start`, `end`, or `fixed`), `fixed_minute` (required when `placement = fixed`), optional `fixed_tolerance_ms`. Creates a one-time `reschedule` item in that hour (§7.2); returns `accepted` with an operation ID (§6.5) |
+| `POST /api/missed-items/{id}/reschedule` | Body: `target_hour_start_utc`, `placement` (`start`, `end`, or `fixed`), `offset_ms` (whole seconds; required when `placement = fixed`; v7-23, was `fixed_minute`), optional `tolerance_ms`. Creates a one-time `reschedule` item in that hour (§7.2); returns `accepted` with an operation ID (§6.5) |
 | `POST /api/missed-items/{id}/dismiss` | Marks the missed item `resolution = dismissed`. Synchronous |
 | `GET /api/outages?from=&to=` | Outage periods for the played-tracks view and diagnostics |
 
@@ -379,19 +361,19 @@ The backend is the single source of truth for the API. There is no separate fron
 | `PUT /api/playlist-types/{id}` | Renames a type (`name`). The `code` of an existing type does not change |
 | `DELETE /api/playlist-types/{id}` | Deletes a custom type. Refused with a validation error if the type is a system type or is used by any playlist or track. The error lists the playlists that use it. Synchronous |
 | `GET /api/playlists?type_id=` | List of playlists with their type and track count. The `type_id` filter is optional |
-| `POST /api/playlists`, `PUT /api/playlists/{id}`, `DELETE /api/playlists/{id}` | Playlist CRUD. `type_id` is required. Delete is refused if the playlist is used by a clock element, and the error names the clocks |
+| `POST /api/playlists`, `PUT /api/playlists/{id}`, `DELETE /api/playlists/{id}` | Playlist CRUD. `type_id` is required; `clock_rule` (default `fill`) and `clock_count` (`spread` only; v7-23). `PUT` returns `build_operation_id` when the rule changed and clocks use the playlist. Delete is refused if a clock uses the playlist, and the error names the clocks |
 | `PUT /api/playlists/{id}/tracks` | Sets the tracks of a playlist (list of track IDs) |
 
-Clock endpoints (§6.0) take `playlist_ids` (an array) on each element instead of a single category, and accept the clock's `default_filler_mode` with its source.
+Clock endpoints (§6.0) take `playlists` and `inserts` (v7-23); the filler endpoints (`/api/clocks/{id}/save-with-filler`, `/save-incomplete`, `/filler-pool`) are removed.
 
-**Endpoints added in v7-11 (track plan and filler reminders, `docs/phase-8-plan.md` §4)**
+**Endpoints added in v7-11 (track plan, `docs/phase-8-plan.md` §4; filler reminders removed in v7-23)**
 
 | Method and path | Purpose |
 |-----------------|---------|
 | `GET /api/track-plan?from=&to=` | Built hours (at most 7 days) with their items |
 | `POST /api/track-plan/rebuild` | Body: `from`, `to`. Rebuilds the future hours of the range; returns `accepted` with an operation ID (`clock_build`) |
-| `GET /api/filler-requests?status=` | Filler reminders (default `pending`) |
-| `POST /api/filler-requests/{id}/answer` | Body: `track_id`. Fills the waiting segments of the hour; refused per field when the track breaks separation or a play rule. Synchronous |
+| `POST /api/track-plan/inserts` | v7-23. Body: `hour_start_utc`, `offset_ms`, optional `tolerance_ms`, `track_id`. Adds a one-time insert to a planned hour that is not frozen and rebuilds the hour; returns `accepted` with an operation ID (`hour_insert`). A track that cannot be placed whole fails the operation |
+| `DELETE /api/track-plan/inserts/{id}` | v7-23. Removes a one-time insert and rebuilds the hour; `accepted` with an operation ID (`hour_insert`). Refused for a frozen hour; removing a rescheduled missed item's insert opens the missed item again |
 
 **Endpoints added in v7-12 (playout, `docs/phase-9-plan.md` §4)**
 
@@ -484,7 +466,7 @@ Track responses carry the cue (`cue_in_ms`, `cue_out_ms`, `fade_in_ms`, `fade_ou
 | Method and path | Purpose |
 |-----------------|---------|
 | `GET /api/play-rules` | List of play rules with the number of tracks and playlists that use each |
-| `POST /api/play-rules`, `PUT /api/play-rules/{id}`, `DELETE /api/play-rules/{id}` | Play rule CRUD. Body: `name`, `window_from`, `window_to`, `weekdays`, `min_interval_minutes`, `max_per_hour`, `notes`. Delete is refused if the rule is in use |
+| `POST /api/play-rules`, `PUT /api/play-rules/{id}`, `DELETE /api/play-rules/{id}` | Play rule CRUD. Body: `name`, `window_from`, `window_to`, `weekdays`, `min_interval_minutes`, `artist_min_interval_minutes` (v7-23), `max_per_hour`, `notes`. An interval longer than the play log retention is refused. Delete is refused if the rule is in use |
 | `PUT /api/play-rules/{id}/targets` | Body: `track_ids` and `playlist_ids`. Sets the tracks and playlists the rule is applied to |
 | `PUT /api/tracks/{id}/play-rules` | Body: `rule_ids`. Sets the rules of one track |
 | `PUT /api/playlists/{id}/play-rules` | Body: `rule_ids`. Sets the rules of one playlist |
@@ -492,14 +474,14 @@ Track responses carry the cue (`cue_in_ms`, `cue_out_ms`, `fade_in_ms`, `fade_ou
 
 ### 6.5 Asynchronous Operations and WebSocket Events
 
-Some backend operations take time and run asynchronously. Examples: building a track plan for an hour, extending the plan, importing and analysing a batch of files, transcoding, regenerating filler pools, purging old logs, reconciling playout after an outage, marking missed items, and rescheduling a missed item. The panel cannot wait for these in an HTTP request, so the backend reports their outcome over WebSocket.
+Some backend operations take time and run asynchronously. Examples: building a track plan for an hour, extending the plan, importing and analysing a batch of files, transcoding, adding a one-time insert to an hour, purging old logs, reconciling playout after an outage, marking missed items, and rescheduling a missed item. The panel cannot wait for these in an HTTP request, so the backend reports their outcome over WebSocket.
 
 **Rule: every asynchronous operation emits a WebSocket event when it finishes.**
 
 - The HTTP request that starts the operation returns at once with an operation ID and status `accepted`. It does not wait for the work to complete.
 - When the operation finishes, the backend sends exactly one terminal event over the WebSocket hub: either a success event or a failure event. The event carries the operation ID.
 - Long operations may also send progress events (for example, "12 of 40 files analysed"). Progress is optional. The terminal event is mandatory.
-- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.completed`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `playout_reconcile.completed`, `playout_reconcile.failed`, `analyse.completed`, `transcode.completed` (and their `.failed` and `.progress` events).
+- Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.completed`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `hour_insert.completed`, `hour_insert.failed` (v7-23), `playout_reconcile.completed`, `playout_reconcile.failed`, `analyse.completed`, `transcode.completed` (and their `.failed` and `.progress` events).
 - A failure event contains a short error message, the component that failed (§10.1), and the UTC time. The same error is written to the log file (§10.1) and shown in the panel as an error popup (§6, §10.1).
 - A success event contains the operation ID, a short result summary, and the UTC time, so the panel can refresh the affected view.
 - The event schemas are part of the OpenAPI contract (§6.4). Each event type is a named schema, so the TypeScript client has typed handlers for every event.
@@ -526,7 +508,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 **Examples**
 
 - The operator saves a clock. The save returns `accepted` with an operation ID. When the clock's hours are recalculated, the backend sends `clock_build.completed`. If a track fails the rules and no candidate is found, it sends `clock_build.failed` with the reason.
-- The rotation engine extends the track plan for the next hour. On success it sends `track_plan.completed`. On failure it sends `track_plan.failed` and creates a filler request or emergency warning as described in §7.
+- The rotation engine extends the track plan for the next hour. On success it sends `track_plan.completed`. On failure it sends `track_plan.failed`; problems of a built hour are sent as `track_plan.warning` (§7).
 - Icecast drops. The outage detector opens an outage and sends `broadcast_outage.started`. When Icecast reconnects, the outage closes, the missed items are marked, and the backend sends `missed_items.completed` with the count, then `broadcast_outage.ended` with the same count.
 
 **Scope**
@@ -538,9 +520,9 @@ Some backend operations take time and run asynchronously. Examples: building a t
 
 The manager and the operator can listen to any track in the panel, without leaving the admin and without looking for the file on disk.
 
-- **Play button.** A play button is shown next to every track in the library, in playlists, on the play rule page, and in the track pickers (filler pool, filler dialog, rescheduling a missed item). The panel has one shared player: starting a track stops the previous one. The player shows the title and artist, a progress bar with seek, and a volume control.
+- **Play button.** A play button is shown next to every track in the library, in playlists, on the play rule page, and in the track pickers (clock inserts, one-time inserts, rescheduling a missed item). The panel has one shared player: starting a track stops the previous one. The player shows the title and artist, a progress bar with seek, and a volume control.
 - **Endpoint.** `GET /api/tracks/{id}/audio` streams the file. The backend finds the track by its ID and resolves `file_path` under `MEDIA_ROOT` itself. The client never sends a path, so path traversal is not possible. The endpoint supports HTTP Range requests, so seeking works. The content type comes from the stored format. The backend reads the file through the existing read-only media mount (§8.7).
-- **Browser only.** The preview plays in the operator's browser. It does not go to Liquidsoap or to air, it is not written to `play_log`, it does not count toward separation or any play rule, and it does not change the track.
+- **Browser only.** The preview plays in the operator's browser. It does not go to Liquidsoap or to air, it is not written to `play_log`, it does not count toward any play rule, and it does not change the track.
 - **Formats.** MP3, AAC, and Ogg Vorbis play in current browsers. If the browser cannot play the stored format, the panel shows a short message. A transcoded preview through ffmpeg is not part of this version.
 - **Missing file.** If the file is not found, the endpoint returns 404. The panel shows an error popup (§6, §10.1) and the error is logged with component `api`.
 - **Load.** Streaming is plain file serving and must not affect the air. The endpoint is served by the normal API process and does no heavy processing.
@@ -552,46 +534,31 @@ The engine works on three horizons, each with its own job.
 
 **Grid (up to 30 days).** The grid is read, not computed. It says which clock plays in each hour. Changing the grid marks affected planned items as stale (see "Grid and clock changes" below).
 
-**Track plan (rolling 24 to 48 hours).** Every hour, Go extends the plan so that it always covers the configured window. For each upcoming hour with a clock:
+**Track plan (rolling 24 to 48 hours).** Every hour, Go extends the plan so that it always covers the configured window. For each upcoming hour with a clock, the hour is built from the clock's playlists and inserts and the hour's one-time inserts (v7-23, `docs/phase-23-plan.md` §3.3):
 
-1. **Select tracks per element.** For each clock element, build the candidate set as the union of the tracks of all its playlists (`clock_element_playlists`), without duplicates. A track that is in two of the element's playlists is one candidate. From this set, choose a track that honors play rules (§7.3) and separation rules, and whose duration fits the remaining time within `duration_tolerance_ms`. Every candidate has the same weight, so a larger playlist contributes more candidates. Tracks are never altered.
-2. **Check the fit.** Sum the durations of the chosen tracks.
-   - **Shortfall.** If time remains after all elements, add one filler track (see "Filler" below). Repeat until the shortfall is closed or the iteration limit is reached.
-   - **Overflow.** If a track runs past the end of its segment (see §7.2), it is the crossing track. The crossing track is kept, its `planned_out_ms` is set to the segment end, it is marked `truncated`, and a fade-out of `fade_out_ms` ends at that point. Every planned track after the crossing track in the same segment is removed from the plan. Removed tracks are neither aired nor missed, they do not count toward separation, and they return to their playlist. Overflow never triggers filler. The same rule applies at the hour boundary, where the segment end is the end of the hour. The next clock does not depend on this track.
-3. **Write `scheduled_items`** with status `planned`.
+1. **Anchors.** Place the template inserts and the one-time inserts by their target time (§7.2). They split the hour into free gaps.
+2. **Rule slots.** Reserve the slots of the playlists whose placement rule is not `fill`: `start`, `end`, `start_end`, `middle`, and `spread` (§7.2).
+3. **Fill.** Fill each gap with tracks of the `fill` playlists. Before every fill track a playlist is drawn by its share (`fill_weight`; without shares every fill playlist has the same chance), then a random allowed track of it. Before a hard point (an insert window, an `end` track, the end of the hour) the last track is the best fit to the time left.
+4. **Overflow.** If no track ends inside the window of the next hard point, the crossing rule applies: the track that crosses the target is kept, its `planned_out_ms` is set to the target, it is marked `truncated`, and a fade-out of `fade_out_ms` ends at that point. Every planned track after it before that point is removed from the plan. Removed tracks are neither aired nor missed, they do not count toward play rules, and they return to their playlist. The same rule applies at the hour boundary. The next clock does not depend on this track.
+5. **Write `scheduled_items`** with status `planned`.
 
-Separation and play rule checks query both `play_log` (what aired, status `aired` or `truncated`) and `scheduled_items` (what is planned). A track counts as blocked if it is in either. Items with status `missed` count as not aired and do not block anything. All separation values are read from the `separation_rules` table.
+Every candidate must pass the play rules of the track and of all its playlists (§7.3). Interval checks query both `play_log` (what aired, status `aired` or `truncated`) and `scheduled_items` (what is planned). Items with status `missed` count as not aired and do not block anything.
 
-**Filler.** When a clock is short, the filler mode decides the source:
+**Grid and clock changes.** When a clock, a playlist's placement rule, or the grid changes:
 
-- `pool`: take the first row of `clock_filler_pool` with `used_at IS NULL`, set `used_at`, and use that track. The track is still checked against separation and play rules. If it fails, the next pool row is tried, and the failed one is reported to the operator. If the pool is empty, the clock's default mode applies and a `filler_request` with `reason = 'pool_empty'` is created.
-- `random`, `playlist`, `artist`: choose a track that matches the source and passes the rules. For `playlist` mode, the source is one playlist (`filler_playlist_id`); for `artist` mode, one artist (`filler_artist_id`). The plan row records the mode in `source` (`filler_random`, `filler_playlist`, `filler_artist`).
-- `ask`: create a `filler_request` for the hour. The operator is asked in the panel. If there is no answer by `deadline_at`, the clock's default mode applies and the status becomes `defaulted`.
-- `none`: not allowed for a short clock that is saved as complete. For an incomplete clock, it means no filler is created, and the warning stays visible.
-
-The clock's default mode (`clocks.default_filler_mode`) is the fallback used by `pool` and `ask`. If the clock has none, the global fallback from §6.3 applies.
-
-**Filler reminders.** Every incomplete clock creates a `filler_request` for each of its hours that falls inside the planning window. Reminders cannot be turned off. An operator closes one by answering it or by letting its deadline pass. `deadline_at` is calculated from air time, not from creation time, so a request created a week ahead still fires at the right moment.
-
-**Grid and clock changes.** When a clock or the grid changes:
-
-- `scheduled_items` with status `planned` in the affected hours are recalculated.
+- `scheduled_items` with status `planned` in the affected hours are recalculated around the hours' one-time inserts, which stay.
 - Items with status `queued`, `aired`, or `missed` are not touched.
-- `filler_requests` in `pending` for the affected hours are set to `expired`, and new ones are created if the clock is still incomplete.
 
-**Emergency case.** If no candidate passes the rules:
+**Emergency case.** If no fill playlist has an allowed track for a gap:
 
-1. Relax the tolerance for the element, within a defined limit.
-2. If still no candidate, take any track from the general pool that passes separation and play rules.
-3. If the pool is empty, play the emergency playlist (see §8.6) and send a warning to the panel.
+1. Take any track from the whole library that passes the play rules (source `general`) and warn.
+2. If there is none, leave the gap: the emergency playlist covers it (see §8.6), and a warning is sent to the panel.
 
-The number of iterations at each step is bounded.
-
-The order of resolution is: tolerance selection, then filler for shortfall, then truncation for overflow, then emergency. Stretching audio is not used at any point.
+A rule slot or a playlist insert with no allowed track is skipped with a warning; the fill covers its time.
 
 The engine is deterministic for a given input and seed, which makes it testable.
 
-**Implementation decisions (v7-11).** `docs/phase-8-plan.md` §2 records how the rules above are applied with real tracks: random choice with equal weights for ordinary elements and best fit for the last element of a segment; the crossing rule at a fixed element's window (an item past the latest start is cut at the target minute); filler only for gaps of at least `rotation.min_filler_gap_ms`; reminders per hour for short segments whose holder is `none` or `ask`, resolved by an answer (`filler_answer`) or by the deadline; the emergency steps (tolerance doubled up to `rotation.max_relaxed_tolerance_ms`, then the whole library, then the element is skipped for the emergency playlist); and hours that have started are never rebuilt. Since v7-22 (`docs/phase-22-plan.md`) every fit, filler, reschedule, and the crossing rule use the on-air length of a track (between its cue points); a plan item records the cut it was planned with (`planned_in_ms` is the cue in, a crossing item is cut at `cue_in + time left`), and keeps it when the track's cue changes later; a cue change rebuilds the future hours that hold a planned item of the track. Besides the operation events, the planner sends `track_plan.warning` (the warnings of one built hour) and `filler_request.created`.
+**Implementation decisions (v7-11, v7-23).** `docs/phase-8-plan.md` §2 recorded the element engine; `docs/phase-23-plan.md` §3.3 replaces it with the playlist and insert build above. Kept from v7-11: music only in gaps of at least `rotation.min_gap_ms`; hours that have started are never rebuilt; the seed is the hour start. Since v7-22 (`docs/phase-22-plan.md`) every fit, reschedule, and the crossing rule use the on-air length of a track (between its cue points); a plan item records the cut it was planned with (`planned_in_ms` is the cue in, a crossing item is cut at `cue_in + time left`), and keeps it when the track's cue changes later; a cue change rebuilds the future hours that hold a planned item of the track. Besides the operation events, the planner sends `track_plan.warning` (the warnings of one built hour).
 
 ### 7.1 Broadcast Outages and Missed Items
 
@@ -616,7 +583,7 @@ An outage is a period when the station's audio did not reach listeners, for exam
 - Marking runs as an asynchronous operation (`missed_items.completed` or `missed_items.failed`, §6.5).
 - Missed items are moved to `play_log` with `status = missed`, `resolution = 'open'`, and `outage_id` set, so the played-tracks list shows them next to aired items.
 
-**Implementation decisions (v7-13, `docs/phase-10-plan.md` §2).** The journal decides what aired: an item Liquidsoap started counts as aired even if Icecast was down at that moment. Items that did not air while no outage was open (a leftover flushed at the hour switch, an item more than 30 seconds late) are dropped from the plan like tracks removed by overflow: not missed, no separation count. Before marking or dropping, the journal of the window is replayed through the same idempotent logic as the callbacks, so no cursor is kept. At startup, if the backend was down longer than the heartbeat timeout and planned items did not air, the downtime is recorded as a closed outage (`component = backend`) and its items are marked missed.
+**Implementation decisions (v7-13, `docs/phase-10-plan.md` §2).** The journal decides what aired: an item Liquidsoap started counts as aired even if Icecast was down at that moment. Items that did not air while no outage was open (a leftover flushed at the hour switch, an item more than 30 seconds late) are dropped from the plan like tracks removed by overflow: not missed, no play rule count. Before marking or dropping, the journal of the window is replayed through the same idempotent logic as the callbacks, so no cursor is kept. At startup, if the backend was down longer than the heartbeat timeout and planned items did not air, the downtime is recorded as a closed outage (`component = backend`) and its items are marked missed.
 
 **Broadcast state (v7-16, `docs/phase-16-plan.md` §2)**
 
@@ -646,8 +613,8 @@ The timer measures continuous broadcasting: `since` is the moment of the last st
 
 **Rescheduling and dismissing missed items**
 
-- The manager can reschedule an open missed item into a following clock. `POST /api/missed-items/{id}/reschedule` creates a `scheduled_items` row with `source = reschedule`, `reschedule_of_id` set to the missed item's `play_log` row, and status `planned`. The row is placed in the target hour and element.
-- A rescheduled item goes through the same checks as any other item: the element playlists, the duration tolerance, separation rules, and play rules. The placement is chosen by the manager (start, end, or a fixed minute), and the hour is rebuilt around it using the rules of §7.2. If a segment cannot hold the item, the request is refused with a validation error on the request.
+- The manager can reschedule an open missed item into a following clock. `POST /api/missed-items/{id}/reschedule` creates a `scheduled_items` row with `source = reschedule`, `reschedule_of_id` set to the missed item's `play_log` row, and status `planned`. The row is placed in the target hour.
+- A rescheduled item goes through the same checks as any other item: the play rules of the track and its playlists. The placement is chosen by the manager (start, end, or a fixed time with seconds), and the hour is rebuilt around it as around any one-time insert (§7.2). If the hour cannot hold the item whole, the request is refused.
 - Rescheduling creates a one-time item for that hour only. The clock template is not changed (§7.2).
 - On success, the missed item's `resolution` becomes `rescheduled` and `resolved_item_id` is set. The missed row then follows the 10-day retention rule from `resolved_at` (§4.1).
 - A missed item can also be dismissed (`POST /api/missed-items/{id}/dismiss`). It then gets `resolution = dismissed` and `resolved_at` set. Dismissal is synchronous.
@@ -657,68 +624,60 @@ The timer measures continuous broadcasting: `since` is the moment of the last st
 **Air rules during and after an outage**
 
 - The outage does not change the clock grid. Clocks still start and end on their hour boundaries when the stream returns.
-- Items planned for the rest of the outage are not pushed late to "catch up". They are marked missed when the outage closes, and the next clock starts on schedule with its own elements.
+- Items planned for the rest of the outage are not pushed late to "catch up". They are marked missed when the outage closes, and the next clock starts on schedule with its own content.
 - If the outage is long, the track plan is still extended for the planning window, so the stream resumes with planned content.
 
-### 7.2 Element Placement and Segments
+### 7.2 Placement Rules and Inserts
 
-**Placement.** Each clock element has a `placement`:
+Since v7-23 (`docs/phase-23-plan.md`) a clock is a set of playlists and timed inserts; elements, segments, nominal durations, duration tolerances, and filler are removed.
 
-- `flow` (default): the element takes its place in order among the other flow elements.
-- `start`: the element is placed before all other elements of the hour. Several start elements keep the order in which they were added.
-- `end`: the element is placed after all other elements of the hour. Several end elements keep the order in which they were added.
-- `fixed`: the element starts at `fixed_minute` within the hour, with a tolerance of `fixed_tolerance_ms` (default 60000, that is ±1 minute). The tolerance applies to the start of the element. Its target start is an exact minute, so the element may begin anywhere from one minute before to one minute after it.
+**Placement rule of a playlist.** Stored on the playlist, overridable per clock:
 
-**Segments.** Fixed elements split the hour into segments. A segment runs from the start of the hour (or the end of the previous fixed element) to the target start of the next fixed element, or to the end of the hour. Each segment is fitted separately with the rules of §7. Shortfall is calculated per segment, so the blocking dialog (§6.0) lists every short segment in one pass.
+- `fill` (default): fills all time not taken by inserts and rule tracks. A clock needs at least one fill playlist. With several, the shares (`fill_weight`) decide which playlist the next track comes from; without shares every fill playlist has the same chance.
+- `spread` N (1 to 12): N tracks spread over the hour. The free time is cut into N equal parts, each gets a soft anchor at a random point of the middle half of its part, window ± a quarter of the part.
+- `start`: the first track of the hour (after an insert that starts at 0:00).
+- `end`: the last track of the hour, ending at 60:00 (a hard anchor).
+- `start_end`: one at the start, one at the end.
+- `middle`: a track that starts at about 30:00, within 25:00 to 35:00 (a soft anchor).
 
-**Building an hour.** When the clock is saved, or the hour is planned:
+A soft anchor is reached by a best-fit fill track, never by cutting. A rule track is never placed next to an insert or another rule track; if it would be, it moves one fill track later inside its window, else it is skipped with a warning. Several playlists with the same rule follow the clock's playlist order.
 
-1. Place the fixed elements at their target minutes. Reject the save if a fixed element's window (`fixed_minute` ± tolerance) falls outside the hour, or overlaps another fixed element's window (see "Replacement" below).
-2. Place the `start` elements in the first segment and the `end` elements in the last segment.
-3. Fill each segment with its flow elements, selecting tracks by the rules of §7.
-4. Check each segment for shortfall and open the filler dialog for each short segment (§6.0). Filler for a segment uses the `filler_mode` of the element that ends the segment, or the clock's default mode if there is none, or the global fallback.
-5. Check the crossing rule (§7, "Overflow") at every segment end.
+**Inserts.** A template insert (`clock_inserts`) plays a track, or a track drawn from a playlist, at `offset_ms` (whole seconds) in every hour of the clock. A one-time insert (`hour_inserts`) plays one track in a single hour: added by the manager (today's news) or a rescheduled missed item (§7.1), at the start, at the end, or at a fixed time. Its start window is `offset_ms ± tolerance_ms` (default ±60 s), clipped to the hour.
 
-**Refusal on save.** The save is refused, with the error shown on the responsible element, when:
+- **Chains.** Inserts are placed in time order. An insert starts when the content before it ends, but not before its window opens, and at the latest at the end of its window. Inserts whose windows touch play back to back (a jingle at 29:40, the news at 30:00, a jingle after it).
+- **Gaps.** A gap between anchors shorter than `rotation.min_gap_ms` gets no music: the next insert starts earlier within its window, else the gap stays.
+- **Conflict.** An insert that cannot start inside its window because the chain before it runs past it is skipped (template insert, with a warning) or refused (one-time insert: the add operation fails; a later rebuild drops it with a warning and opens a rescheduled missed item again).
+- **Replacement.** A one-time insert at exactly the offset of a template insert replaces it for that hour, with a warning.
+- A one-time insert is checked like any track (§7.3) and plays whole: it is never cut.
 
-- a fixed element's window falls outside the hour;
-- two fixed element windows overlap and the overlap is not handled by replacement (see below);
-- the nominal duration of the `start` or `end` elements of a segment does not fit into that segment at all;
-- an element has no playlist (§4).
+**Validation on save.** Refused per field: no fill playlist; a playlist twice; `clock_count` missing for `spread` or set for another rule; a share on a non-fill row, out of 1 to 100, or set on some fill rows only; an insert offset outside the hour, not in whole seconds, or used twice; a tolerance out of 0 to 600 s; an insert with neither or both of track and playlist; unknown references. A refused save does not change the template.
 
-A refused save does not change the template.
-
-**Replacement.** If a new fixed element is saved with a window that overlaps the window of an existing fixed element in the same clock, the new element replaces the existing one:
-
-- the existing fixed element is removed from the clock template (the library tracks and playlists it used are not affected);
-- the clock is rebuilt once with the new element in place;
-- the save result names the replaced element, so the manager sees what was removed.
-
-Replacement applies only to fixed elements. Flow, start, and end elements are never replaced by this rule.
-
-**Rebuild after a change.** When a clock template changes, planned items in the affected hours are recalculated (§7, "Grid and clock changes"). Items with status `queued`, `aired`, or `missed` are not touched.
-
-**One-time placement for a missed item.** When a missed item is rescheduled (§7.1), the manager chooses the placement (`start`, `end`, or a fixed minute) for that hour only. The clock template is not changed. The same segment, crossing, and replacement rules apply to the plan of that hour. If the one-time fixed item replaces a planned fixed item in that hour, the replaced item gets status `replaced`.
+**Rebuild after a change.** When a clock template or a playlist's placement rule changes, planned items in the affected hours are recalculated (§7, "Grid and clock changes"). Items with status `queued`, `aired`, or `missed` are not touched.
 
 ### 7.3 Play Rules
 
-A play rule is a named, reusable set of limits on when a track may play. The manager creates rules on the Play rules page and applies them to tracks or to playlists (§4). They are meant mainly for jingles, but they work for any track. Play rules replace the earlier dayparting.
+A play rule is a named, reusable set of limits on when a track may play. The manager creates rules on the Play rules page and applies them to tracks or to playlists (§4). Since v7-23 separation is a play rule too: the separate separation rules are removed (`docs/phase-23-plan.md` decision 10).
 
 **What a rule can limit.** Every part is optional, at least one must be set, and all parts of one rule must pass:
 
 - **Time window**: `window_from` to `window_to`, with optional weekdays, in station local time. It is checked against the planned start of the track.
-- **Minimum interval**: `min_interval_minutes`. The track does not start again until this many minutes after its last start. Aired and truncated items in `play_log` and planned items in `scheduled_items` count, as in separation. Missed items do not count.
+- **Minimum interval**: `min_interval_minutes`. The track does not start again until this many minutes after its last start.
+- **Artist interval**: `artist_min_interval_minutes` (v7-23). No track of the same artist starts until this many minutes after the artist's last start, whichever playlist the other track came from.
 - **Plays per hour**: `max_per_hour`. The maximum number of starts of the track within the same clock hour (station local time), counting planned and aired items.
+
+Intervals count aired and truncated items in `play_log` and planned items in `scheduled_items`; missed items do not count. An interval is at most the play log retention (§4.1).
 
 **Which rules apply to a track.** The rules set on the track itself, plus the rules of every playlist the track belongs to. All of them must pass. A playlist rule is checked for each track separately. It does not count the plays of the playlist as a whole.
 
-**A rule limits, the clock demands.** A rule never puts a track on air by itself. How often a slot appears in the hour is set by the clock elements. The rule decides which track is allowed in that slot at that moment. Play rules and separation are both eligibility checks, and the duration fit is applied to the tracks that pass them (§7). Filler, pool tracks, and rescheduled items go through the same checks.
+**Separation is a rule.** The default rule "Music rotation" (a track at most once per 72 hours, the artist interval from the reference software) was created by the v7-23 migration from the old separation values and attached to the music playlists. A fill playlist with no minimum interval gets a warning on the clock save, because its tracks may repeat within the hour.
 
-**Example.** A clock has four fixed elements at :00, :15, :30, and :45, each using the playlist "Jingles", and flow elements that use the playlists "Music" and "Pop". Jingle A has a rule "06:00 to 08:00". Jingle B has a rule "10:00 to 12:00" and a rule "at most once per hour". At 07:15 only jingle A is allowed. At 11:00 only jingle B is allowed, but after it has played once in that hour it is blocked, so the next jingle slots take other allowed jingles. At 09:15 neither A nor B is allowed. If they are the only jingles, that slot is skipped.
+**A play rule limits, a placement rule demands.** A play rule never puts a track on air by itself. How often a playlist appears in the hour is its placement rule (§7.2). The play rule decides which track is allowed in that slot at that moment.
 
-**When no track passes.** Play rules are hard limits and are never relaxed, unlike the tolerance. If an element has candidates but all of them are blocked by play rules, the element is skipped. Nothing is planned for it, the manager gets a warning (a `rotation` WARN in the log and a panel alert), and the normal shortfall rules apply to the segment (§7). The emergency steps (§7) are used only when the candidate set of an element is empty for other reasons.
+**Example.** A clock uses "Music" (fill) and "Jingles" (spread 4). "Music" carries "Music rotation"; jingle A has a rule "06:00 to 08:00", jingle B "10:00 to 12:00" and "at most once per hour", and all jingles share "at least 20 minutes apart". At 07:15 only jingle A and the jingles without a window are allowed. At 11:00 jingle B is allowed once in that hour. At 09:15 neither A nor B is allowed; if they are the only jingles, that slot is skipped and the music covers it.
 
-**Dry check on save.** The dry check (§6.0) evaluates each element for the hours in which the clock is assigned in the grid. It warns about hours in which no track passes the play rules.
+**When no track passes.** Play rules are hard limits and are never relaxed. If every track of a rule slot or a playlist insert is blocked, the slot is skipped with a warning (a `rotation` WARN in the log and a panel alert). If every fill track is blocked, the emergency steps of §7 apply.
+
+**Dry check on save.** The dry check (§6.0) evaluates each rule and insert playlist for the hours in which the clock is assigned in the grid, and warns about hours in which no track passes its play rules.
 
 ## 8. Liquidsoap Integration
 
@@ -874,9 +833,9 @@ The Compose file references images by tag, for example `image: ghcr.io/astronin/
 - The Compose service `migrate` runs `backend migrate up` once and exits. The `backend` service starts only after it completes successfully (`depends_on: condition: service_completed_successfully`).
 - Migrations use the expand and contract approach: add new columns or tables first, switch the code, and remove old columns in a later release. This keeps the previous version of the API working against the new schema, so a code rollback does not break the database.
 - The v7-6 changes (`broadcast_outages`, the `missed` status, the new `play_log` columns) are added as a single expand migration. The previous code ignores the new columns and the new status values, so it still works after rollback.
-- The v7-7 changes (the rename of categories to playlists, `playlist_types`, `clock_element_playlists`) follow the same rule. The expand migration creates `playlist_types`, `playlists`, `track_playlists`, and `clock_element_playlists`, seeds the four system types, and copies the data from the old category tables (`categories`, `track_categories`, and `clock_elements.category_id`, which becomes one `clock_element_playlists` row per element). The old tables and columns are left in place and are removed by a contract migration in a later release. Until then, the previous code keeps working against the old tables.
+- The v7-7 changes (the rename of categories to playlists, `playlist_types`, `clock_element_playlists`, removed in v7-23) follow the same rule. The expand migration creates `playlist_types`, `playlists`, `track_playlists`, and `clock_element_playlists`, seeds the four system types, and copies the data from the old category tables (`categories`, `track_categories`, and `clock_elements.category_id`, which becomes one `clock_element_playlists` row per element). The old tables and columns are left in place and are removed by a contract migration in a later release. Until then, the previous code keeps working against the old tables.
 - The v7-8 changes (`play_rules`, `track_play_rules`, `playlist_play_rules`) use the same approach. The expand migration creates the new tables and copies each row of `daypart_rules` into a `play_rules` row (time window and weekdays) with a matching target row (a track or a playlist; the old `jingle` target is copied as a track). `daypart_rules` stays in place until a contract migration in a later release.
-- The v7-9 changes (`clocks.default_filler_mode`, `default_filler_playlist_id`, `default_filler_artist_id`, and the typed filler columns of `clock_elements`) are added as an expand migration with nullable columns. The previous code ignores them.
+- The v7-9 filler columns were added as an expand migration with nullable columns. The v7-23 migration (`docs/phase-23-plan.md` §3.1) is an exception to expand and contract: it deletes clocks, the grid, the plan, and the filler and separation tables in one step, because no release had aired (development data only).
 
 **Forward-only migrations (no rollback)**
 
@@ -934,7 +893,7 @@ Steps, in order:
 
 - Logs are written as JSON Lines: one JSON object per line. The panel and tools like `jq` can read them directly.
 - Library: `log/slog` from the Go standard library, with its JSON handler. It needs no extra dependency and is fast enough for this volume. `zap` or `zerolog` are alternatives if profiling shows a need.
-- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `filler`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`, `media` (import, analysis, transcoding; v7-14). API errors also carry `request_id`.
+- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`, `media` (import, analysis, transcoding; v7-14). API errors also carry `request_id`.
 - Secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`) are never logged. A handler masks any field with a sensitive name.
 
 **What is logged**
@@ -944,7 +903,7 @@ Steps, in order:
 - **Liquidsoap control:** connection refused, timeout, unexpected reply; playback callback errors.
 - **Outages:** outage opened and closed (with component and duration), number of items marked missed, reschedule and dismiss actions on missed items.
 - **Reconciliation:** start and end of each journal reconciliation, number of items confirmed, number of journal lines that could not be parsed.
-- **Application:** recovered panics (caught by middleware), failed HTTP handlers (5xx), rotation failures (no candidate found, tolerance limit reached, element skipped because of play rules), filler failures (pool empty, pool track refused by rules, reminder expired).
+- **Application:** recovered panics (caught by middleware), failed HTTP handlers (5xx), rotation failures (no allowed fill track, a rule slot or insert skipped because of play rules, a one-time insert dropped).
 - **Database:** failed writes (for example, `play_log` insert), transaction rollbacks, connection pool errors, failed migrations.
 - **WebRTC bridge:** session setup failures, ICE errors, live voice dropouts.
 
@@ -1070,7 +1029,7 @@ Steps, in order:
 The open questions from the previous version are closed. The decisions are recorded here so the reasoning stays visible.
 
 1. **Frontend and backend contract.** One contract for the whole system: an OpenAPI specification generated from the Go backend, which also covers the WebSocket event schemas. The Angular TypeScript client is generated from it (§6.4). No separate frontend API document.
-2. **Separation rules.** Values are stored in the `separation_rules` table and copied from the reference software. Rotation reads them from the table, so no values are hard-coded (§4, §7).
+2. **Separation is a play rule** (v7-23). The `separation_rules` table is removed; its values became the play rule "Music rotation" (track and artist intervals) attached to the music playlists (§7.3).
 3. **Play log volume.** No partitioning. A nightly `DELETE` of aired rows older than 10 days is sufficient for the expected volume, which PostgreSQL handles easily (§4.1). Open missed items are exempt from this deletion.
 4. **Live voice latency budget.** Target of at most 1 second from microphone to air. The system runs locally on one machine with local Docker (§8.4).
 5. **Production Icecast details.** Entered in the admin panel and stored in the database, like all other output settings. Nothing is set in code or files (§8.8, §6.3).
@@ -1079,20 +1038,20 @@ The open questions from the previous version are closed. The decisions are recor
 8. **Viper.** Removed. Runtime configuration lives in the admin settings, and no YAML profile is used (§3.1).
 9. **Source repositories.** Three repositories: `radio-atlantida-backend`, `radio-atlantida-frontend`, `radio-atlantida-deploy`. Their roles and release coupling are described in §1.1.
 10. **Missed items are not automatically re-aired.** A missed item is never pushed back into the plan by the system. Only the manager decides whether to reschedule or dismiss it (§7.1). Reason: an automatic repeat could place content in a wrong context, for example a news segment after its time.
-11. **Missed items do not count as aired.** Separation and play rules use only aired and truncated items. A track whose broadcast failed can be played again in the normal rotation (§7).
+11. **Missed items do not count as aired.** Play rules use only aired and planned items, never missed ones. A track whose broadcast failed can be played again in the normal rotation (§7).
 12. **Outage truth comes from the playout journal.** Liquidsoap's local journal, not the backend's memory, decides what aired. This keeps the played-tracks list accurate when the backend is down (§7.1, §8.3).
-13. **Fixed-time elements.** An element can be placed at the start of the hour, at its end, or at a fixed minute with a default tolerance of ±1 minute on its start (§7.2).
-14. **Overflow keeps the crossing track.** When a track runs past a segment end, that track is kept and fades out at the boundary, and the tracks after it are removed from the plan. Filler is not used for overflow (§7, §7.2).
-15. **Replacing a fixed element.** A new fixed element whose window overlaps an existing one replaces it, and the clock is rebuilt once (§7.2).
+13. **Timed inserts** (v7-23). An insert plays at a set time with seconds and a start tolerance (default ±1 minute); inserts that touch play back to back. Inserts are set in the clock template or once in a planned hour (§7.2).
+14. **Overflow keeps the crossing track.** When a track runs past an insert's time or the end of the hour, that track is kept and fades out at that point, and the tracks after it are removed from the plan (§7).
+15. **A one-time insert replaces a template insert at the same time** for that hour only (§7.2).
 16. **"Category" is renamed to "playlist" everywhere.** The word is used in the database, the API, the code, and the interface. The term "category" caused confusion with another meaning the manager has for it. A playlist is a pool: the order of tracks inside it is not significant, and the rotation engine chooses the track (§4, §7).
-17. **A clock element can use several playlists.** The tracks of all its playlists form one candidate set (union, without duplicates), and every candidate has the same weight. The playlists may be of different types, so one element can mix, for example, music and jingle. Weighting by playlist and a selection order (for example round robin) are not part of this version (§4, §7).
+17. **A clock is a set of playlists with placement rules** (v7-23). Each playlist has a rule (fill, spread, start, end, start and end, middle), overridable per clock; fill playlists may have shares. There are no elements, nominal durations, or duration tolerances (§7.2).
 18. **Playlist types are dynamic.** Types are rows in `playlist_types`, not a fixed enum. The manager can add types and assign them to playlists. The four system types (`music`, `jingle`, `news`, `segment`) cannot be deleted, and a type in use cannot be deleted either (§4, §6.3, §6.4). The track type (`tracks.type_id`) uses the same table. A type is only a label for the manager and does not limit what a clock element can combine.
 19. **Play rules replace dayparting.** Time windows, minimum intervals, and plays per hour are one kind of reusable rule. The manager creates rules on a separate page and applies them to tracks or playlists (§4, §7.3). The `daypart_rules` table is superseded.
-20. **Rules limit, the clock demands.** A play rule only decides whether a track is allowed at a given moment. How often a jingle appears is set by the clock structure. Play rules are never relaxed. If every candidate of an element is blocked, the element is skipped with a warning (§7.3).
+20. **A play rule limits, a placement rule demands.** A play rule only decides whether a track is allowed at a given moment. How often a playlist appears in the hour is its placement rule. Play rules are never relaxed. If every candidate of a slot is blocked, the slot is skipped with a warning (§7.3).
 21. **Track preview in the panel.** The backend streams a track by ID with Range support. Playback happens in the browser only and never reaches the air or the play log (§6.6).
 22. **References to plan rows.** Missed items live in `play_log`, so `scheduled_items.reschedule_of_id` references `play_log`. `play_log.scheduled_item_id` and `resolved_item_id` are trace ids without a foreign key, because `scheduled_items` rows are deleted after they air (§4, §4.1).
 23. **History blocks deletes.** Tracks, artists, and clocks referenced by the play log or the track plan cannot be deleted (§4).
-24. **Default filler mode belongs to the clock.** The fallback mode for a clock is set in the clock editor and stored on the clock. The global setting in §6.3 is only the fallback for clocks that have none (§4, §6.2, §7).
+24. **No filler** (v7-23). The fill playlists fill the hour; filler modes, pools, the save dialog, and reminders are removed. A gap no fill track can serve uses the emergency steps (§7).
 25. **Journal path is an environment variable.** `PLAYOUT_JOURNAL_ROOT` is a host path set in `.env`, like `MEDIA_ROOT` and `LOG_ROOT`. Liquidsoap writes the journal to it, and the backend reads it read-only (§3.1, §7.1, §9).
 
 26. **Repository layer.** All SQL lives in `internal/repository/<domain>`, one package per domain, named as the domain package. Domain code depends on interfaces it declares itself, and the repositories implement them. Reason: business rules stay free of SQL and driver errors, and a domain rename changes the domain and its repository in the same change (§5.1).

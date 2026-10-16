@@ -39,10 +39,10 @@ func TestUpCreatesSchemaAndSeeds(t *testing.T) {
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
 	require.Equal(t, []string{
-		"artists", "backend_heartbeat", "broadcast_outages", "broadcast_state", "clock_element_playlists", "clock_elements",
-		"clock_filler_pool", "clocks", "filler_requests", "grid_slots", "hour_inserts", "operations", "plan_hours",
+		"artists", "backend_heartbeat", "broadcast_outages", "broadcast_state", "clock_inserts", "clock_playlists",
+		"clocks", "grid_slots", "hour_inserts", "operations", "plan_hours",
 		"play_log", "play_rules", "playlist_play_rules", "playlist_types", "playlists",
-		"scheduled_items", "separation_rules", "settings", "track_play_rules",
+		"scheduled_items", "settings", "track_play_rules",
 		"track_playlists", "track_waveforms", "tracks",
 	}, tables)
 
@@ -51,11 +51,12 @@ func TestUpCreatesSchemaAndSeeds(t *testing.T) {
 		SELECT string_agg(code, ',' ORDER BY code) FROM playlist_types WHERE is_system`).Scan(&types))
 	require.Equal(t, "jingle,music,news,segment", types)
 
+	// Separation became the play rule "Music rotation" (migration 0013).
 	var rules string
 	require.NoError(t, sqlDB.QueryRowContext(ctx, `
-		SELECT string_agg(scope || ':' || min_interval_hours, ',' ORDER BY scope)
-		FROM separation_rules`).Scan(&rules))
-	require.Equal(t, "artist:72,track:72", rules)
+		SELECT string_agg(name || ':' || min_interval_minutes || ':' || artist_min_interval_minutes, ',')
+		FROM play_rules`).Scan(&rules))
+	require.Equal(t, "Music rotation:4320:4320", rules)
 
 	version := func() int {
 		var v int
@@ -119,9 +120,8 @@ INSERT INTO track_playlists (track_id, playlist_id) SELECT t.id, p.id FROM track
 INSERT INTO play_rules (name, max_per_hour) VALUES ('Once per hour', 1);
 INSERT INTO track_play_rules (track_id, rule_id) SELECT t.id, r.id FROM tracks t, play_rules r;
 INSERT INTO clocks (name) VALUES ('Morning');
-INSERT INTO clock_elements (clock_id, position, nominal_duration_ms) SELECT id, 0, 180000 FROM clocks;
-INSERT INTO clock_element_playlists (clock_element_id, playlist_id)
-	SELECT e.id, p.id FROM clock_elements e, playlists p;
+INSERT INTO clock_playlists (clock_id, playlist_id, position) SELECT c.id, p.id, 0 FROM clocks c, playlists p;
+INSERT INTO clock_inserts (clock_id, offset_ms, track_id) SELECT c.id, 1800000, t.id FROM clocks c, tracks t;
 INSERT INTO grid_slots (weekday, hour, clock_id, valid_from) SELECT 1, 7, id, '2026-10-12' FROM clocks;
 INSERT INTO broadcast_outages (started_at, ended_at, detected_by, component)
 	VALUES ('2026-10-13T06:00:00Z', '2026-10-13T06:05:00Z', 'icecast', 'icecast');
@@ -178,34 +178,34 @@ func TestConstraints(t *testing.T) {
 		{"empty window", `INSERT INTO play_rules (name, window_from, window_to) VALUES ('W', '06:00', '06:00')`, "ck_play_rules_window_not_empty"},
 		{"weekday out of range", `INSERT INTO play_rules (name, weekdays) VALUES ('W', '{0}')`, "ck_play_rules_weekdays"},
 		{"weekdays not empty", `INSERT INTO play_rules (name, weekdays) VALUES ('W', '{}')`, "ck_play_rules_weekdays"},
-		{"rule in use cannot be deleted", `DELETE FROM play_rules`, "fk_track_play_rules_rule_id"},
+		{"rule in use cannot be deleted", `DELETE FROM play_rules WHERE name = 'Once per hour'`, "fk_track_play_rules_rule_id"},
+		{"artist interval alone", `INSERT INTO play_rules (name, artist_min_interval_minutes) VALUES ('A', 120)`, ""},
+		{"artist interval positive", `INSERT INTO play_rules (name, artist_min_interval_minutes) VALUES ('A', 0)`, "ck_play_rules_artist_min_interval_minutes_positive"},
 
 		// Clocks and elements.
 		{"clock is 60 minutes", `INSERT INTO clocks (name, length_seconds) VALUES ('Half', 1800)`, "ck_clocks_length_seconds"},
-		{"default filler playlist needs a mode", `INSERT INTO clocks (name, default_filler_playlist_id) SELECT 'C', id FROM playlists`, "ck_clocks_default_filler_playlist"},
-		{"default filler playlist mode needs a playlist", `INSERT INTO clocks (name, default_filler_mode) VALUES ('C', 'playlist')`, "ck_clocks_default_filler_playlist"},
-		{"default filler artist mode needs an artist", `INSERT INTO clocks (name, default_filler_mode) VALUES ('C', 'artist')`, "ck_clocks_default_filler_artist"},
-		{"default filler artist", `INSERT INTO clocks (name, default_filler_mode, default_filler_artist_id) SELECT 'C', 'artist', id FROM artists`, ""},
-		{"artist used as default filler cannot be deleted", `
-			INSERT INTO artists (name) VALUES ('Filler artist');
-			INSERT INTO clocks (name, default_filler_mode, default_filler_artist_id)
-				SELECT 'C', 'artist', id FROM artists WHERE name = 'Filler artist';
-			DELETE FROM artists WHERE name = 'Filler artist'`, "fk_clocks_default_filler_artist_id"},
-		{"fixed element needs a minute", `INSERT INTO clock_elements (clock_id, position, placement, nominal_duration_ms) VALUES (` + clock + `, 1, 'fixed', 60000)`, "ck_clock_elements_fixed_minute"},
-		{"flow element has no minute", `INSERT INTO clock_elements (clock_id, position, fixed_minute, nominal_duration_ms) VALUES (` + clock + `, 1, 30, 60000)`, "ck_clock_elements_fixed_minute"},
-		{"fixed minute in range", `INSERT INTO clock_elements (clock_id, position, placement, fixed_minute, nominal_duration_ms) VALUES (` + clock + `, 1, 'fixed', 60, 60000)`, "ck_clock_elements_fixed_minute_range"},
-		{"fixed element at :30", `INSERT INTO clock_elements (clock_id, position, placement, fixed_minute, nominal_duration_ms) VALUES (` + clock + `, 1, 'fixed', 30, 60000)`, ""},
-		{"position unique per clock", `INSERT INTO clock_elements (clock_id, position, nominal_duration_ms) VALUES (` + clock + `, 0, 60000)`, "uq_clock_elements_clock_id_position"},
-		{"filler playlist mode needs a playlist", `INSERT INTO clock_elements (clock_id, position, nominal_duration_ms, filler_mode) VALUES (` + clock + `, 1, 60000, 'playlist')`, "ck_clock_elements_filler_playlist"},
-		{"filler artist mode needs an artist", `INSERT INTO clock_elements (clock_id, position, nominal_duration_ms, filler_mode) VALUES (` + clock + `, 1, 60000, 'artist')`, "ck_clock_elements_filler_artist"},
-		{"filler artist only in artist mode", `INSERT INTO clock_elements (clock_id, position, nominal_duration_ms, filler_mode, filler_artist_id) SELECT ` + clock + `, 1, 60000, 'random', id FROM artists`, "ck_clock_elements_filler_artist"},
-		{"filler playlist", `INSERT INTO clock_elements (clock_id, position, nominal_duration_ms, filler_mode, filler_playlist_id) SELECT ` + clock + `, 1, 60000, 'playlist', id FROM playlists`, ""},
-		{"playlist used as filler cannot be deleted", `
-			INSERT INTO playlists (name, type_id) VALUES ('Filler', ` + musicType + `);
-			INSERT INTO clock_elements (clock_id, position, nominal_duration_ms, filler_mode, filler_playlist_id)
-				SELECT ` + clock + `, 1, 60000, 'playlist', id FROM playlists WHERE name = 'Filler';
-			DELETE FROM playlists WHERE name = 'Filler'`, "fk_clock_elements_filler_playlist_id"},
-		{"playlist used by an element cannot be deleted", `DELETE FROM playlists`, "fk_clock_element_playlists_playlist_id"},
+		{"playlist rule", `UPDATE playlists SET clock_rule = 'often'`, "ck_playlists_clock_rule"},
+		{"spread needs a count", `UPDATE playlists SET clock_rule = 'spread'`, "ck_playlists_clock_count"},
+		{"count only for spread", `UPDATE playlists SET clock_count = 2`, "ck_playlists_clock_count"},
+		{"spread 12", `UPDATE playlists SET clock_rule = 'spread', clock_count = 12`, ""},
+		{"spread 13", `UPDATE playlists SET clock_rule = 'spread', clock_count = 13`, "ck_playlists_clock_count"},
+		{"clock playlist twice", `INSERT INTO clock_playlists (clock_id, playlist_id, position) SELECT ` + clock + `, id, 1 FROM playlists`, "pk_clock_playlists"},
+		{"clock playlist position unique", `
+			INSERT INTO playlists (name, type_id) VALUES ('Jingles', ` + musicType + `);
+			INSERT INTO clock_playlists (clock_id, playlist_id, position) SELECT ` + clock + `, id, 0 FROM playlists WHERE name = 'Jingles'`, "uq_clock_playlists_clock_id_position"},
+		{"clock playlist spread override needs a count", `UPDATE clock_playlists SET clock_rule = 'spread'`, "ck_clock_playlists_clock_count"},
+		{"clock playlist count without override", `UPDATE clock_playlists SET clock_count = 2`, "ck_clock_playlists_clock_count"},
+		{"clock playlist weight", `UPDATE clock_playlists SET fill_weight = 101`, "ck_clock_playlists_fill_weight"},
+		{"playlist in a clock cannot be deleted", `DELETE FROM playlists`, "fk_clock_playlists_playlist_id"},
+		{"insert offset whole seconds", `UPDATE clock_inserts SET offset_ms = 1500`, "ck_clock_inserts_offset_ms"},
+		{"insert offset inside the hour", `UPDATE clock_inserts SET offset_ms = 3600000`, "ck_clock_inserts_offset_ms"},
+		{"insert tolerance", `UPDATE clock_inserts SET tolerance_ms = 600001`, "ck_clock_inserts_tolerance_ms"},
+		{"insert with both sources", `UPDATE clock_inserts SET playlist_id = (SELECT id FROM playlists)`, "ck_clock_inserts_source"},
+		{"insert offset unique", `INSERT INTO clock_inserts (clock_id, offset_ms, track_id) SELECT clock_id, offset_ms, track_id FROM clock_inserts`, "uq_clock_inserts_clock_id_offset_ms"},
+		{"track in a clock insert cannot be deleted", `DELETE FROM play_log; DELETE FROM track_play_rules; DELETE FROM tracks`, "fk_clock_inserts_track_id"},
+		{"one-time insert offset", `INSERT INTO hour_inserts (hour_start_utc, track_id, placement, offset_ms) VALUES (now(), ` + track + `, 'fixed', 1500)`, "ck_hour_inserts_offset_ms"},
+		{"one-time start has no offset", `INSERT INTO hour_inserts (hour_start_utc, track_id, placement, offset_ms) VALUES (now(), ` + track + `, 'start', 0)`, "ck_hour_inserts_offset_ms"},
+		{"one-time fixed insert", `INSERT INTO hour_inserts (hour_start_utc, track_id, placement, offset_ms, tolerance_ms) VALUES (now(), ` + track + `, 'fixed', 1780000, 20000)`, ""},
 
 		// Grid.
 		{"weekday 1 to 7", `INSERT INTO grid_slots (weekday, hour, clock_id, valid_from) VALUES (8, 0, ` + clock + `, '2026-10-12')`, "ck_grid_slots_weekday"},
@@ -237,29 +237,19 @@ func TestConstraints(t *testing.T) {
 		// Track plan.
 		{"reschedule_of only on reschedule items", `
 			INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, reschedule_of_id)
-			VALUES (` + clock + `, ` + track + `, now(), 1000, 'clock', (SELECT id FROM play_log LIMIT 1))`, "ck_scheduled_items_reschedule_of"},
-		{"playlist filler source", `
+			VALUES (` + clock + `, ` + track + `, now(), 1000, 'fill', (SELECT id FROM play_log LIMIT 1))`, "ck_scheduled_items_reschedule_of"},
+		{"insert source", `
+			INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, clock_insert_id)
+			VALUES (` + clock + `, ` + track + `, now(), 1000, 'insert', (SELECT id FROM clock_inserts))`, ""},
+		{"general source", `
 			INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
-			VALUES (` + clock + `, ` + track + `, now(), 1000, 'filler_playlist')`, ""},
-		{"artist filler source", `
+			VALUES (` + clock + `, ` + track + `, now(), 1000, 'general')`, ""},
+		{"filler source is gone", `
 			INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
-			VALUES (` + clock + `, ` + track + `, now(), 1000, 'filler_artist')`, ""},
-		{"unknown source", `
-			INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
-			VALUES (` + clock + `, ` + track + `, now(), 1000, 'filler')`, "ck_scheduled_items_source"},
+			VALUES (` + clock + `, ` + track + `, now(), 1000, 'filler_random')`, "ck_scheduled_items_source"},
 		{"out point after in point", `
 			INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, source)
-			VALUES (` + clock + `, ` + track + `, now(), 1000, 1000, 'clock')`, "ck_scheduled_items_planned_out_ms"},
-
-		// Filler requests: one pending per clock hour.
-		{"two pending requests", `
-			INSERT INTO filler_requests (clock_id, hour_start_utc, reason, deadline_at, mode) VALUES
-			(` + clock + `, '2026-10-14T05:00:00Z', 'short_clock', '2026-10-14T03:00:00Z', 'ask'),
-			(` + clock + `, '2026-10-14T05:00:00Z', 'short_clock', '2026-10-14T03:00:00Z', 'ask')`, "uq_filler_requests_clock_id_hour_start_utc_pending"},
-		{"pending after expired", `
-			INSERT INTO filler_requests (clock_id, hour_start_utc, reason, deadline_at, mode, status) VALUES
-			(` + clock + `, '2026-10-14T05:00:00Z', 'short_clock', '2026-10-14T03:00:00Z', 'ask', 'expired'),
-			(` + clock + `, '2026-10-14T05:00:00Z', 'short_clock', '2026-10-14T03:00:00Z', 'ask', 'pending')`, ""},
+			VALUES (` + clock + `, ` + track + `, now(), 1000, 1000, 'fill')`, "ck_scheduled_items_planned_out_ms"},
 
 		// Settings and operations.
 		{"setting key format", `INSERT INTO settings (key, value) VALUES ('Bad Key', '1')`, "ck_settings_key"},

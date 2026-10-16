@@ -22,12 +22,15 @@ func stationTZ(t *testing.T) *time.Location {
 	return loc
 }
 
-// clockFixture is a library with a music playlist of 19-minute tracks and a
-// jingle playlist of 30-second jingles.
+// clockFixture is a library with a music playlist of four 19-minute tracks
+// that may repeat once an hour (play rule "Hourly"), and a jingle playlist
+// of one 30-second jingle. A clock of the music playlist plans the four
+// songs in an hour: three whole, the fourth cut at 60:00.
 type clockFixture struct {
 	*libraryAPI
 	music, jingles uint64
 	tracks         []uint64
+	jingle         uint64
 }
 
 func newClockFixture(t *testing.T) *clockFixture {
@@ -45,23 +48,24 @@ func newClockFixture(t *testing.T) *clockFixture {
 		a.exec(`INSERT INTO track_playlists (track_id, playlist_id) VALUES ($1, $2) RETURNING track_id`, id, f.music)
 		f.tracks = append(f.tracks, id)
 	}
-	id := a.exec(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('Jingle', 'jingles/j.mp3', $1, 30000) RETURNING id`,
+	var rule dto.PlayRule
+	a.ok(http.StatusCreated, http.MethodPost, "/api/play-rules", map[string]any{"name": "Hourly", "min_interval_minutes": 60}, &rule)
+	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d/play-rules", f.music), map[string]any{"rule_ids": []uint64{rule.ID}}, nil)
+	f.jingle = a.exec(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('Jingle', 'jingles/j.mp3', $1, 30000) RETURNING id`,
 		a.typeID("jingle"))
-	a.exec(`INSERT INTO track_playlists (track_id, playlist_id) VALUES ($1, $2) RETURNING track_id`, id, f.jingles)
+	a.exec(`INSERT INTO track_playlists (track_id, playlist_id) VALUES ($1, $2) RETURNING track_id`, f.jingle, f.jingles)
 	return f
 }
 
-func element(playlist uint64, minutes int, extra ...any) map[string]any {
-	e := map[string]any{"nominal_duration_ms": minutes * 60000, "playlist_ids": []uint64{playlist}}
-	for i := 0; i+1 < len(extra); i += 2 {
-		e[extra[i].(string)] = extra[i+1]
-	}
-	return e
+// musicClock is the body of a clock that fills the hour from the music
+// playlist.
+func (f *clockFixture) musicClock(name string) map[string]any {
+	return map[string]any{"name": name, "playlists": []any{map[string]any{"playlist_id": f.music}}}
 }
 
-func warningCodes(c dto.ClockCheck) []string {
+func warningCodes(ws []dto.ClockWarning) []string {
 	var out []string
-	for _, w := range c.Warnings {
+	for _, w := range ws {
 		out = append(out, w.Code)
 	}
 	return out
@@ -70,130 +74,108 @@ func warningCodes(c dto.ClockCheck) []string {
 func TestClockSaveFlow(t *testing.T) {
 	f := newClockFixture(t)
 
-	// 3 × 19 minutes: short by 3 minutes, saved incomplete.
+	// Music fills the hour, two jingles are spread over it, and a jingle
+	// plays at 29:40 every hour.
 	var saved dto.ClockSaveResult
 	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{
 		"name": "Morning",
-		"elements": []any{
-			element(f.music, 19), element(f.music, 19), element(f.music, 19),
+		"playlists": []any{
+			map[string]any{"playlist_id": f.music},
+			map[string]any{"playlist_id": f.jingles, "clock_rule": "spread", "clock_count": 2},
 		},
+		"inserts": []any{map[string]any{"offset_ms": 1780000, "tolerance_ms": 20000, "track_id": f.jingle}},
 	}, &saved)
 	c := saved.Clock
-	require.Equal(t, "incomplete", c.Status)
-	require.Equal(t, 180000, saved.Check.ShortfallMS)
-	require.True(t, saved.Check.RequiresFillerChoice)
-	require.Equal(t, []int{0}, saved.Check.ShortSegments)
-	require.Len(t, c.Elements, 3)
-	require.Equal(t, "flow", c.Elements[0].Placement)
-	require.Equal(t, 30000, c.Elements[0].DurationToleranceMS, "default from the settings")
-	require.Equal(t, 2, c.Layout.Segments[0].HolderIndex)
-	// Four 19-minute tracks for 3 plays per hour: no grid hours yet, so no
-	// separation warning.
-	require.Empty(t, saved.Check.Warnings)
-
-	path := fmt.Sprintf("/api/clocks/%d", c.ID)
-
-	// The dialog: pool mode needs tracks in the pool.
-	f.fieldError("pool_track_ids", errcodes.Required, http.MethodPost, path+"/save-with-filler", map[string]any{
-		"segments": []any{map[string]any{"segment": 0, "filler_mode": "pool"}},
-	})
-	f.fieldError("segments[0].segment", errcodes.Range, http.MethodPost, path+"/save-with-filler", map[string]any{
-		"segments": []any{map[string]any{"segment": 3, "filler_mode": "random"}},
-	})
-	f.ok(http.StatusOK, http.MethodPost, path+"/save-with-filler", map[string]any{
-		"segments":       []any{map[string]any{"segment": 0, "filler_mode": "pool"}},
-		"pool_track_ids": []uint64{f.tracks[3], f.tracks[2]},
-	}, &saved)
-	require.Equal(t, "complete", saved.Clock.Status)
-	require.False(t, saved.Check.RequiresFillerChoice)
-	require.Equal(t, "pool", saved.Clock.Elements[2].FillerMode)
-
-	var pool dto.FillerPool
-	f.ok(http.StatusOK, http.MethodGet, path+"/filler-pool", nil, &pool)
-	require.Len(t, pool.Items, 2)
-	require.Equal(t, f.tracks[3], pool.Items[0].TrackID)
-
-	// Re-saving keeps the choice: no further questions.
-	elements := make([]any, len(saved.Clock.Elements))
-	for i, e := range saved.Clock.Elements {
-		elements[i] = element(f.music, 19, "id", e.ID, "filler_mode", e.FillerMode)
+	require.Equal(t, "Morning", c.Name)
+	require.Equal(t, []dto.ClockPlaylist{
+		{PlaylistID: f.music, Position: 0, EffectiveRule: "fill"},
+		{PlaylistID: f.jingles, Position: 1, ClockRule: new("spread"), ClockCount: new(2), EffectiveRule: "spread", EffectiveCount: new(2)},
+	}, c.Playlists)
+	require.Len(t, c.Inserts, 1)
+	require.Equal(t, 20000, c.Inserts[0].ToleranceMS)
+	require.NotNil(t, saved.Sample, "the sample hour")
+	require.NotEmpty(t, saved.Sample.Items)
+	last := saved.Sample.Items[len(saved.Sample.Items)-1]
+	require.Equal(t, 3600000, last.OffsetMS+last.LengthMS, "the sample fills the hour")
+	sources := map[string]int{}
+	for _, it := range saved.Sample.Items {
+		sources[it.Source]++
 	}
-	f.ok(http.StatusOK, http.MethodPut, path, map[string]any{"name": "Morning", "elements": elements}, &saved)
-	require.Equal(t, "complete", saved.Clock.Status)
+	require.Equal(t, 1, sources["insert"], "%+v", saved.Sample.Items)
+	require.Positive(t, sources["fill"])
+	f.waitOperation(saved.BuildOperationID)
 
-	// A fixed jingle at :30 splits the hour; then a new fixed element at
-	// :31 replaces it.
-	f.ok(http.StatusOK, http.MethodPut, path, map[string]any{"name": "Morning", "elements": []any{
-		element(f.music, 19, "id", saved.Clock.Elements[0].ID),
-		element(f.jingles, 1, "placement", "fixed", "fixed_minute", 30, "duration_tolerance_ms", 0),
-		element(f.music, 19, "id", saved.Clock.Elements[1].ID),
-		element(f.music, 9, "id", saved.Clock.Elements[2].ID, "filler_mode", "random"),
-	}}, &saved)
-	require.Len(t, saved.Clock.Layout.Segments, 2)
-	require.Equal(t, 10*60000, saved.Clock.Layout.Segments[0].ShortfallMS, "19 minutes before the earliest start at :29")
-	require.Equal(t, []int{0}, saved.Check.ShortSegments)
-	require.Equal(t, "incomplete", saved.Clock.Status)
-	jingleID := saved.Clock.Elements[1].ID
-	require.Contains(t, warningCodes(saved.Check), "element_no_fitting_track", "the music tracks do not last 9 minutes")
+	var got dto.Clock
+	f.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/clocks/%d", c.ID), nil, &got)
+	require.Equal(t, c, got)
+	var list dto.ClockList
+	f.ok(http.StatusOK, http.MethodGet, "/api/clocks", nil, &list)
+	require.Equal(t, []dto.ClockSummary{{ID: c.ID, Name: "Morning", PlaylistCount: 2, InsertCount: 1, UpdatedAt: list.Items[0].UpdatedAt}}, list.Items)
 
-	f.ok(http.StatusOK, http.MethodPut, path, map[string]any{"name": "Morning", "elements": []any{
-		element(f.music, 19, "id", saved.Clock.Elements[0].ID),
-		element(f.jingles, 1, "id", jingleID, "placement", "fixed", "fixed_minute", 30, "duration_tolerance_ms", 0),
-		element(f.jingles, 1, "placement", "fixed", "fixed_minute", 31, "duration_tolerance_ms", 0, "filler_mode", "ask"),
-		element(f.music, 19, "id", saved.Clock.Elements[2].ID),
-	}}, &saved)
-	require.Len(t, saved.Check.ReplacedElements, 1)
-	require.Equal(t, jingleID, saved.Check.ReplacedElements[0].ID)
-	require.Len(t, saved.Clock.Elements, 3)
-	require.Equal(t, 31, *saved.Clock.Elements[1].FixedMinute)
-
-	// save-incomplete keeps the clock as it is.
-	var kept dto.ClockSaveResult
-	f.ok(http.StatusOK, http.MethodPost, path+"/save-incomplete", nil, &kept)
-	require.Equal(t, saved.Clock.Status, kept.Clock.Status)
+	// An update keeps the insert at the same time, with its ID.
+	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/clocks/%d", c.ID), map[string]any{
+		"name": "Morning",
+		"playlists": []any{
+			map[string]any{"playlist_id": f.jingles, "clock_rule": "start"},
+			map[string]any{"playlist_id": f.music},
+		},
+		"inserts": []any{map[string]any{"offset_ms": 1780000, "track_id": f.jingle}},
+	}, &saved)
+	require.Equal(t, c.Inserts[0].ID, saved.Clock.Inserts[0].ID)
+	require.Equal(t, 60000, saved.Clock.Inserts[0].ToleranceMS, "default rotation.default_fixed_tolerance_ms")
+	require.Equal(t, "start", saved.Clock.Playlists[0].EffectiveRule)
+	require.Equal(t, "rule", saved.Sample.Items[0].Source, "the jingle starts the hour")
+	f.waitOperation(saved.BuildOperationID)
 }
 
 func TestClockRefusals(t *testing.T) {
 	f := newClockFixture(t)
-	post := func(field string, code errcodes.Field, elements ...any) {
+	post := func(field string, code errcodes.Field, body map[string]any) {
 		t.Helper()
-		f.fieldError(field, code, http.MethodPost, "/api/clocks", map[string]any{"name": "X", "elements": elements})
+		body["name"] = "X"
+		f.fieldError(field, code, http.MethodPost, "/api/clocks", body)
 	}
-	post("elements[0].fixed_minute", errcodes.DoesNotFit, element(f.jingles, 1, "placement", "fixed", "fixed_minute", 0))
-	post("elements[1].fixed_minute", errcodes.Overlap,
-		element(f.jingles, 1, "placement", "fixed", "fixed_minute", 30),
-		element(f.jingles, 1, "placement", "fixed", "fixed_minute", 31))
-	post("elements[1].fixed_minute", errcodes.Order,
-		element(f.jingles, 1, "placement", "fixed", "fixed_minute", 40),
-		element(f.jingles, 1, "placement", "fixed", "fixed_minute", 20))
-	post("elements[2].fixed_minute", errcodes.DoesNotFit,
-		element(f.music, 20), element(f.music, 12), element(f.jingles, 1, "placement", "fixed", "fixed_minute", 30))
-	post("elements[0].playlist_ids", errcodes.UnknownID, element(9999, 10))
-	post("elements[0].filler_source_id", errcodes.Required, element(f.music, 10, "filler_mode", "playlist"))
-	post("elements[0].id", errcodes.UnknownID, element(f.music, 10, "id", 12345))
-	post("elements[0].playlist_ids", errcodes.Length, map[string]any{"nominal_duration_ms": 60000, "playlist_ids": []uint64{}})
-	f.fieldError("default_filler_mode", errcodes.Enum, http.MethodPost, "/api/clocks", map[string]any{
-		"name": "X", "default_filler_mode": "pool", "elements": []any{element(f.music, 60)},
-	})
+	music := map[string]any{"playlist_id": f.music}
+	post("playlists", errcodes.FillPlaylistRequired, map[string]any{"playlists": []any{map[string]any{"playlist_id": f.jingles, "clock_rule": "end"}}})
+	post("playlists[1].playlist_id", errcodes.UnknownID, map[string]any{"playlists": []any{music, map[string]any{"playlist_id": 9999}}})
+	post("playlists[1].playlist_id", errcodes.Invalid, map[string]any{"playlists": []any{music, music}})
+	post("playlists[1].fill_weight", errcodes.FillWeightsPartial, map[string]any{"playlists": []any{
+		map[string]any{"playlist_id": f.music, "fill_weight": 30}, map[string]any{"playlist_id": f.jingles},
+	}})
+	post("playlists[1].fill_weight", errcodes.FillWeightNotAllowed, map[string]any{"playlists": []any{
+		music, map[string]any{"playlist_id": f.jingles, "clock_rule": "end", "fill_weight": 5},
+	}})
+	post("playlists[1].clock_count", errcodes.ClockCountRequired, map[string]any{"playlists": []any{
+		music, map[string]any{"playlist_id": f.jingles, "clock_rule": "spread"},
+	}})
+	post("playlists[1].clock_count", errcodes.ClockCountNotAllowed, map[string]any{"playlists": []any{
+		music, map[string]any{"playlist_id": f.jingles, "clock_count": 2},
+	}})
+	post("playlists[0].clock_rule", errcodes.Enum, map[string]any{"playlists": []any{map[string]any{"playlist_id": f.music, "clock_rule": "often"}}})
+	post("playlists", errcodes.Length, map[string]any{"playlists": []any{}})
+	post("inserts[0].track_id", errcodes.InsertSourceRequired, map[string]any{"playlists": []any{music}, "inserts": []any{map[string]any{"offset_ms": 0}}})
+	post("inserts[1].offset_ms", errcodes.InsertOffsetTaken, map[string]any{"playlists": []any{music}, "inserts": []any{
+		map[string]any{"offset_ms": 60000, "track_id": f.jingle}, map[string]any{"offset_ms": 60000, "playlist_id": f.jingles},
+	}})
+	post("inserts[0].offset_ms", errcodes.Range, map[string]any{"playlists": []any{music}, "inserts": []any{map[string]any{"offset_ms": 1500, "track_id": f.jingle}}})
+	post("inserts[0].track_id", errcodes.UnknownID, map[string]any{"playlists": []any{music}, "inserts": []any{map[string]any{"offset_ms": 0, "track_id": 9999}}})
 
 	var saved dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{"name": "X", "elements": []any{element(f.music, 60)}}, &saved)
-	f.fieldError("name", errcodes.Taken, http.MethodPost, "/api/clocks", map[string]any{"name": "X", "elements": []any{element(f.music, 60)}})
-	f.problem(http.StatusNotFound, errcodes.ClockNotFound, http.MethodPut, "/api/clocks/9999",
-		map[string]any{"name": "Y", "elements": []any{element(f.music, 60)}})
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("X"), &saved)
+	f.fieldError("name", errcodes.Taken, http.MethodPost, "/api/clocks", f.musicClock("X"))
+	f.problem(http.StatusNotFound, errcodes.ClockNotFound, http.MethodPut, "/api/clocks/9999", f.musicClock("Y"))
 
 	// A playlist used by a clock cannot be deleted.
-	f.problem(http.StatusConflict, errcodes.PlaylistInUse, http.MethodDelete, fmt.Sprintf("/api/playlists/%d", f.music), nil)
+	p := f.problem(http.StatusConflict, errcodes.PlaylistInUse, http.MethodDelete, fmt.Sprintf("/api/playlists/%d", f.music), nil)
+	require.Equal(t, []string{fmt.Sprintf("clock:%d:X", saved.Clock.ID)}, refsOf(p))
 }
 
 func TestGridAssignAndSchedule(t *testing.T) {
 	f := newClockFixture(t)
 	var morning, news dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{"name": "Morning", "elements": []any{
-		element(f.music, 19), element(f.music, 19), element(f.music, 19, "filler_mode", "random"),
-	}}, &morning)
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{"name": "News", "elements": []any{
-		element(f.jingles, 60),
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("Morning"), &morning)
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{"name": "News", "playlists": []any{
+		map[string]any{"playlist_id": f.jingles},
 	}}, &news)
 
 	today := grid.Date(time.Now().In(stationTZ(t)))
@@ -259,6 +241,7 @@ func TestGridAssignAndSchedule(t *testing.T) {
 		"weekdays": []int{1, 2, 3, 4, 5, 6, 7}, "hours": []int{8, 9}, "valid_from": date(today),
 	}, &res)
 	require.Empty(t, res.Created)
+	f.waitOperation(res.BuildOperationID) // the plan of the news hour is cleared
 	f.ok(http.StatusOK, http.MethodGet, "/api/grid/slots", nil, &slots)
 	require.Empty(t, slots.Items)
 	f.ok(http.StatusNoContent, http.MethodDelete, fmt.Sprintf("/api/clocks/%d", news.Clock.ID), nil, nil)
@@ -268,10 +251,7 @@ func TestGridAssignAndSchedule(t *testing.T) {
 func TestClockDryCheckUsesGridAndPlayRules(t *testing.T) {
 	f := newClockFixture(t)
 	var saved dto.ClockSaveResult
-	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", map[string]any{"name": "Jingle hour", "elements": []any{
-		element(f.jingles, 1, "placement", "fixed", "fixed_minute", 15, "duration_tolerance_ms", 30000),
-		element(f.music, 19), element(f.music, 19), element(f.music, 19, "filler_mode", "random"),
-	}}, &saved)
+	f.ok(http.StatusCreated, http.MethodPost, "/api/clocks", f.musicClock("Jingle hour"), &saved)
 
 	// The only jingle may play from 06:00 to 07:00; the clock airs at 08:00.
 	var rule dto.PlayRule
@@ -287,33 +267,35 @@ func TestClockDryCheckUsesGridAndPlayRules(t *testing.T) {
 		"valid_from": today.Format(time.DateOnly),
 	}, nil)
 
-	elements := make([]any, len(saved.Clock.Elements))
-	for i, e := range saved.Clock.Elements {
-		el := element(e.PlaylistIDs[0], e.NominalDurationMS/60000, "id", e.ID, "filler_mode", e.FillerMode,
-			"placement", e.Placement, "duration_tolerance_ms", e.DurationToleranceMS)
-		if e.FixedMinute != nil {
-			el["fixed_minute"] = *e.FixedMinute
-		}
-		elements[i] = el
-	}
+	// A second fill playlist without an interval rule, and the jingles
+	// spread over the hour.
+	var extra dto.Playlist
+	f.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": "Extra", "type_id": f.typeID("music")}, &extra)
+	song := f.exec(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('Extra', 'music/extra.mp3', $1, 200000) RETURNING id`,
+		f.typeID("music"))
+	f.exec(`INSERT INTO track_playlists (track_id, playlist_id) VALUES ($1, $2) RETURNING track_id`, song, extra.ID)
 	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/clocks/%d", saved.Clock.ID), map[string]any{
-		"name": "Jingle hour", "elements": elements,
+		"name": "Jingle hour",
+		"playlists": []any{
+			map[string]any{"playlist_id": f.music},
+			map[string]any{"playlist_id": f.jingles, "clock_rule": "spread", "clock_count": 2},
+			map[string]any{"playlist_id": extra.ID},
+		},
 	}, &saved)
 
-	var blocked, few *dto.ClockWarning
-	for i, w := range saved.Check.Warnings {
-		switch w.Code {
-		case "element_blocked_by_play_rules":
-			blocked = &saved.Check.Warnings[i]
-		case "element_few_tracks":
-			few = &saved.Check.Warnings[i]
+	byCode := map[string]dto.ClockWarning{}
+	for _, w := range saved.Warnings {
+		if _, ok := byCode[w.Code]; !ok {
+			byCode[w.Code] = w
 		}
 	}
-	require.NotNil(t, blocked, "%+v", saved.Check.Warnings)
-	require.Equal(t, 0, *blocked.ElementIndex)
+	blocked, ok := byCode["rule_blocked_by_play_rules"]
+	require.True(t, ok, "%+v", saved.Warnings)
+	require.Equal(t, 1, *blocked.PlaylistIndex)
 	require.Len(t, blocked.Hours, 7)
 	require.Equal(t, 8, blocked.Hours[0].Hour)
-	// 4 music tracks, 3 plays an hour, 08:00 every day within the 72 h track
-	// separation: about 9 plays.
-	require.NotNil(t, few, "%+v", saved.Check.Warnings)
+	noInterval, ok := byCode["fill_no_interval_rule"]
+	require.True(t, ok, "%+v", saved.Warnings)
+	require.Equal(t, 2, *noInterval.PlaylistIndex, "only the extra playlist: music has Hourly")
+	require.NotContains(t, warningCodes(saved.Warnings), "playlist_no_tracks")
 }

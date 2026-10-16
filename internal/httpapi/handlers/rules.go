@@ -9,7 +9,6 @@ import (
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
-	"github.com/AstRonin/radio-atlantida-backend/internal/separation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
 )
 
@@ -23,12 +22,6 @@ type PlayRules interface {
 	SetTargets(ctx context.Context, id uint64, trackIDs, playlistIDs []uint64) (playrules.Rule, error)
 	SetTrackRules(ctx context.Context, trackID uint64, ruleIDs []uint64) ([]uint64, error)
 	SetPlaylistRules(ctx context.Context, playlistID uint64, ruleIDs []uint64) ([]uint64, error)
-}
-
-// Separation manages separation rules (*separation.Service).
-type Separation interface {
-	List(ctx context.Context) ([]separation.Rule, error)
-	Update(ctx context.Context, id uint64, minIntervalHours int, notes string) (separation.Rule, error)
 }
 
 type playRuleOutput struct {
@@ -96,7 +89,7 @@ func registerPlayRules(api huma.API, log *slog.Logger, svc PlayRules) {
 		Method:        http.MethodPost,
 		Path:          "/api/play-rules",
 		Summary:       "Create a play rule",
-		Description:   "At least one limit is set; window_from and window_to are set together and may cross midnight.",
+		Description:   "At least one limit is set; window_from and window_to are set together and may cross midnight. An interval is at most the play log retention (interval_beyond_retention).",
 		Tags:          tags,
 		DefaultStatus: http.StatusCreated,
 		Errors:        errorsWith(http.StatusUnprocessableEntity),
@@ -166,7 +159,7 @@ func registerPlayRules(api huma.API, log *slog.Logger, svc PlayRules) {
 func ruleInput(b dto.PlayRuleBody) (playrules.RuleInput, error) {
 	in := playrules.RuleInput{
 		Name: b.Name, Weekdays: b.Weekdays,
-		MinIntervalMinutes: b.MinIntervalMinutes, MaxPerHour: b.MaxPerHour, Notes: b.Notes,
+		MinIntervalMinutes: b.MinIntervalMinutes, ArtistMinIntervalMinutes: b.ArtistMinInterval, MaxPerHour: b.MaxPerHour, Notes: b.Notes,
 	}
 	errs := &validation.Error{}
 	for _, t := range []struct {
@@ -190,7 +183,7 @@ func ruleInput(b dto.PlayRuleBody) (playrules.RuleInput, error) {
 func playRuleDTO(r playrules.Rule) dto.PlayRule {
 	out := dto.PlayRule{
 		ID: r.ID, Name: r.Name, Weekdays: r.Weekdays,
-		MinIntervalMinutes: r.MinIntervalMinutes, MaxPerHour: r.MaxPerHour, Notes: r.Notes,
+		MinIntervalMinutes: r.MinIntervalMinutes, ArtistMinInterval: r.ArtistMinIntervalMinutes, MaxPerHour: r.MaxPerHour, Notes: r.Notes,
 		TrackIDs: emptyIDs(r.TrackIDs), PlaylistIDs: emptyIDs(r.PlaylistIDs),
 		TrackCount: len(r.TrackIDs), PlaylistCount: len(r.PlaylistIDs),
 		CreatedAt: r.CreatedAt.UTC(),
@@ -202,61 +195,4 @@ func playRuleDTO(r playrules.Rule) dto.PlayRule {
 		out.WindowTo = new(r.WindowTo.String())
 	}
 	return out
-}
-
-type separationRuleListOutput struct {
-	Body dto.SeparationRuleList
-}
-
-type separationRuleOutput struct {
-	Body dto.SeparationRule
-}
-
-type updateSeparationRuleInput struct {
-	ID   uint64 `path:"id" minimum:"1"`
-	Body dto.UpdateSeparationRule
-}
-
-func registerSeparationRules(api huma.API, log *slog.Logger, svc Separation) {
-	tags := []string{"Separation rules"}
-
-	register(api, log, huma.Operation{
-		OperationID: "list-separation-rules",
-		Method:      http.MethodGet,
-		Path:        "/api/separation-rules",
-		Summary:     "List separation rules",
-		Description: "The rules are seeded by the database; their values are copied from the reference software and edited here.",
-		Tags:        tags,
-		Errors:      commonErrors,
-	}, func(ctx context.Context, _ *struct{}) (*separationRuleListOutput, error) {
-		rs, err := svc.List(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := &separationRuleListOutput{Body: dto.SeparationRuleList{Items: make([]dto.SeparationRule, 0, len(rs))}}
-		for _, r := range rs {
-			out.Body.Items = append(out.Body.Items, separationRuleDTO(r))
-		}
-		return out, nil
-	})
-
-	register(api, log, huma.Operation{
-		OperationID: "update-separation-rule",
-		Method:      http.MethodPut,
-		Path:        "/api/separation-rules/{id}",
-		Summary:     "Update a separation rule",
-		Description: "Changes the interval and the notes. The interval is at most the play log retention in hours.",
-		Tags:        tags,
-		Errors:      errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity),
-	}, func(ctx context.Context, in *updateSeparationRuleInput) (*separationRuleOutput, error) {
-		r, err := svc.Update(ctx, in.ID, in.Body.MinIntervalHours, in.Body.Notes)
-		if err != nil {
-			return nil, err
-		}
-		return &separationRuleOutput{Body: separationRuleDTO(r)}, nil
-	})
-}
-
-func separationRuleDTO(r separation.Rule) dto.SeparationRule {
-	return dto.SeparationRule{ID: r.ID, Scope: r.Scope, MinIntervalHours: r.MinIntervalHours, Notes: r.Notes}
 }

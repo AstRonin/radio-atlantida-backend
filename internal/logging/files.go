@@ -228,7 +228,7 @@ func LevelNames() []string {
 // Components lists the allowed components (§10.1).
 func Components() []Component {
 	return []Component{
-		ComponentAPI, ComponentDB, ComponentRotation, ComponentFiller, ComponentLiquidsoap,
+		ComponentAPI, ComponentDB, ComponentRotation, ComponentLiquidsoap,
 		ComponentIcecast, ComponentWebRTC, ComponentRetention, ComponentOutage, ComponentReconcile, ComponentMedia,
 	}
 }

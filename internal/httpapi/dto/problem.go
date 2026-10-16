@@ -27,7 +27,7 @@ type Problem struct {
 
 // FieldError is the error of one request field.
 type FieldError struct {
-	Field   string         `json:"field" doc:"Path of the field, for example elements[2].fixed_minute. Query and path parameters are prefixed with query. or path."`
+	Field   string         `json:"field" doc:"Path of the field, for example playlists[2].fill_weight. Query and path parameters are prefixed with query. or path."`
 	Code    errcodes.Field `json:"code"`
 	Message string         `json:"message" doc:"English message for developers."`
 }

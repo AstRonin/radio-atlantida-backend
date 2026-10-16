@@ -49,7 +49,7 @@ FROM generate_series($2::timestamptz - interval '39 minutes', $2::timestamptz - 
 VALUES ($1, 'missed', $2, 180000, $3, 'open')`, f.track, f.now.Add(-3*time.Minute), outage)
 	require.NoError(t, err)
 	rows, err := f.db.Pool.Query(ctx, `INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
-SELECT $1, $2, g, 180000, 'clock'
+SELECT $1, $2, g, 180000, 'fill'
 FROM generate_series($3::timestamptz + interval '1 minute', $3::timestamptz + interval '13 minutes', interval '3 minutes') g
 RETURNING id`, clock, f.track, f.now)
 	require.NoError(t, err)

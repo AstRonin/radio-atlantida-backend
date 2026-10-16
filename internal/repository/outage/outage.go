@@ -131,8 +131,7 @@ WHERE ended_at IS NOT NULL AND reconciled_at IS NULL ORDER BY started_at`)
 // MarkMissed moves the items of the outage window that never started to
 // the play log as missed (§4.1, §7.1). One statement deletes the plan rows
 // and inserts the log rows. A missed row keeps the plan's times, clock, and
-// slot; the reason is read from its outage. A filler pool row stays used:
-// the track was planned.
+// slot; the reason is read from its outage.
 //
 // The outage window is short and ix_scheduled_items_planned_start_utc
 // bounds the scan to the plan rows that start before before.
@@ -198,8 +197,8 @@ WHERE status IN ('planned', 'queued') AND planned_start_utc >= $1 AND planned_st
 // DropStale deletes the items that did not air while no outage was open
 // (docs/phase-10-plan.md §2, decision 5): planned or queued, starting
 // before before, overlapping no open outage and no closed one that is not
-// marked yet. Their pool rows are released, as for a rebuild, and a
-// rescheduled item that did not air opens its missed item again.
+// marked yet. A rescheduled item that did not air opens its missed item
+// again.
 func (s *Store) DropStale(ctx context.Context, before time.Time) (int, error) {
 	var n int
 	err := s.q.QueryRow(ctx, `WITH dropped AS (
@@ -210,10 +209,7 @@ func (s *Store) DropStale(ctx context.Context, before time.Time) (int, error) {
           WHERE (o.ended_at IS NULL OR o.reconciled_at IS NULL)
             AND `+itemEnd+` > o.started_at
             AND (o.ended_at IS NULL OR si.planned_start_utc < o.ended_at))
-    RETURNING si.filler_pool_id, si.reschedule_of_id
-), released AS (
-    UPDATE clock_filler_pool SET used_at = NULL
-    WHERE id IN (SELECT filler_pool_id FROM dropped WHERE filler_pool_id IS NOT NULL)
+    RETURNING si.reschedule_of_id
 ), reopened AS (
     UPDATE play_log SET resolution = 'open', resolved_at = NULL, resolved_item_id = NULL
     WHERE id IN (SELECT reschedule_of_id FROM dropped WHERE reschedule_of_id IS NOT NULL)

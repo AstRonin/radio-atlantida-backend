@@ -8,7 +8,6 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
-	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
@@ -138,14 +137,14 @@ func registerOutages(api huma.API, log *slog.Logger, svc Outages, rs Rescheduler
 		Method:        http.MethodPost,
 		Path:          "/api/missed-items/{id}/reschedule",
 		Summary:       "Reschedule a missed item",
-		Description:   "Places the item into a later hour, at its start, its end, or a fixed minute, for that hour only; the clock template is not changed (§7.1, §7.2). Checks that need no build are refused per field; the hour is then rebuilt by a reschedule operation, which fails when the track breaks separation or a play rule at its place or does not fit whole.",
+		Description:   "Places the item into a later hour, at its start, its end, or a fixed time with seconds, for that hour only, like a one-time insert; the clock template is not changed (§7.1, §7.2). Checks that need no build are refused per field; the hour is then rebuilt by a reschedule operation, which fails (reason insert_does_not_fit or insert_blocked) when the track breaks a play rule at its place or does not fit whole.",
 		Tags:          tags,
 		DefaultStatus: http.StatusAccepted,
 		Errors:        errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *rescheduleInput) (*operationAcceptedOutput, error) {
 		id, err := rs.Reschedule(ctx, rotation.RescheduleRequest{
-			MissedID: in.ID, HourStart: in.Body.TargetHourStartUTC.UTC(), Placement: clocks.Placement(in.Body.Placement),
-			FixedMinute: in.Body.FixedMinute, FixedToleranceMS: in.Body.FixedToleranceMS,
+			MissedID: in.ID, HourStart: in.Body.TargetHourStartUTC.UTC(), Placement: rotation.Placement(in.Body.Placement),
+			OffsetMS: in.Body.OffsetMS, ToleranceMS: in.Body.ToleranceMS,
 		})
 		if err != nil {
 			return nil, err

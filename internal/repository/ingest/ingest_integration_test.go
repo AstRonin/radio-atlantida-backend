@@ -232,7 +232,7 @@ func TestBusy(t *testing.T) {
 	queued, soon, later, onAir, ended, stale, free := track("q"), track("s"), track("l"), track("a"), track("e"), track("st"), track("f")
 	item := func(id uint64, start time.Time, status string) {
 		f.exec(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
-VALUES ($1, $2, $3, 180000, 'clock', $4)`, f.clock, id, start, status)
+VALUES ($1, $2, $3, 180000, 'fill', $4)`, f.clock, id, start, status)
 	}
 	item(queued, now.Add(time.Hour), "queued") // queued far ahead still counts
 	item(soon, now.Add(5*time.Minute), "planned")

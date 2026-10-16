@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Artist is used for artist separation (§4, §7).
+// Artist is used for the artist interval of play rules (§4, §7.3).
 type Artist struct {
 	ID         uint64
 	Name       string
@@ -30,10 +30,9 @@ type ArtistStore interface {
 	// Rename changes the name. ErrArtistNotFound, ErrArtistNameTaken.
 	Rename(ctx context.Context, id uint64, name string) error
 	// Delete removes an artist. ErrArtistNotFound; ErrArtistHasHistory when
-	// the play log refers to it; ErrInUse when a track or a clock does.
+	// the play log refers to it; ErrInUse when a track does.
 	Delete(ctx context.Context, id uint64) error
-	// Users returns the tracks of the artist and the clocks that use it as
-	// filler, at most limit of each kind.
+	// Users returns the tracks of the artist, at most limit.
 	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
 }
 

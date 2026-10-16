@@ -11,8 +11,8 @@ import (
 
 // Periods are the retention periods, read before every pass from the admin
 // settings retention.play_log_days and retention.log_days (§6.3). The play
-// log period also bounds separation checks (§4.1); operations follow the
-// log period (§6.5).
+// log period also bounds the intervals of play rules (§4.1); operations
+// follow the log period (§6.5).
 type Periods struct {
 	PlayLog    time.Duration
 	Operations time.Duration

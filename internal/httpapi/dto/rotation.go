@@ -15,24 +15,35 @@ type TrackPlanItem struct {
 	Title           string    `json:"title"`
 	ArtistName      *string   `json:"artist_name,omitempty"`
 	DurationMS      int       `json:"duration_ms" doc:"Length of the track file."`
-	ElementID       *uint64   `json:"element_id,omitempty" doc:"The clock element it was planned for; absent for filler or a removed element."`
+	InsertID        *uint64   `json:"insert_id,omitempty" doc:"The template insert of an insert item; absent when the insert was removed since."`
+	HourInsertID    *uint64   `json:"hour_insert_id,omitempty" doc:"The one-time insert of an hour_insert or reschedule item."`
 	PlannedStartUTC time.Time `json:"planned_start_utc"`
 	PlannedInMS     int       `json:"planned_in_ms" minimum:"0" doc:"In point from the start of the file (the track's cue in when it was planned)."`
 	PlannedOutMS    int       `json:"planned_out_ms" doc:"Out point from the start of the file; the length is planned_out_ms - planned_in_ms, shorter than the track's air_duration_ms when truncated."`
-	Truncated       bool      `json:"truncated" doc:"The track crosses its segment end; it fades out and ends there."`
-	Source          string    `json:"source" enum:"clock,filler_pool,filler_random,filler_playlist,filler_artist,filler_answer,reschedule"`
+	Truncated       bool      `json:"truncated" doc:"The track crosses the next insert or the end of the hour; it fades out and ends there."`
+	Source          string    `json:"source" enum:"fill,rule,insert,hour_insert,reschedule,general"`
 	Status          string    `json:"status" enum:"planned,queued,aired,missed,replaced"`
+}
+
+// TrackPlanInsert is a one-time insert of a built hour (§7.2).
+type TrackPlanInsert struct {
+	ID          uint64  `json:"id"`
+	Placement   string  `json:"placement" enum:"start,end,fixed"`
+	OffsetMS    *int    `json:"offset_ms,omitempty" doc:"Target start of a fixed insert, whole seconds."`
+	ToleranceMS int     `json:"tolerance_ms"`
+	TrackID     uint64  `json:"track_id"`
+	MissedID    *uint64 `json:"missed_id,omitempty" doc:"The missed item it airs again (a reschedule)."`
 }
 
 // TrackPlanHour is one built hour of the plan.
 type TrackPlanHour struct {
-	HourStartUTC    time.Time       `json:"hour_start_utc"`
-	Clock           TrackPlanClock  `json:"clock"`
-	GridSlotID      *uint64         `json:"grid_slot_id,omitempty"`
-	Seed            int64           `json:"seed" doc:"Seed of the build; the same input and seed give the same plan."`
-	BuiltAt         time.Time       `json:"built_at"`
-	FillerRequestID *uint64         `json:"filler_request_id,omitempty" doc:"The filler reminder of this build."`
-	Items           []TrackPlanItem `json:"items" nullable:"false" doc:"In time order."`
+	HourStartUTC time.Time         `json:"hour_start_utc"`
+	Clock        TrackPlanClock    `json:"clock"`
+	GridSlotID   *uint64           `json:"grid_slot_id,omitempty"`
+	Seed         int64             `json:"seed" doc:"Seed of the build; the same input and seed give the same plan."`
+	BuiltAt      time.Time         `json:"built_at"`
+	Items        []TrackPlanItem   `json:"items" nullable:"false" doc:"In time order."`
+	Inserts      []TrackPlanInsert `json:"inserts" nullable:"false" doc:"One-time inserts of the hour, in ID order; they stay when the hour is rebuilt."`
 }
 
 // TrackPlan is the built hours of a range, in time order.
@@ -46,32 +57,16 @@ type TrackPlanRebuildBody struct {
 	To   time.Time `json:"to" doc:"... and before this one; at most 7 days after from. Hours that have started are never rebuilt."`
 }
 
+// HourInsertBody is the body of POST /api/track-plan/inserts.
+type HourInsertBody struct {
+	HourStartUTC time.Time `json:"hour_start_utc" doc:"Start of a future station hour within the track plan, not frozen."`
+	OffsetMS     int       `json:"offset_ms" minimum:"0" maximum:"3599000" multipleOf:"1000" doc:"Target start, whole seconds (18:30:00 in its hour is 1800000)."`
+	ToleranceMS  *int      `json:"tolerance_ms,omitempty" nullable:"true" minimum:"0" maximum:"600000" doc:"Default: setting rotation.default_fixed_tolerance_ms."`
+	TrackID      uint64    `json:"track_id" minimum:"1"`
+}
+
 // OperationAccepted is the answer to a request that started an
 // asynchronous operation (§6.5).
 type OperationAccepted struct {
 	OperationID uint64 `json:"operation_id" doc:"Its outcome arrives as <kind>.completed or <kind>.failed, and through GET /api/operations/{id}."`
-}
-
-// FillerRequest is a filler reminder (§7).
-type FillerRequest struct {
-	ID            uint64    `json:"id"`
-	ClockID       uint64    `json:"clock_id"`
-	ClockName     string    `json:"clock_name"`
-	HourStartUTC  time.Time `json:"hour_start_utc"`
-	Reason        string    `json:"reason" enum:"short_clock,pool_empty"`
-	Mode          string    `json:"mode" enum:"none,ask,pool" doc:"none: the clock is incomplete; ask: the holder asks at air time; pool: the pool is empty."`
-	Status        string    `json:"status" enum:"pending,answered,defaulted,expired"`
-	CreatedAt     time.Time `json:"created_at"`
-	DeadlineAt    time.Time `json:"deadline_at" doc:"Without an answer by then, the clock's default filler mode applies."`
-	AnswerTrackID *uint64   `json:"answer_track_id,omitempty"`
-}
-
-// FillerRequestList is a list of reminders, newest hour first.
-type FillerRequestList struct {
-	Items []FillerRequest `json:"items" nullable:"false"`
-}
-
-// FillerAnswerBody is the body of POST /api/filler-requests/{id}/answer.
-type FillerAnswerBody struct {
-	TrackID uint64 `json:"track_id" minimum:"1" doc:"Fills the hour's first waiting segment; the clock's default filler mode fills the others."`
 }

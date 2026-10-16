@@ -3,7 +3,7 @@ package dto
 import "time"
 
 // PlaylistType labels playlists and tracks (§4). It is only a label: it
-// does not limit what a clock element can combine.
+// does not limit which playlists a clock can combine.
 type PlaylistType struct {
 	ID            uint64    `json:"id"`
 	Code          string    `json:"code" doc:"Unique slug; never changes after creation."`
@@ -43,9 +43,17 @@ type Playlist struct {
 	ID          uint64    `json:"id"`
 	Name        string    `json:"name"`
 	Type        TypeRef   `json:"type"`
+	ClockRule   string    `json:"clock_rule" enum:"fill,spread,start,end,start_end,middle" doc:"Placement rule of the playlist in clocks; a clock may override it."`
+	ClockCount  *int      `json:"clock_count,omitempty" doc:"Tracks of the spread rule."`
 	TrackCount  int       `json:"track_count"`
 	PlayRuleIDs []uint64  `json:"play_rule_ids" nullable:"false" doc:"Play rules applied to every track of the playlist, in ID order."`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// PlaylistSaved is a playlist after an update.
+type PlaylistSaved struct {
+	Playlist
+	BuildOperationID *uint64 `json:"build_operation_id,omitempty" doc:"Set when the placement rule changed and clocks use the playlist: the clock_build operation that rebuilds their planned hours."`
 }
 
 // PlaylistList is the playlists in name order.
@@ -55,8 +63,10 @@ type PlaylistList struct {
 
 // PlaylistBody is the body of POST /api/playlists and PUT /api/playlists/{id}.
 type PlaylistBody struct {
-	Name   string `json:"name" minLength:"1" maxLength:"200"`
-	TypeID uint64 `json:"type_id" minimum:"1" doc:"Playlist type (GET /api/playlist-types)."`
+	Name       string `json:"name" minLength:"1" maxLength:"200"`
+	TypeID     uint64 `json:"type_id" minimum:"1" doc:"Playlist type (GET /api/playlist-types)."`
+	ClockRule  string `json:"clock_rule,omitempty" enum:"fill,spread,start,end,start_end,middle" default:"fill" doc:"Placement rule in clocks: fill the time left, spread clock_count tracks over the hour, the first track, the last track, both, or a track at about 30:00."`
+	ClockCount *int   `json:"clock_count,omitempty" nullable:"true" minimum:"1" maximum:"12" doc:"Required for spread, not allowed otherwise."`
 }
 
 // SetPlaylistTracks is the body of PUT /api/playlists/{id}/tracks.
@@ -75,7 +85,7 @@ type PlayRuleIDs struct {
 	RuleIDs []uint64 `json:"rule_ids" nullable:"false" doc:"In ID order."`
 }
 
-// Artist is used for artist separation.
+// Artist is used for the artist interval of play rules.
 type Artist struct {
 	ID         uint64 `json:"id"`
 	Name       string `json:"name"`
@@ -89,7 +99,7 @@ type ArtistList struct {
 
 // ArtistBody is the body of POST /api/artists and PUT /api/artists/{id}.
 type ArtistBody struct {
-	Name string `json:"name" minLength:"1" maxLength:"200" doc:"Unique: artist separation counts plays per artist."`
+	Name string `json:"name" minLength:"1" maxLength:"200" doc:"Unique: the artist interval of play rules counts plays per artist."`
 }
 
 // ArtistRef is the artist of a track.
@@ -202,7 +212,7 @@ type TrackRefusal struct {
 	TrackID uint64      `json:"track_id"`
 	Code    string      `json:"code" enum:"track_in_use,track_has_history,track_not_found" doc:"Why the track was kept; the codes of DELETE /api/tracks/{id}."`
 	Title   string      `json:"title,omitempty" doc:"Title of the track; absent for track_not_found."`
-	UsedBy  []EntityRef `json:"used_by,omitempty" nullable:"false" doc:"Clocks whose filler pool holds the track (track_in_use)."`
+	UsedBy  []EntityRef `json:"used_by,omitempty" nullable:"false" doc:"Clocks with an insert of the track and its one-time inserts (track_in_use)."`
 }
 
 // ReviewTracksBody is the body of POST /api/tracks/review.

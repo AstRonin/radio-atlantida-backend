@@ -58,6 +58,7 @@ type ruleRow struct {
 	WindowTo           pgtype.Time `db:"window_to"`
 	Weekdays           []int16     `db:"weekdays"`
 	MinIntervalMinutes *int32      `db:"min_interval_minutes"`
+	ArtistMinInterval  *int32      `db:"artist_min_interval_minutes"`
 	MaxPerHour         *int32      `db:"max_per_hour"`
 	Notes              string      `db:"notes"`
 	CreatedAt          time.Time   `db:"created_at"`
@@ -69,12 +70,13 @@ func (r ruleRow) domain() playrules.Rule {
 	out := playrules.Rule{
 		ID: r.ID,
 		RuleInput: playrules.RuleInput{
-			Name:               r.Name,
-			WindowFrom:         timeOfDay(r.WindowFrom),
-			WindowTo:           timeOfDay(r.WindowTo),
-			MinIntervalMinutes: intPtr(r.MinIntervalMinutes),
-			MaxPerHour:         intPtr(r.MaxPerHour),
-			Notes:              r.Notes,
+			Name:                     r.Name,
+			WindowFrom:               timeOfDay(r.WindowFrom),
+			WindowTo:                 timeOfDay(r.WindowTo),
+			MinIntervalMinutes:       intPtr(r.MinIntervalMinutes),
+			ArtistMinIntervalMinutes: intPtr(r.ArtistMinInterval),
+			MaxPerHour:               intPtr(r.MaxPerHour),
+			Notes:                    r.Notes,
 		},
 		CreatedAt:   r.CreatedAt.UTC(),
 		TrackIDs:    r.TrackIDs,
@@ -118,7 +120,7 @@ func int32Ptr(v *int) *int32 {
 	if v == nil {
 		return nil
 	}
-	n := int32(*v) //nolint:gosec // G115: validated range (1 ... 10080 minutes, 1 ... 60 per hour).
+	n := int32(*v) //nolint:gosec // G115: validated range (1 ... 525600 minutes, 1 ... 60 per hour).
 	return &n
 }
 
@@ -137,7 +139,7 @@ func weekdays(days []int) []int16 {
 // ix_playlist_play_rules_rule_id.
 const selectRules = `
 SELECT r.id, r.name, r.window_from, r.window_to, r.weekdays, r.min_interval_minutes,
-       r.max_per_hour, r.notes, r.created_at,
+       r.artist_min_interval_minutes, r.max_per_hour, r.notes, r.created_at,
        ARRAY(SELECT tr.track_id FROM track_play_rules tr WHERE tr.rule_id = r.id ORDER BY tr.track_id) AS track_ids,
        ARRAY(SELECT pr.playlist_id FROM playlist_play_rules pr WHERE pr.rule_id = r.id ORDER BY pr.playlist_id) AS playlist_ids
 FROM play_rules r`
@@ -172,7 +174,7 @@ func (s *Store) Get(ctx context.Context, id uint64) (playrules.Rule, error) {
 func ruleArgs(in playrules.RuleInput) []any {
 	return []any{
 		in.Name, pgTime(in.WindowFrom), pgTime(in.WindowTo), weekdays(in.Weekdays),
-		int32Ptr(in.MinIntervalMinutes), int32Ptr(in.MaxPerHour), in.Notes,
+		int32Ptr(in.MinIntervalMinutes), int32Ptr(in.ArtistMinIntervalMinutes), int32Ptr(in.MaxPerHour), in.Notes,
 	}
 }
 
@@ -180,8 +182,9 @@ func ruleArgs(in playrules.RuleInput) []any {
 func (s *Store) Create(ctx context.Context, in playrules.RuleInput) (uint64, error) {
 	var id uint64
 	err := s.q.QueryRow(ctx, `
-INSERT INTO play_rules (name, window_from, window_to, weekdays, min_interval_minutes, max_per_hour, notes)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO play_rules (name, window_from, window_to, weekdays, min_interval_minutes,
+                        artist_min_interval_minutes, max_per_hour, notes)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id`, ruleArgs(in)...).Scan(&id)
 	if err != nil {
 		return 0, writeError("insert play rule", err)
@@ -194,7 +197,7 @@ func (s *Store) Update(ctx context.Context, id uint64, in playrules.RuleInput) e
 	tag, err := s.q.Exec(ctx, `
 UPDATE play_rules
 SET name = $2, window_from = $3, window_to = $4, weekdays = $5,
-    min_interval_minutes = $6, max_per_hour = $7, notes = $8
+    min_interval_minutes = $6, artist_min_interval_minutes = $7, max_per_hour = $8, notes = $9
 WHERE id = $1`, append([]any{id}, ruleArgs(in)...)...)
 	if err != nil {
 		return writeError(fmt.Sprintf("update play rule %d", id), err)
@@ -363,4 +366,16 @@ func (s *Store) TrackRules(ctx context.Context, trackID uint64) ([]uint64, error
 func (s *Store) PlaylistRules(ctx context.Context, playlistID uint64) ([]uint64, error) {
 	return s.ids(ctx, "select play rules of playlist",
 		`SELECT rule_id FROM playlist_play_rules WHERE playlist_id = $1 ORDER BY rule_id`, playlistID)
+}
+
+// LongestInterval returns the longest track or artist interval of any rule,
+// in minutes; 0 without one. play_rules holds tens of rows: a scan.
+func (s *Store) LongestInterval(ctx context.Context) (int, error) {
+	var m int
+	err := s.q.QueryRow(ctx, `
+SELECT COALESCE(GREATEST(max(min_interval_minutes), max(artist_min_interval_minutes)), 0) FROM play_rules`).Scan(&m)
+	if err != nil {
+		return 0, fmt.Errorf("select longest play rule interval: %w", err)
+	}
+	return m, nil
 }

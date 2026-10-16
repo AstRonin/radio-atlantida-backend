@@ -99,36 +99,44 @@ func TestTypes(t *testing.T) {
 	require.Equal(t, time.UTC, got.CreatedAt.Location())
 }
 
-// A playlist is used by a clock in three ways; each one names the clock.
+// A playlist is used by a clock as a clock playlist or as the source of an
+// insert; each names the clock. A changed placement rule touches only the
+// clocks that use the playlist as a clock playlist.
 func TestPlaylistUsers(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
 	pop := f.playlist("Pop")
 	artist := f.id(`INSERT INTO artists (name) VALUES ('ABBA') RETURNING id`)
+	f.track("song", &artist)
 
-	inElement := f.id(`INSERT INTO clocks (name) VALUES ('B element') RETURNING id`)
-	e := f.id(`INSERT INTO clock_elements (clock_id, position, nominal_duration_ms) VALUES ($1, 0, 1000) RETURNING id`, inElement)
-	f.id(`INSERT INTO clock_element_playlists (clock_element_id, playlist_id) VALUES ($1, $2) RETURNING playlist_id`, e, pop)
-	asFiller := f.id(`INSERT INTO clocks (name) VALUES ('C element filler') RETURNING id`)
-	f.id(`INSERT INTO clock_elements (clock_id, position, nominal_duration_ms, filler_mode, filler_playlist_id)
-	      VALUES ($1, 0, 1000, 'playlist', $2) RETURNING id`, asFiller, pop)
-	asDefault := f.id(`INSERT INTO clocks (name, default_filler_mode, default_filler_playlist_id)
-	                   VALUES ('A default filler', 'playlist', $1) RETURNING id`, pop)
-	f.id(`INSERT INTO clocks (name, default_filler_mode, default_filler_artist_id) VALUES ('D artist', 'artist', $1) RETURNING id`, artist)
+	inClock := f.id(`INSERT INTO clocks (name, updated_at) VALUES ('A playlist', '2026-01-01Z') RETURNING id`)
+	f.id(`INSERT INTO clock_playlists (clock_id, playlist_id, position) VALUES ($1, $2, 0) RETURNING clock_id`, inClock, pop)
+	asInsert := f.id(`INSERT INTO clocks (name, updated_at) VALUES ('B insert', '2026-01-01Z') RETURNING id`)
+	f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, playlist_id) VALUES ($1, 0, $2) RETURNING id`, asInsert, pop)
 
 	err := f.playlists.Delete(ctx, pop)
 	require.ErrorIs(t, err, library.ErrInUse)
 	users, err := f.playlists.Users(ctx, pop, library.MaxUsers)
 	require.NoError(t, err)
 	require.Equal(t, []library.Ref{
-		{Kind: library.KindClock, ID: asDefault, Name: "A default filler"},
-		{Kind: library.KindClock, ID: inElement, Name: "B element"},
-		{Kind: library.KindClock, ID: asFiller, Name: "C element filler"},
+		{Kind: library.KindClock, ID: inClock, Name: "A playlist"},
+		{Kind: library.KindClock, ID: asInsert, Name: "B insert"},
 	}, users)
 
+	touched, err := f.playlists.TouchClocks(ctx, pop)
+	require.NoError(t, err)
+	require.True(t, touched)
+	var stale int
+	require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT count(*) FROM clocks WHERE updated_at > '2026-01-02Z'`).Scan(&stale))
+	require.Equal(t, 1, stale, "only the clock that has the playlist")
+	touched, err = f.playlists.TouchClocks(ctx, f.playlist("Unused"))
+	require.NoError(t, err)
+	require.False(t, touched)
+
+	// An artist is used only by its tracks.
 	users, err = f.artists.Users(ctx, artist, library.MaxUsers)
 	require.NoError(t, err)
-	require.Equal(t, []string{"D artist"}, []string{users[0].Name})
+	require.Equal(t, []library.Ref{{Kind: library.KindTrack, ID: users[0].ID, Name: "song"}}, users)
 }
 
 func TestPlaylistTracksAndLock(t *testing.T) {
@@ -175,7 +183,7 @@ func TestTrackHistoryAndRollback(t *testing.T) {
 	planned := f.track("planned", nil)
 	clock := f.id(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
 	f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
-	      VALUES ($1, $2, now(), 200000, 'clock') RETURNING id`, clock, planned)
+	      VALUES ($1, $2, now(), 200000, 'fill') RETURNING id`, clock, planned)
 
 	require.ErrorIs(t, f.tracks.Delete(ctx, planned), library.ErrTrackHasHistory, "the track plan counts as history")
 	require.ErrorIs(t, f.tracks.Delete(ctx, 9999), library.ErrTrackNotFound)
@@ -266,41 +274,43 @@ func TestDeleteTracks(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
 	pop := f.playlist("Pop")
-	free, pooled, played, planned, inserted := f.track("free", nil), f.track("pooled", nil), f.track("played", nil),
+	free, inClock, played, planned, inserted := f.track("free", nil), f.track("in clock", nil), f.track("played", nil),
 		f.track("planned", nil), f.track("inserted", nil)
 	require.NoError(t, f.tracks.SetPlaylists(ctx, free, []uint64{pop}))
 	rule := f.id(`INSERT INTO play_rules (name, max_per_hour) VALUES ('once', 1) RETURNING id`)
 	f.id(`INSERT INTO track_play_rules (track_id, rule_id) VALUES ($1, $2) RETURNING track_id`, free, rule)
 
 	clock := f.id(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
-	f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 0) RETURNING id`, clock, pooled)
+	f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 0, $2) RETURNING id`, clock, inClock)
 	f.id(`INSERT INTO play_log (track_id, status, planned_start_utc, started_at, actual_duration_ms)
 	      VALUES ($1, 'aired', now(), now(), 1000) RETURNING id`, played)
 	f.id(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source)
-	      VALUES ($1, $2, now(), 200000, 'clock') RETURNING id`, clock, planned)
-	f.id(`INSERT INTO hour_inserts (hour_start_utc, track_id, placement) VALUES (date_trunc('hour', now()), $1, 'start') RETURNING id`, inserted)
+	      VALUES ($1, $2, now(), 200000, 'fill') RETURNING id`, clock, planned)
+	hourInsert := f.id(`INSERT INTO hour_inserts (hour_start_utc, track_id, placement) VALUES ('2026-10-15 08:00Z', $1, 'start') RETURNING id`, inserted)
 
 	evening := f.id(`INSERT INTO clocks (name) VALUES ('Evening') RETURNING id`)
-	f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 0) RETURNING id`, evening, pooled)
-	f.id(`INSERT INTO clock_filler_pool (clock_id, track_id, position) VALUES ($1, $2, 1) RETURNING id`, evening, pooled)
-	blockers, err := f.tracks.Blockers(ctx, []uint64{pooled, played, 9999}, 1)
+	f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 0, $2) RETURNING id`, evening, inClock)
+	f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 60000, $2) RETURNING id`, evening, inClock)
+	blockers, err := f.tracks.Blockers(ctx, []uint64{inClock, played, 9999}, 1)
 	require.NoError(t, err)
 	require.Equal(t, map[uint64]library.TrackBlockers{
-		pooled: {Title: "pooled", UsedBy: []library.Ref{{Kind: library.KindClock, ID: evening, Name: "Evening"}}},
-		played: {Title: "played", History: true},
+		inClock: {Title: "in clock", UsedBy: []library.Ref{{Kind: library.KindClock, ID: evening, Name: "Evening"}}},
+		played:  {Title: "played", History: true},
 	}, blockers, "a clock once, in name order, at most limit; unknown IDs absent")
 
 	svc := library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, noneOnAir{}, slog.New(slog.DiscardHandler))
-	res, err := svc.DeleteTracks(ctx, []uint64{free, pooled, played, planned, inserted, 9999})
+	res, err := svc.DeleteTracks(ctx, []uint64{free, inClock, played, planned, inserted, 9999})
 	require.NoError(t, err)
 	require.Equal(t, []uint64{free}, res.Deleted)
 	require.Equal(t, []library.TrackRefusal{
-		{TrackID: pooled, Title: "pooled", Err: library.ErrTrackInUse, UsedBy: []library.Ref{
+		{TrackID: inClock, Title: "in clock", Err: library.ErrTrackInUse, UsedBy: []library.Ref{
 			{Kind: library.KindClock, ID: evening, Name: "Evening"}, {Kind: library.KindClock, ID: clock, Name: "Morning"},
 		}},
 		{TrackID: played, Title: "played", Err: library.ErrTrackHasHistory},
 		{TrackID: planned, Title: "planned", Err: library.ErrTrackHasHistory},
-		{TrackID: inserted, Title: "inserted", Err: library.ErrTrackHasHistory},
+		{TrackID: inserted, Title: "inserted", Err: library.ErrTrackInUse, UsedBy: []library.Ref{
+			{Kind: library.KindHourInsert, ID: hourInsert, Name: "2026-10-15T08:00Z"},
+		}},
 		{TrackID: 9999, Err: library.ErrTrackNotFound},
 	}, res.Refused)
 

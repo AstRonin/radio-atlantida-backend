@@ -116,7 +116,7 @@ func TestRegistryDefinitions(t *testing.T) {
 	keyPattern := regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`) // ck_settings_key
 	groups := []settings.Group{
 		settings.GroupStation, settings.GroupStream, settings.GroupLiquidsoap, settings.GroupRotation,
-		settings.GroupFiller, settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout, settings.GroupAir,
+		settings.GroupOutage, settings.GroupRetention, settings.GroupPlayout, settings.GroupAir,
 		settings.GroupImport,
 	}
 	reg := settings.NewRegistry()
@@ -270,16 +270,6 @@ func TestSetRefusals(t *testing.T) {
 		{"air.queued_count", `-1`, settings.RuleRange},
 		{"air.queued_count", `51`, settings.RuleRange},
 		{"air.queued_count", `2.5`, settings.RuleType},
-		{"filler.fallback", `"random"`, settings.RuleType},
-		{"filler.fallback", `null`, settings.RuleType},
-		{"filler.fallback", `{}`, settings.RuleRequired},
-		{"filler.fallback", `{"mode":"ask"}`, settings.RuleEnum},
-		{"filler.fallback", `{"mode":"pool"}`, settings.RuleEnum},
-		{"filler.fallback", `{"mode":"playlist"}`, settings.RuleRequired},
-		{"filler.fallback", `{"mode":"random","source_id":3}`, settings.RuleInvalid},
-		{"filler.fallback", `{"mode":"artist","source_id":0}`, settings.RuleRange},
-		{"filler.fallback", `{"mode":"random","extra":1}`, settings.RuleUnknownField},
-		{"filler.fallback", `{"mode":1}`, settings.RuleType},
 		{"station.name", `"a" "b"`, settings.RuleType},
 	}
 	for _, tt := range tests {
@@ -318,8 +308,6 @@ func TestSetAccepts(t *testing.T) {
 		{"air.played_count", `50`, 50},
 		{"air.queued_count", `0`, 0},
 		{"air.queued_count", `50`, 50},
-		{"filler.fallback", `{"mode":"random"}`, settings.FillerFallback{Mode: "random"}},
-		{"filler.fallback", `{"mode":"artist","source_id":4}`, settings.FillerFallback{Mode: "artist", SourceID: new(uint64(4))}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
@@ -394,4 +382,25 @@ func TestStoreErrorsAreWrapped(t *testing.T) {
 	require.ErrorContains(t, err, "get setting station.name")
 	_, err = svc.Set(t.Context(), "station.name", json.RawMessage(`"X"`))
 	require.ErrorContains(t, err, "save setting station.name")
+}
+
+func TestGuardRefusesBeforeSave(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	svc, _ := newService(t, store)
+	settings.Guard(svc, settings.RetentionPlayLogDays, func(_ context.Context, days int) error {
+		if days < 5 {
+			return settings.Refuse(settings.RetentionPlayLogDays.Name(), settings.RuleIntervalBeyondRetention, "a play rule needs 5 days")
+		}
+		return nil
+	})
+	_, err := svc.Set(t.Context(), "retention.play_log_days", json.RawMessage(`4`))
+	var ive *settings.InvalidValueError
+	require.ErrorAs(t, err, &ive)
+	require.Equal(t, settings.RuleIntervalBeyondRetention, ive.Rule)
+	require.Empty(t, store.rows, "nothing saved")
+
+	s, err := svc.Set(t.Context(), "retention.play_log_days", json.RawMessage(`5`))
+	require.NoError(t, err)
+	require.Equal(t, 5, s.Value)
 }

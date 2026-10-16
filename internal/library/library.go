@@ -71,6 +71,8 @@ const (
 	KindPlaylist = "playlist"
 	KindTrack    = "track"
 	KindClock    = "clock"
+	// KindHourInsert is a one-time insert of a planned hour (§7.2).
+	KindHourInsert = "hour_insert"
 )
 
 // Ref names an entity that blocks a delete.

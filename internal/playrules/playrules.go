@@ -4,10 +4,13 @@
 //
 // A rule may combine a time window of the day (station local time, may
 // cross midnight) with weekdays, a minimum interval between starts of the
-// same track, and a maximum number of starts per clock hour. At least one
-// part is set. A rule only limits; how often a slot appears is set by the
-// clock. Rotation (internal/rotation) checks the rules and never relaxes
-// them.
+// same track, a minimum interval between starts of tracks of the same
+// artist, and a maximum number of starts per clock hour. At least one part
+// is set. Separation is such a rule ("Music rotation", docs/phase-23-plan.md
+// decision 10). An interval is at most the play log retention, because it
+// is checked against aired history. A rule only limits; how often a
+// playlist appears in the hour is its placement rule. Rotation
+// (internal/rotation) checks the rules and never relaxes them.
 //
 // Persistence goes through internal/repository/playrules.
 package playrules
@@ -77,8 +80,11 @@ type RuleInput struct {
 	// that crosses midnight, the day on which the window starts.
 	Weekdays           []int
 	MinIntervalMinutes *int
-	MaxPerHour         *int
-	Notes              string
+	// ArtistMinIntervalMinutes: no track of the same artist starts within
+	// this many minutes, whichever playlist it comes from.
+	ArtistMinIntervalMinutes *int
+	MaxPerHour               *int
+	Notes                    string
 }
 
 // Ref names a target that blocks a delete.
@@ -142,7 +148,15 @@ type Store interface {
 	// playlist, in ID order.
 	TrackRules(ctx context.Context, trackID uint64) ([]uint64, error)
 	PlaylistRules(ctx context.Context, playlistID uint64) ([]uint64, error)
+	// LongestInterval returns the longest track or artist interval of any
+	// rule, in minutes; 0 without one.
+	LongestInterval(ctx context.Context) (int, error)
 }
+
+// MaxIntervalFunc returns the longest interval a rule may set, in minutes:
+// the play log keeps aired history only for its retention (§4.1), so a
+// longer interval would be checked against history that is gone.
+type MaxIntervalFunc func(ctx context.Context) (int, error)
 
 // TxRunner runs fn in one transaction (*db.DB).
 type TxRunner interface {
@@ -154,13 +168,14 @@ const dbTimeout = 5 * time.Second
 
 // Service manages play rules.
 type Service struct {
-	tx    TxRunner
-	store Store
+	tx          TxRunner
+	store       Store
+	maxInterval MaxIntervalFunc
 }
 
 // NewService returns the service.
-func NewService(tx TxRunner, store Store) *Service {
-	return &Service{tx: tx, store: store}
+func NewService(tx TxRunner, store Store, maxInterval MaxIntervalFunc) *Service {
+	return &Service{tx: tx, store: store, maxInterval: maxInterval}
 }
 
 // List returns every rule with its targets.
@@ -183,12 +198,12 @@ func (s *Service) Get(ctx context.Context, id uint64) (Rule, error) {
 
 // Create adds a rule without targets.
 func (s *Service) Create(ctx context.Context, in RuleInput) (Rule, error) {
-	in, err := Validate(in)
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	in, err := s.validate(ctx, in)
 	if err != nil {
 		return Rule{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
 	id, err := s.store.Create(ctx, in)
 	if err != nil {
 		return Rule{}, asFieldError(err)
@@ -198,12 +213,12 @@ func (s *Service) Create(ctx context.Context, in RuleInput) (Rule, error) {
 
 // Update changes a rule; its targets stay.
 func (s *Service) Update(ctx context.Context, id uint64, in RuleInput) (Rule, error) {
-	in, err := Validate(in)
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	in, err := s.validate(ctx, in)
 	if err != nil {
 		return Rule{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
-	defer cancel()
 	if err := s.store.Update(ctx, id, in); err != nil {
 		return Rule{}, asFieldError(err)
 	}
@@ -279,10 +294,31 @@ func (s *Service) SetPlaylistRules(ctx context.Context, playlistID uint64, ruleI
 	return s.store.PlaylistRules(ctx, playlistID)
 }
 
+// LongestIntervalMinutes returns the longest track or artist interval of
+// any rule; 0 without one. The play log retention may not become shorter.
+func (s *Service) LongestIntervalMinutes(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	m, err := s.store.LongestInterval(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read longest play rule interval: %w", err)
+	}
+	return m, nil
+}
+
+func (s *Service) validate(ctx context.Context, in RuleInput) (RuleInput, error) {
+	limit, err := s.maxInterval(ctx)
+	if err != nil {
+		return RuleInput{}, fmt.Errorf("read play log retention: %w", err)
+	}
+	return Validate(in, limit)
+}
+
 // Validate checks a rule and returns it normalised (trimmed name and notes,
-// weekdays in order). The database enforces the same invariants
+// weekdays in order). maxIntervalMinutes caps both intervals (the play log
+// retention). The database enforces the other invariants
 // (ck_play_rules_*); this check names the field.
-func Validate(in RuleInput) (RuleInput, error) {
+func Validate(in RuleInput, maxIntervalMinutes int) (RuleInput, error) {
 	errs := &validation.Error{}
 	in.Name = strings.TrimSpace(in.Name)
 	in.Notes = strings.TrimSpace(in.Notes)
@@ -320,16 +356,27 @@ func Validate(in RuleInput) (RuleInput, error) {
 		}
 		in.Weekdays = days
 	}
-	if in.MinIntervalMinutes != nil && *in.MinIntervalMinutes < 1 {
-		errs.Add("min_interval_minutes", validation.Range, "must be at least 1")
+	for _, iv := range []struct {
+		field string
+		v     *int
+	}{{"min_interval_minutes", in.MinIntervalMinutes}, {"artist_min_interval_minutes", in.ArtistMinIntervalMinutes}} {
+		switch {
+		case iv.v == nil:
+		case *iv.v < 1:
+			errs.Add(iv.field, validation.Range, "must be at least 1")
+		case *iv.v > maxIntervalMinutes:
+			errs.Add(iv.field, validation.IntervalBeyondRetention,
+				"must be at most %d minutes: the play log keeps aired history for that long (setting retention.play_log_days)",
+				maxIntervalMinutes)
+		}
 	}
 	if in.MaxPerHour != nil && *in.MaxPerHour < 1 {
 		errs.Add("max_per_hour", validation.Range, "must be at least 1")
 	}
 	if in.WindowFrom == nil && in.WindowTo == nil && in.Weekdays == nil &&
-		in.MinIntervalMinutes == nil && in.MaxPerHour == nil {
+		in.MinIntervalMinutes == nil && in.ArtistMinIntervalMinutes == nil && in.MaxPerHour == nil {
 		errs.Add("", validation.Required,
-			"set at least one limit: a window, weekdays, min_interval_minutes, or max_per_hour")
+			"set at least one limit: a window, weekdays, min_interval_minutes, artist_min_interval_minutes, or max_per_hour")
 	}
 	return in, errs.Err()
 }

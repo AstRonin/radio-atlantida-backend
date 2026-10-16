@@ -39,7 +39,7 @@ func TestSlots(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, grid.Slot{
 		ID: id, Weekday: 1, Hour: 8, ValidFrom: day("2026-10-01"), ValidTo: new(day("2026-10-31")),
-		Clock: grid.ClockRef{ID: clockID, Name: "Morning", Status: "incomplete"},
+		Clock: grid.ClockRef{ID: clockID, Name: "Morning"},
 	}, got)
 
 	// The exclusion constraint refuses an overlap; an unknown clock is
