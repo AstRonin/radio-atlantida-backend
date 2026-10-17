@@ -1,0 +1,29 @@
+Radio Atlantida — View-Only License
+
+Copyright (c) 2026 Radio Atlantida authors. All rights reserved.
+
+1. Grant of permission
+
+You are granted a limited, non-exclusive, non-transferable, revocable permission to VIEW, READ and STUDY the source code, configuration and documentation contained in this repository, solely for personal, non-commercial learning and reference purposes.
+
+2. Restrictions
+
+Except as expressly permitted in Section 1, you may NOT:
+
+(a) run, execute, build, deploy, host, or otherwise operate the software, or any part of it;
+(b) copy, reproduce, store in a retrievable form, modify, adapt, translate, or create derivative works based on it;
+(c) distribute, publish, upload, post, sublicense, sell, rent, lease, lend, or otherwise make the software or any part of it available to any other person, including by providing copies online;
+(d) use the software or any part of it for any commercial purpose, including as part of a product, service, website, or internal business tool, or to train, fine-tune, or evaluate machine learning models;
+(e) remove, alter, or obscure this license or any copyright or proprietary notices.
+
+3. Ownership
+
+The software and its documentation are and remain the exclusive property of their authors. No rights or licenses are granted by implication, estoppel, or otherwise, other than those expressly stated in this license.
+
+4. Termination
+
+This license terminates automatically if you breach any of its terms. Upon termination you must stop all use of the material and destroy any copies in your possession.
+
+5. Disclaimer of warranty
+
+THE SOFTWARE AND DOCUMENTATION ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
