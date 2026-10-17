@@ -120,12 +120,12 @@ func TestImportSkipsOriginalsOfCopies(t *testing.T) {
 func TestImportTitleAndArtist(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	f.tools.audio("m/Morning - DJ Ann.mp3", "1", mp3Info("", ""), nil)
-	f.tools.audio("m/Evening – DJ Ann.mp3", "2", mp3Info("", ""), nil)
+	f.tools.audio("m/DJ Ann - Morning.mp3", "1", mp3Info("", ""), nil)
+	f.tools.audio("m/DJ Ann – Evening.mp3", "2", mp3Info("", ""), nil)
 	f.tools.audio("m/Jay-Z - Song.mp3", "3", mp3Info("", ""), nil)
-	f.tools.audio("m/Tagged - Name Artist.mp3", "4", mp3Info("Tag Title", "Tag Artist"), nil)
-	f.tools.audio("m/Only Title - Name Artist.mp3", "5", mp3Info("Tag Title 2", ""), nil)
-	f.tools.audio("m/Name Title - Name Artist.mp3", "6", mp3Info("", "Tag Artist"), nil)
+	f.tools.audio("m/Name Artist - Tagged.mp3", "4", mp3Info("Tag Title", "Tag Artist"), nil)
+	f.tools.audio("m/Name Artist - Only Title.mp3", "5", mp3Info("Tag Title 2", ""), nil)
+	f.tools.audio("m/Name Artist - Name Title.mp3", "6", mp3Info("", "Tag Artist"), nil)
 	// The title rule removes what the API refuses.
 	f.tools.audio("m/broken.mp3", "7", mp3Info(" Broken\x00 \r\n tag\t  title ", ""), nil)
 	f.tools.audio("m/Two  spaces.mp3", "8", mp3Info("\x01", ""), nil)
@@ -146,12 +146,12 @@ func TestImportTitleAndArtist(t *testing.T) {
 		byPath[c.FilePath] = g
 	}
 	require.Equal(t, map[string]got{
-		"m/Morning - DJ Ann.mp3":         {"Morning", "DJ Ann"},
-		"m/Evening – DJ Ann.mp3":         {"Evening", "DJ Ann"},
+		"m/DJ Ann - Morning.mp3":         {"Morning", "DJ Ann"},
+		"m/DJ Ann – Evening.mp3":         {"Evening", "DJ Ann"},
 		"m/Jay-Z - Song.mp3":             {"Jay-Z - Song", ""},
-		"m/Tagged - Name Artist.mp3":     {"Tag Title", "Tag Artist"},
-		"m/Only Title - Name Artist.mp3": {"Tag Title 2", "Name Artist"},
-		"m/Name Title - Name Artist.mp3": {"Name Title", "Tag Artist"},
+		"m/Name Artist - Tagged.mp3":     {"Tag Title", "Tag Artist"},
+		"m/Name Artist - Only Title.mp3": {"Tag Title 2", "Name Artist"},
+		"m/Name Artist - Name Title.mp3": {"Name Title", "Tag Artist"},
 		"m/broken.mp3":                   {"Broken tag title", ""},
 		"m/Two  spaces.mp3":              {"Two spaces", ""},
 	}, byPath)
@@ -162,7 +162,7 @@ func TestImportArtistOfTheRequestWins(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.store.artists[7] = "House Band"
-	f.tools.audio("m/Morning - DJ Ann.mp3", "1", mp3Info("", "Tag Artist"), nil)
+	f.tools.audio("m/DJ Ann - Morning.mp3", "1", mp3Info("", "Tag Artist"), nil)
 	f.tools.audio("m/plain.mp3", "2", mp3Info("", ""), nil)
 	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "m", TypeID: 1, ArtistID: new(uint64(7))})
 	require.NoError(t, err)

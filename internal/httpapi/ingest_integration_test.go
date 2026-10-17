@@ -79,7 +79,7 @@ func TestImportFolder(t *testing.T) {
 	good := []string{"-ac", "2", "-ar", "44100", "-b:a", "320k", "-af", "volume=5.8dB"}
 	a.tone("music/talk/low.mp3", "-ac", "1", "-ar", "22050", "-b:a", "64k", "-af", "volume=-20dB",
 		"-metadata", "title=Low Tone", "-metadata", "artist=Test Artist")
-	a.tone("music/Morning - DJ Ann.mp3", append(good, "-metadata", "comment=1")...)
+	a.tone("music/DJ Ann - Morning.mp3", append(good, "-metadata", "comment=1")...)
 	a.tone("music/Jay-Z - Song.mp3", append(good, "-metadata", "comment=2")...)
 	a.tone("jingles/id1.mp3", append(good, "-metadata", "comment=3")...)
 	a.tone("jingles/id2.mp3", append(good, "-metadata", "comment=4")...)
@@ -130,7 +130,7 @@ func TestImportFolder(t *testing.T) {
 	op = a.waitOperation(&accepted.OperationID)
 	require.Equal(t, "folder music: imported 3, skipped 1", op.ResultSummary)
 	morning := a.trackByTitle("Morning")
-	require.Equal(t, "music/Morning - DJ Ann.mp3", morning.FilePath)
+	require.Equal(t, "music/DJ Ann - Morning.mp3", morning.FilePath)
 	require.Equal(t, "DJ Ann", morning.Artist.Name)
 	jay := a.trackByTitle("Jay-Z - Song")
 	require.Nil(t, jay.Artist)
@@ -154,7 +154,7 @@ func TestImportFolder(t *testing.T) {
 	// of a track's file is a duplicate and stays where it is.
 	var band dto.Artist
 	a.ok(http.StatusCreated, http.MethodPost, "/api/artists", map[string]any{"name": "House Band"}, &band)
-	a.tone("promos/Spot - Somebody.mp3", append(good, "-metadata", "comment=6")...)
+	a.tone("promos/Somebody - Spot.mp3", append(good, "-metadata", "comment=6")...)
 	a.tone("promos/again.mp3", append(good, "-metadata", "comment=1")...)
 	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"type_id": music, "artist_id": band.ID}, &accepted)
 	op = a.waitOperation(&accepted.OperationID)

@@ -427,7 +427,7 @@ Track responses carry the analysis columns, `quality_issues`, and `fixes` (the t
 | `GET /api/import/files?folder=` | The files of a folder and its subfolders (at most 2,000, `more`): `path`, `size`, `modified_at`, `status` (`new`, `in_library` or `original` with `track_id`, `not_audio`). A folder that is not a clean relative path, is hidden, or does not exist is refused per field (`folder`, `invalid`) |
 | `POST /api/import` | Body: `folder` (absent or empty: the media root), `type_id`, `playlist_ids`, `artist_id` (an existing artist; it wins over the artist tag and the file name). Every audio file of the folder that is not a track yet becomes one where it lies; nothing is moved, and existing tracks are not changed. Returns `accepted` (`import`); the summary starts with the folder |
 
-`GET /api/import/inbox` is removed. The title of a new track is its title tag, else the title part of the file name; its artist is `artist_id`, else the artist tag, else the artist part of the file name (`Title - Artist` with exactly one hyphen, en dash, or em dash), else none.
+`GET /api/import/inbox` is removed. The title of a new track is its title tag, else the title part of the file name; its artist is `artist_id`, else the artist tag, else the artist part of the file name (`Artist - Title` with exactly one hyphen, en dash, or em dash), else none.
 
 **Endpoints added in v7-19 (bulk track delete, `docs/phase-19-plan.md` §4)**
 

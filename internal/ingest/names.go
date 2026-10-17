@@ -13,7 +13,7 @@ func isHyphen(r rune) bool {
 
 // nameParts reads the title and the artist from a file's base name
 // without the extension (docs/phase-18-plan.md, decision 6a). A name with
-// exactly one hyphen and text on both sides is "Title - Artist"; any other
+// exactly one hyphen and text on both sides is "Artist - Title"; any other
 // name is the title alone, trimmed, and gives no artist: with several
 // hyphens ("Jay-Z - Song") the split is not obvious.
 func nameParts(base string) (title, artist string) {
@@ -29,7 +29,7 @@ func nameParts(base string) (title, artist string) {
 		return whole, ""
 	}
 	_, size := utf8.DecodeRuneInString(base[at:])
-	title, artist = strings.TrimSpace(base[:at]), strings.TrimSpace(base[at+size:])
+	artist, title = strings.TrimSpace(base[:at]), strings.TrimSpace(base[at+size:])
 	if title == "" || artist == "" {
 		return whole, ""
 	}

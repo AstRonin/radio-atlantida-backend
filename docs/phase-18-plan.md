@@ -30,8 +30,8 @@ This replaces the inbox model of phase 11 (inbox folder, library folder, files m
    - **Artist**: the `artist_id` of the body when given (it wins over everything); else the artist tag; else the artist part of the file name (below); else none.
    - **Title**: the title tag; else the title part of the file name (below).
 
-   **File name rule.** The name is the file's base name without the extension (`jingles/Morning - DJ Ann.mp3` gives `Morning - DJ Ann`). The hyphens counted are `-` (U+002D), `–` (en dash, U+2013), and `—` (em dash, U+2014), because file names copied from the web use all three.
-   - **Exactly one hyphen**, with text on both sides after trimming spaces: the title is the part before it, the artist the part after it (`Morning - DJ Ann` gives title `Morning`, artist `DJ Ann`). The order is title first, artist second, as the manager names the files.
+   **File name rule.** The name is the file's base name without the extension (`jingles/DJ Ann - Morning.mp3` gives `DJ Ann - Morning`). The hyphens counted are `-` (U+002D), `–` (en dash, U+2013), and `—` (em dash, U+2014), because file names copied from the web use all three.
+   - **Exactly one hyphen**, with text on both sides after trimming spaces: the artist is the part before it, the title the part after it (`DJ Ann - Morning` gives artist `DJ Ann`, title `Morning`; `Aira V - Ты нужен мне любой` gives artist `Aira V`). The order is artist first, title second, as music files are commonly named.
    - **No hyphen**: the title is the whole name, no artist from the name.
    - **More than one hyphen** (`Jay-Z - Song`, `Intro - part 1 - long`): the split is not obvious, so the name gives no artist and the title is the whole name.
    - **One hyphen with an empty side** (`-intro`, `Morning -`): no artist; the title is the whole name, trimmed.
@@ -115,7 +115,7 @@ Checked 2026-10-16: `settings.Service.List` walks the registry and only looks up
 - **Unit, folder validation:** `..`, absolute, backslash, hidden element, not clean, missing folder, a file instead of a folder refused with field `folder`, rule `invalid`; empty means the root.
 - **Unit, folders and files:** nested folders in path order; hidden folders and links skipped; `audio_files` and `new_files` per folder include subfolders; an empty folder is listed with zeros; the folder limit sets `more`; every file status of 2.5, with `track_id` for `in_library` and `original`.
 - **Unit, original rule:** `a.flac` with a track at `a.optimal.mp3` in the same folder is an original; `a.flac` with `a.optimal.mp3` in another folder is not; `a.optimal.mp3` itself is `in_library`.
-- **Unit, `nameParts` (table):** `Morning - DJ Ann` (title `Morning`, artist `DJ Ann`); `Morning–DJ Ann` and `Morning — DJ Ann` (en and em dash); `Morning` (no artist); `Jay-Z - Song` and `A - B - C` (whole name, no artist); `-intro`, `Morning -`, ` - ` (whole name trimmed, no artist); extra spaces trimmed.
+- **Unit, `nameParts` (table):** `DJ Ann - Morning` (title `Morning`, artist `DJ Ann`); `DJ Ann–Morning` and `DJ Ann — Morning` (en and em dash); `Morning` (no artist); `Jay-Z - Song` and `A - B - C` (whole name, no artist); `-intro`, `Morning -`, ` - ` (whole name trimmed, no artist); extra spaces trimmed.
 - **Unit, title and artist precedence:** body `artist_id` wins over the tag and the name; the artist tag wins over the name; no tag and one hyphen gives the name's artist, created once for several files; the title tag wins over the name; the title never holds the folder or the extension.
 - **Unit, import run (fake files and store):** files stay where they are and the tracks get those paths; a second run of the same folder imports nothing and counts `in_library` without reading the files; a copied file is a duplicate; type and playlists are set on new tracks only; the summary names the folder; the root imports every folder.
 - **Integration (repository):** the path lookup and the copy lookup on a database with a few thousand tracks use an index.
@@ -126,7 +126,7 @@ Checked 2026-10-16: `settings.Service.List` walks the registry and only looks up
 - With `music` (3 songs) and `jingles` (2 jingles) under the media root, `GET /api/import/folders` shows both with `new_files` 3 and 2.
 - `POST /api/import` with `folder: "jingles"` and the jingle type registers 2 tracks with paths `jingles/...`; the files have not moved; the folders show `new_files` 0 for `jingles`.
 - A third jingle copied into `jingles` and a second import adds exactly that one.
-- A file `music/Morning - DJ Ann.mp3` without tags becomes the track `Morning` by the artist `DJ Ann` (created if missing); `music/Jay-Z - Song.mp3` becomes `Jay-Z - Song` without an artist; with `artist_id` in the body every new track of the run gets that artist.
+- A file `music/DJ Ann - Morning.mp3` without tags becomes the track `Morning` by the artist `DJ Ann` (created if missing); `music/Jay-Z - Song.mp3` becomes `Jay-Z - Song` without an artist; with `artist_id` in the body every new track of the run gets that artist.
 - `POST /api/import` with an unknown `artist_id` is a 422 with the field `artist_id`.
 - A track whose file was deleted on disk gets `file_missing` on the next analysis; nothing else changes.
 - `make lint`, `make test`, `make test-integration`, `make openapi-lint` pass.
@@ -143,7 +143,7 @@ Checked 2026-10-16: `settings.Service.List` walks the registry and only looks up
 - Changing the type, playlists, or artist of tracks that already exist through an import.
 - A preview of the title and artist each new file would get (it needs a tag read per file).
 - Creating an artist by name in the import body.
-- Another file name order (`Artist - Title`) or a setting to choose it.
+- Another file name order (`Title - Artist`) or a setting to choose it.
 - Several folders in one import, or a remembered type per folder.
 - Creating, renaming, or removing folders.
 - Upload through the panel.

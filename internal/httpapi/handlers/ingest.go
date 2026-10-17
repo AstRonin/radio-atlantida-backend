@@ -107,7 +107,7 @@ func registerIngest(api huma.API, log *slog.Logger, svc Ingest) {
 		Description: "Starts an import operation: every audio file of the folder and its subfolders that is not a track yet becomes one where it lies, " +
 			"with the given type, playlists, and artist; nothing is moved, and tracks that exist already are not changed. " +
 			"The title comes from the title tag, else from the file name; the artist from artist_id, else the artist tag, else the file name " +
-			"(\"Title - Artist\" with exactly one hyphen). A file with the content of an existing track (a copy) or not readable as audio is left alone. " +
+			"(\"Artist - Title\" with exactly one hyphen). A file with the content of an existing track (a copy) or not readable as audio is left alone. " +
 			mediaBusy,
 		Tags:          tags,
 		DefaultStatus: http.StatusAccepted,

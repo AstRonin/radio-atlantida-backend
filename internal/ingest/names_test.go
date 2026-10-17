@@ -11,10 +11,11 @@ func TestNameParts(t *testing.T) {
 	tests := []struct {
 		base, title, artist string
 	}{
-		{"Morning - DJ Ann", "Morning", "DJ Ann"},
-		{"Morning–DJ Ann", "Morning", "DJ Ann"},
-		{"Morning — DJ Ann", "Morning", "DJ Ann"},
-		{"  Morning   -   DJ Ann  ", "Morning", "DJ Ann"},
+		{"DJ Ann - Morning", "Morning", "DJ Ann"},
+		{"DJ Ann–Morning", "Morning", "DJ Ann"},
+		{"DJ Ann — Morning", "Morning", "DJ Ann"},
+		{"Aira V - Ты нужен мне любой", "Ты нужен мне любой", "Aira V"},
+		{"  DJ Ann   -   Morning  ", "Morning", "DJ Ann"},
 		{"Morning", "Morning", ""},
 		{"  Morning  ", "Morning", ""},
 		{"Jay-Z - Song", "Jay-Z - Song", ""},
@@ -23,7 +24,7 @@ func TestNameParts(t *testing.T) {
 		{"-intro", "-intro", ""},
 		{"Morning -", "Morning -", ""},
 		{" - ", "-", ""},
-		{"Утро - Анна", "Утро", "Анна"},
+		{"Анна - Утро", "Утро", "Анна"},
 	}
 	for _, tt := range tests {
 		title, artist := nameParts(tt.base)
