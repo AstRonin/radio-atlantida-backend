@@ -149,7 +149,7 @@ Tasks:
 4. Environment values for every service are set in the compose file through `environment:` with values from `.env`, the same way the dev stack does it (backend plan §3, task 9). The Liquidsoap startup values match the dev script exactly: `ICECAST_HOST=icecast`, `ICECAST_PORT=8000`, `ICECAST_MOUNT=/radio`, `TELNET_PORT=1234`, `HARBOR_PORT=8005`, `JOURNAL_DIR=/journal`, `BACKEND_CALLBACK_URL=http://backend:8090/api/playout/callback`.
 5. Health checks:
    - `db`: `pg_isready`.
-   - `backend`: `/healthz` on port 8080 (from inside the container).
+   - `backend`: `/healthz` on port 8090 (from inside the container).
    - `frontend`: `/` on port 8080.
    - `icecast`: `/status-json.xsl`.
    - `liquidsoap`: the telnet port answers.
