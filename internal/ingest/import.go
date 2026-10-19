@@ -23,7 +23,7 @@ const (
 	// importWorkers: probing is quick, measuring decodes the whole file
 	// on one core. Two files at a time use two cores and leave the rest to
 	// playout.
-	importWorkers = 2
+	importWorkers = 10
 	// maxImportFiles bounds the files walked in one import run, those
 	// already in the library included; the rest wait for the next run
 	// (docs/phase-18-plan.md, decision 12).

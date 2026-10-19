@@ -18,7 +18,7 @@ import (
 
 // transcodeWorkers: an encode decodes and encodes on one core and may run
 // for a minute on a long programme; one at a time keeps playout safe.
-const transcodeWorkers = 1
+const transcodeWorkers = 10
 
 // optimalSuffix marks the copy written next to the original (decision 8).
 const optimalSuffix = ".optimal"

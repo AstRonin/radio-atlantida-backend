@@ -59,7 +59,7 @@ const shutdownTimeout = 15 * time.Second
 // starts them by hand, so a few workers are plenty; the queue absorbs a
 // burst of clicks without a goroutine per click.
 const (
-	operationWorkers = 4
+	operationWorkers = 10
 	operationQueue   = 64
 )
 
