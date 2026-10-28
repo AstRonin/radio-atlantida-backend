@@ -82,6 +82,16 @@ func TestLibraryTrackEditClearsReviewedMark(t *testing.T) {
 	a.ok(http.StatusCreated, http.MethodPost, "/api/tracks", body, &tr)
 	require.Equal(t, "Song [Live]", tr.Title, "trimmed and collapsed")
 	path := fmt.Sprintf("/api/tracks/%d", tr.ID)
+	// PUT takes no file fields: the create body without them.
+	putBody := func(b map[string]any) map[string]any {
+		out := map[string]any{}
+		for k, v := range b {
+			if k != "file_path" && k != "duration_ms" {
+				out[k] = v
+			}
+		}
+		return out
+	}
 	mark := func() {
 		var res dto.ReviewTracksResult
 		a.ok(http.StatusOK, http.MethodPost, "/api/tracks/review", map[string]any{"track_ids": []uint64{tr.ID}, "reviewed": true}, &res)
@@ -89,18 +99,18 @@ func TestLibraryTrackEditClearsReviewedMark(t *testing.T) {
 
 	mark()
 	body["playlist_ids"], body["quality_notes"] = []uint64{pl.ID}, "checked"
-	a.ok(http.StatusOK, http.MethodPut, path, body, &tr)
+	a.ok(http.StatusOK, http.MethodPut, path, putBody(body), &tr)
 	require.NotNil(t, tr.ReviewedAt, "playlists and notes are not content")
 
 	body["title"] = "Song [Live] (Edit)"
 	var edited dto.Track // fresh: an absent field must not keep an old value
-	a.ok(http.StatusOK, http.MethodPut, path, body, &edited)
+	a.ok(http.StatusOK, http.MethodPut, path, putBody(body), &edited)
 	require.Nil(t, edited.ReviewedAt, "a new title clears the mark")
 
 	body["title"] = "Song\nB-side"
-	a.fieldError("title", errcodes.InvalidCharacters, http.MethodPut, path, body)
+	a.fieldError("title", errcodes.InvalidCharacters, http.MethodPut, path, putBody(body))
 	body["title"] = "   "
-	a.fieldError("title", errcodes.Required, http.MethodPut, path, body)
+	a.fieldError("title", errcodes.Required, http.MethodPut, path, putBody(body))
 }
 
 func TestLibraryRenameTracks(t *testing.T) {

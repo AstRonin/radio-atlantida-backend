@@ -19,6 +19,7 @@ type Ingest interface {
 	Import(ctx context.Context, req ingest.ImportRequest) (uint64, error)
 	Analyse(ctx context.Context, req ingest.AnalyseRequest) (uint64, error)
 	Transcode(ctx context.Context, req ingest.TranscodeRequest) (uint64, error)
+	ReplaceFile(ctx context.Context, trackID uint64, rel string) error
 	Waveform(ctx context.Context, trackID uint64) (ingest.Waveform, error)
 }
 

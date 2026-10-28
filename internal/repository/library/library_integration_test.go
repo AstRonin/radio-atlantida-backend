@@ -187,7 +187,7 @@ func TestTrackHistoryAndRollback(t *testing.T) {
 
 	require.ErrorIs(t, f.tracks.Delete(ctx, planned), library.ErrTrackHasHistory, "the track plan counts as history")
 	require.ErrorIs(t, f.tracks.Delete(ctx, 9999), library.ErrTrackNotFound)
-	require.ErrorIs(t, f.tracks.Update(ctx, 9999, library.TrackInput{Title: "x", FilePath: "x.mp3", TypeID: f.music}), library.ErrTrackNotFound)
+	require.ErrorIs(t, f.tracks.Update(ctx, 9999, library.TrackEdit{Title: "x", TypeID: f.music}), library.ErrTrackNotFound)
 
 	// A failing membership rolls back the new track.
 	err := f.d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {

@@ -49,7 +49,12 @@ type createTrackInput struct {
 
 type updateTrackInput struct {
 	ID   uint64 `path:"id" minimum:"1"`
-	Body dto.TrackBody
+	Body dto.UpdateTrackBody
+}
+
+type replaceTrackFileInput struct {
+	ID   uint64 `path:"id" minimum:"1"`
+	Body dto.ReplaceTrackFileBody
 }
 
 type deleteTracksInput struct {
@@ -188,12 +193,36 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		Summary:     "Update a track",
 		Description: "Replaces the metadata and the playlists of a track. Optional fields left out are cleared, then metadata is read from the file where it exists. " +
 			"The title is trimmed and runs of white space become one space; control characters (line breaks, tabs) are refused (invalid_characters). " +
-			"A new title, artist, or file path clears the reviewed mark; playlists, type, notes, and the quality override do not. " +
+			"A new title or artist clears the reviewed mark; playlists, type, notes, and the quality override do not. " +
+			"The file path and the length cannot be sent here (unknown_field): the file changes only by replace-file. " +
 			"The title and artist go on air with requests pushed to Liquidsoap after the save; items already queued keep the old ones.",
 		Tags:   tags,
 		Errors: errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *updateTrackInput) (*trackOutput, error) {
-		t, err := svc.UpdateTrack(ctx, in.ID, trackInput(in.Body))
+		t, err := svc.UpdateTrack(ctx, in.ID, trackEdit(in.Body))
+		if err != nil {
+			return nil, err
+		}
+		return &trackOutput{Body: trackDTO(t)}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "replace-track-file",
+		Method:      http.MethodPost,
+		Path:        "/api/tracks/{id}/replace-file",
+		Summary:     "Replace the file of a track",
+		Description: "Points the track at another file under the media root and analyses it (checksum, format, loudness, quality issues) in one step; the response is the updated track. " +
+			"The old file is not removed. The reviewed mark is cleared unless the path and the content are both unchanged, and the cue is reset when it no longer fits the new length. " +
+			"The same path with the same content changes nothing, the reviewed mark stays. Refused while a clock insert, a one-time insert, or a plan item that has not aired uses the track (track_in_use, with used_by), " +
+			"while the track is queued in Liquidsoap or on air (track_in_use), and while another media operation runs (media_operation_running). " +
+			"A path that another track has is a field error (taken); a missing file is track_file_not_found.",
+		Tags:   tags,
+		Errors: errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusServiceUnavailable),
+	}, func(ctx context.Context, in *replaceTrackFileInput) (*trackOutput, error) {
+		if err := media.ReplaceFile(ctx, in.ID, in.Body.FilePath); err != nil {
+			return nil, err
+		}
+		t, err := svc.GetTrack(ctx, in.ID)
 		if err != nil {
 			return nil, err
 		}

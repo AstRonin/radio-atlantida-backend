@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strings"
 	"time"
 
@@ -371,18 +370,15 @@ func issues(joined string) []library.QualityIssue {
 	return out
 }
 
-// trackColumns are the editable columns of a track. A map, so nil and zero
-// values are written on update (Updates skips them in a struct).
-func trackColumns(in library.TrackInput) map[string]any {
+// trackEditColumns are the columns PUT changes of a track. A map, so nil and
+// zero values are written on update (Updates skips them in a struct). No
+// analysis column is here (file path, duration, format, bitrate, sample
+// rate, checksum, measurements): only SaveAnalysis writes those.
+func trackEditColumns(in library.TrackEdit) map[string]any {
 	return map[string]any{
 		"title":         in.Title,
 		"artist_id":     in.ArtistID,
-		"file_path":     in.FilePath,
 		"type_id":       in.TypeID,
-		"duration_ms":   in.DurationMS,
-		"format":        in.Format,
-		"bitrate":       in.Bitrate,
-		"sample_rate":   in.SampleRate,
 		"quality_ok":    in.QualityOK,
 		"quality_notes": in.QualityNotes,
 	}
@@ -417,37 +413,13 @@ func (s *Tracks) Create(ctx context.Context, in library.TrackInput) (uint64, err
 	return r.ID, nil
 }
 
-// cueInvalid is true when the stored cue of a track does not fit a file of
-// the duration given as the parameter (repeated four times, once per
-// placeholder): the rule of library.Cue.Check. A null duration keeps the
-// cue. A copy lives in internal/repository/ingest.
-const cueInvalid = `(?::integer IS NOT NULL AND (
-    ((cue_in_ms > 0 OR cue_out_ms IS NOT NULL)
-     AND (cue_in_ms >= ?::integer OR cue_out_ms > ?::integer OR COALESCE(cue_out_ms, ?::integer) - cue_in_ms < 5000))
-    OR fade_in_ms + fade_out_ms > COALESCE(cue_out_ms, ?::integer) - cue_in_ms))`
-
-// cueReset returns the SET expressions that reset the cue when it does not
-// fit a file of durationMS (docs/phase-22-plan.md decision 7).
-func cueReset(durationMS *int) map[string]any {
-	args := []any{durationMS, durationMS, durationMS, durationMS, durationMS}
-	return map[string]any{
-		"cue_in_ms":   gorm.Expr("CASE WHEN "+cueInvalid+" THEN 0 ELSE cue_in_ms END", args...),
-		"cue_out_ms":  gorm.Expr("CASE WHEN "+cueInvalid+" THEN NULL ELSE cue_out_ms END", args...),
-		"fade_in_ms":  gorm.Expr("CASE WHEN "+cueInvalid+" THEN 0 ELSE fade_in_ms END", args...),
-		"fade_out_ms": gorm.Expr("CASE WHEN "+cueInvalid+" THEN 0 ELSE fade_out_ms END", args...),
-	}
-}
-
-// Update changes the metadata of a track. The reviewed mark is cleared in
-// the same statement when the title, the artist, or the file path changes,
-// and the cue is reset when it does not fit the new duration: the SET
-// expressions see the stored row, so there is no read before the write to
-// race with.
-func (s *Tracks) Update(ctx context.Context, id uint64, in library.TrackInput) error {
-	cols := trackColumns(in)
-	cols["reviewed_at"] = gorm.Expr(`CASE WHEN title IS DISTINCT FROM ? OR artist_id IS DISTINCT FROM ?
-  OR file_path IS DISTINCT FROM ? THEN NULL ELSE reviewed_at END`, in.Title, in.ArtistID, in.FilePath)
-	maps.Copy(cols, cueReset(in.DurationMS))
+// Update changes the metadata of a track. The reviewed mark is cleared in the
+// same statement when the title or the artist changes, the SET expression
+// sees the stored row, so there is no read before the write to race with.
+func (s *Tracks) Update(ctx context.Context, id uint64, in library.TrackEdit) error {
+	cols := trackEditColumns(in)
+	cols["reviewed_at"] = gorm.Expr(`CASE WHEN title IS DISTINCT FROM ? OR artist_id IS DISTINCT FROM ? THEN NULL ELSE reviewed_at END`,
+		in.Title, in.ArtistID)
 	res := s.g.WithContext(ctx).Table("tracks").Where("id = ?", id).Updates(cols)
 	if res.Error != nil {
 		return writeError(fmt.Sprintf("update track %d", id), res.Error)

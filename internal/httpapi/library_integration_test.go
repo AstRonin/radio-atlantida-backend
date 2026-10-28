@@ -147,16 +147,6 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		t: t, db: d, mediaRoot: root, rotation: rotationSvc, clock: clock, liquidsoap: fakeLS,
 		tools: prober.Available() && ff.Available(),
 	}
-	ingestSvc := ingest.NewService(d, ingestrepo.New(d.Pool), lib, prober, ff, tracker,
-		func(context.Context) (ingest.Settings, error) {
-			return ingest.Settings{ // setting defaults
-				BusyAhead: 10 * time.Minute,
-				Standard: ingest.Standard{
-					Format: media.FormatMP3, Codec: "mp3", BitrateKbps: 320, SampleRate: 44100, Channels: 2,
-					MinBitrateKbps: 128, LoudnessLUFS: -16, LoudnessToleranceLU: 2, MaxTruePeakDBTP: -1,
-				},
-			}, nil
-		}, log, clock.now)
 	broadcastState := broadcast.NewTracker(d, broadcastrepo.New(d.Pool), hub, log, clock.now)
 	a.playout = playout.NewService(d, playoutrepo.New(d.Pool), ctl, func(context.Context) (playout.Settings, error) {
 		return playout.Settings{ // setting defaults
@@ -167,6 +157,16 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	svc := library.NewService(d,
 		libraryrepo.NewTypes(d), libraryrepo.NewPlaylists(d), libraryrepo.NewArtists(d), libraryrepo.NewTracks(d),
 		lib, prober, a.playout, log)
+	ingestSvc := ingest.NewService(d, ingestrepo.New(d.Pool), svc, lib, prober, ff, tracker,
+		func(context.Context) (ingest.Settings, error) {
+			return ingest.Settings{ // setting defaults
+				BusyAhead: 10 * time.Minute,
+				Standard: ingest.Standard{
+					Format: media.FormatMP3, Codec: "mp3", BitrateKbps: 320, SampleRate: 44100, Channels: 2,
+					MinBitrateKbps: 128, LoudnessLUFS: -16, LoudnessToleranceLU: 2, MaxTruePeakDBTP: -1,
+				},
+			}, nil
+		}, log, clock.now)
 	settingsSvc, err := settings.NewService(settings.NewRegistry(), settingsrepo.New(d), config.Secrets{}.IsSet(), log, time.Now)
 	require.NoError(t, err)
 	// The counts are read on every request, as in serve.
@@ -407,11 +407,10 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 	// PUT replaces the track: the artist is cleared, the playlists change.
 	var updated dto.Track
 	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d", song.ID), map[string]any{
-		"title": "Song", "artist_id": nil, "file_path": "music/song.mp3", "type_id": music,
-		"duration_ms": 180000, "playlist_ids": []uint64{rock.ID},
+		"title": "Song", "artist_id": nil, "type_id": music, "playlist_ids": []uint64{rock.ID},
 	}, &updated)
 	require.Nil(t, updated.Artist)
-	require.Nil(t, updated.Format, "cleared")
+	require.NotNil(t, updated.Format, "an analysis column: PUT does not write it")
 	require.Equal(t, []uint64{rock.ID}, updated.PlaylistIDs)
 
 	// Listing: filters and pages in title order.
@@ -525,7 +524,7 @@ func TestLibraryDeleteRefusals(t *testing.T) {
 
 	// The artist's track moves to no artist; the play log still names it.
 	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d", aired.ID), map[string]any{
-		"title": "Aired", "file_path": "music/Aired.mp3", "type_id": music, "playlist_ids": []uint64{},
+		"title": "Aired", "type_id": music, "playlist_ids": []uint64{},
 	}, nil)
 	a.problem(http.StatusConflict, errcodes.ArtistHasHistory, http.MethodDelete, fmt.Sprintf("/api/artists/%d", gone.ID), nil)
 

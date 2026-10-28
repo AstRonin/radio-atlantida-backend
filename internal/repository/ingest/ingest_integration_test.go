@@ -129,6 +129,43 @@ FROM tracks WHERE id = $1`, id).Scan(&qualityOK, &playlists))
 	require.ErrorIs(t, err, library.ErrUnknownPlaylist)
 }
 
+// An import registers a track with what the probe reads only: it is not
+// analysed, its quality is unknown, and the analysis completes it.
+func TestProbedTrackAwaitsAnalysis(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+
+	probe := analysis("library/new.mp3", "sum-probe")
+	probe.AnalyzedAt = time.Time{}
+	probe.Issues = nil
+	probe.Measurements.LoudnessLUFS, probe.Measurements.TruePeakDBTP, probe.Measurements.LoudnessRangeLU = nil, nil, nil
+	id, err := f.store.CreateTrack(ctx, ingest.NewTrack{Title: "New", TypeID: f.music, Analysis: probe})
+	require.NoError(t, err)
+
+	var qualityOK *bool
+	var analysedAt *time.Time
+	require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT quality_ok, analyzed_at FROM tracks WHERE id = $1`, id).Scan(&qualityOK, &analysedAt))
+	require.Nil(t, qualityOK, "quality is unknown until the analysis")
+	require.Nil(t, analysedAt)
+
+	unanalysed, err := f.store.Unanalysed(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, unanalysed, 1)
+	require.Equal(t, id, unanalysed[0].ID)
+
+	reset, err := f.store.SaveAnalysis(ctx, id, analysis("library/new.mp3", "sum-probe", library.IssueLoudness))
+	require.NoError(t, err)
+	require.False(t, reset)
+	require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT quality_ok, analyzed_at FROM tracks WHERE id = $1`, id).Scan(&qualityOK, &analysedAt))
+	require.NotNil(t, qualityOK)
+	require.False(t, *qualityOK)
+	require.NotNil(t, analysedAt)
+	unanalysed, err = f.store.Unanalysed(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, unanalysed)
+}
+
 func TestArtistExists(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -272,6 +309,25 @@ VALUES ('Song', 'song.mp3', $1, 'sum-1', now()) RETURNING id`, f.music)
 	_, err = f.store.SaveAnalysis(ctx, id, analysis("song.optimal.mp3", "sum-2"))
 	require.NoError(t, err)
 	require.False(t, reviewed(), "a new checksum clears it")
+}
+
+// A new path clears the reviewed mark even with the same content, as the
+// replace of a file to another name does (the title and the artist clear it
+// in the library too).
+func TestSaveAnalysisClearsReviewedMarkOnPathChange(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	id := f.id(`INSERT INTO tracks (title, file_path, type_id, file_checksum, reviewed_at)
+VALUES ('Song', 'song.mp3', $1, 'sum-1', now()) RETURNING id`, f.music)
+
+	_, err := f.store.SaveAnalysis(ctx, id, analysis("moved/song.mp3", "sum-1", library.IssueLoudness))
+	require.NoError(t, err)
+	var reviewed bool
+	var path string
+	require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT reviewed_at IS NOT NULL, file_path FROM tracks WHERE id = $1`, id).Scan(&reviewed, &path))
+	require.Equal(t, "moved/song.mp3", path)
+	require.False(t, reviewed, "a new path clears the mark, the content the same")
 }
 
 // A new file keeps a cue that still fits and resets one that does not, in

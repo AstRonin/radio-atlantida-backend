@@ -85,33 +85,28 @@ func TestCueStateSetCueAndPlannedHours(t *testing.T) {
 
 // A new duration on update keeps a cue that fits and resets one that does
 // not (docs/phase-22-plan.md decision 7).
-func TestUpdateResetsACueThatDoesNotFit(t *testing.T) {
+// An update keeps the cue and the analysis of the file: the duration is not
+// edited there (the replace of the file analyses a new one).
+func TestUpdateKeepsCueAndAnalysis(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	ctx := t.Context()
-	in := library.TrackInput{Title: "Live", FilePath: "music/live.mp3", TypeID: f.music, DurationMS: new(200000)}
+	in := library.TrackInput{Title: "Live", FilePath: "music/live.mp3", TypeID: f.music, DurationMS: new(200000), Format: new("mp3"), Bitrate: new(320000), SampleRate: new(44100)}
 	id, err := f.tracks.Create(ctx, in)
 	require.NoError(t, err)
 	cut := library.Cue{InMS: 5000, OutMS: new(150000), FadeInMS: 1000, FadeOutMS: 2000}
 	require.NoError(t, f.tracks.SetCue(ctx, id, cut))
 
-	in.DurationMS = new(160000)
-	require.NoError(t, f.tracks.Update(ctx, id, in))
+	// A PUT without the analysis fields changes the title only.
+	require.NoError(t, f.tracks.Update(ctx, id, library.TrackEdit{Title: "Live (edit)", TypeID: f.music}))
 	got, err := f.tracks.Get(ctx, id)
 	require.NoError(t, err)
-	require.Equal(t, cut, got.Cue, "still fits")
-
-	in.DurationMS = nil
-	require.NoError(t, f.tracks.Update(ctx, id, in))
-	got, err = f.tracks.Get(ctx, id)
-	require.NoError(t, err)
-	require.Equal(t, cut, got.Cue, "no duration: kept")
-
-	in.DurationMS = new(140000)
-	require.NoError(t, f.tracks.Update(ctx, id, in))
-	got, err = f.tracks.Get(ctx, id)
-	require.NoError(t, err)
-	require.Equal(t, library.Cue{}, got.Cue, "cue out past the new end: reset")
+	require.Equal(t, cut, got.Cue)
+	require.Equal(t, "music/live.mp3", got.FilePath)
+	require.Equal(t, 200000, *got.DurationMS)
+	require.Equal(t, "mp3", *got.Format)
+	require.Equal(t, 320000, *got.Bitrate)
+	require.Equal(t, 44100, *got.SampleRate)
 }
 
 func TestUsageMarksFiltersAndSort(t *testing.T) {

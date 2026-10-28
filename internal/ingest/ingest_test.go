@@ -12,6 +12,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
 func TestImport(t *testing.T) {
@@ -26,11 +27,27 @@ func TestImport(t *testing.T) {
 	f.files.put("music/.hidden.mp3", "hidden")
 	f.store.add(Track{ID: 1, FilePath: "old/known.mp3", Checksum: new(sha("K"))})
 
-	_, err := f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1, PlaylistIDs: []uint64{10}})
+	id, err := f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1, PlaylistIDs: []uint64{10}})
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder music: imported 2, duplicates 1, unreadable 1, skipped 1", summary)
+	require.Equal(t, "folder music: imported 2, duplicates 1, unreadable 1, skipped 1; analysis: analysed 2", summary)
+	require.Len(t, f.ops.published, 2, "one track.analysed event per analysed track")
+
+	// The events come from the analysis workers in any order; the total
+	// grows while the import registers, and the last event published has
+	// the final total.
+	events := analysedEvents(f)
+	require.Len(t, events, 2)
+	var dones []int
+	for _, ev := range events {
+		require.Equal(t, id, ev.Data.OperationID)
+		require.LessOrEqual(t, ev.Data.Done, ev.Data.Total)
+		require.LessOrEqual(t, ev.Data.Total, 2)
+		dones = append(dones, ev.Data.Done)
+	}
+	require.ElementsMatch(t, []int{1, 2}, dones)
+	require.Equal(t, 2, events[len(events)-1].Data.Total, "the final total: the tracks imported")
 
 	created := f.store.created()
 	require.Len(t, created, 2)
@@ -62,7 +79,7 @@ func TestImport(t *testing.T) {
 	require.NoError(t, err)
 	summary, err = f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder music: in_library 2, duplicates 1, unreadable 1, skipped 1", summary)
+	require.Equal(t, "folder music: in_library 2, duplicates 1, unreadable 1, skipped 1; analysis: nothing to do", summary)
 	require.Equal(t, reads+2, f.files.reads)
 	require.Len(t, f.store.created(), 2)
 }
@@ -76,18 +93,54 @@ func TestImportNewFileOnly(t *testing.T) {
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder jingles: imported 2", summary)
+	require.Equal(t, "folder jingles: imported 2; analysis: analysed 2", summary)
+	require.Equal(t, 2, f.files.reads, "each file is read once: by the import, not again by its analysis")
 
 	f.tools.audio("jingles/c.mp3", "C", mp3Info("C", ""), nil)
 	_, err = f.svc.Import(t.Context(), ImportRequest{Folder: "jingles", TypeID: 1, PlaylistIDs: []uint64{11}})
 	require.NoError(t, err)
 	summary, err = f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder jingles: imported 1, in_library 2", summary)
+	require.Equal(t, "folder jingles: imported 1, in_library 2; analysis: analysed 1", summary)
 	created := f.store.created()
 	require.Len(t, created, 3)
 	require.Equal(t, []uint64{10}, created[0].PlaylistIDs, "existing tracks keep their playlists")
 	require.Equal(t, []uint64{11}, created[2].PlaylistIDs)
+}
+
+// An analysis that fails still gets its track.analysed event, so the last
+// event of an import carries Done equal to Total.
+func TestImportAnalysisFailureStillReported(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("music/a.mp3", "A", mp3Info("A", ""), loud(-16, -2))
+	f.tools.audio("music/b.mp3", "B", mp3Info("B", ""), loud(-16, -2))
+	f.tools.unmeasurable["B"] = true // probes at import, fails its measurement
+
+	id, err := f.svc.Import(t.Context(), ImportRequest{Folder: "music", TypeID: 1})
+	require.NoError(t, err)
+	summary, err := f.runQueued(t)
+	require.NoError(t, err)
+	require.Equal(t, "folder music: imported 2; analysis: analysed 1, unreadable 1", summary)
+	require.Len(t, f.store.created(), 2, "the file that fails its measurement stays registered")
+	require.Equal(t, 2, f.files.reads)
+
+	events := analysedEvents(f)
+	require.Len(t, events, 2, "one event per registered track")
+	var outcomes []string
+	for i, ev := range events {
+		require.Equal(t, id, ev.Data.OperationID)
+		// The total grows while the import registers: an event may carry
+		// less than the final total, the last one carries it.
+		require.LessOrEqual(t, ev.Data.Done, ev.Data.Total)
+		require.Equal(t, i+1, ev.Data.Done)
+		outcomes = append(outcomes, ev.Data.Outcome)
+		if ev.Data.Outcome == outcomeUnreadable {
+			require.Empty(t, ev.Data.QualityIssues)
+		}
+	}
+	require.Equal(t, 2, events[1].Data.Total, "the last event: total and done both 2")
+	require.ElementsMatch(t, []string{outcomeAnalysed, outcomeUnreadable}, outcomes)
 }
 
 func TestImportWholeMediaFolder(t *testing.T) {
@@ -100,7 +153,7 @@ func TestImportWholeMediaFolder(t *testing.T) {
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "whole media folder: imported 3", summary)
+	require.Equal(t, "whole media folder: imported 3; analysis: analysed 3", summary)
 }
 
 func TestImportSkipsOriginalsOfCopies(t *testing.T) {
@@ -113,7 +166,7 @@ func TestImportSkipsOriginalsOfCopies(t *testing.T) {
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder music: in_library 2", summary)
+	require.Equal(t, "folder music: in_library 2; analysis: nothing to do", summary)
 	require.Zero(t, f.files.reads)
 }
 
@@ -134,7 +187,7 @@ func TestImportTitleAndArtist(t *testing.T) {
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder m: imported 8", summary)
+	require.Equal(t, "folder m: imported 8; analysis: analysed 8", summary)
 
 	type got struct{ title, artist string }
 	byPath := map[string]got{}
@@ -186,7 +239,7 @@ func TestImportTwoCopiesInOneRun(t *testing.T) {
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder music: imported 1, duplicates 1", summary)
+	require.Equal(t, "folder music: imported 1, duplicates 1; analysis: analysed 1", summary)
 	require.Len(t, f.store.created(), 1)
 }
 
@@ -200,7 +253,7 @@ func TestImportFailureLeavesTheFile(t *testing.T) {
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
-	require.Equal(t, "folder music: failed 1; failed: [music/song.mp3] (see the log)", summary)
+	require.Equal(t, "folder music: failed 1; failed: [music/song.mp3] (see the log); analysis: nothing to do", summary)
 	require.Equal(t, []string{"music/song.mp3"}, f.files.paths())
 }
 
@@ -368,11 +421,30 @@ func TestAnalyse(t *testing.T) {
 	// Gone.
 	f.store.add(Track{ID: 4, FilePath: "library/gone.mp3"})
 
-	_, err := f.svc.Analyse(t.Context(), AnalyseRequest{TrackIDs: []uint64{1, 2, 3, 4}})
+	id, err := f.svc.Analyse(t.Context(), AnalyseRequest{TrackIDs: []uint64{1, 2, 3, 4}})
 	require.NoError(t, err)
 	summary, err := f.runQueued(t)
 	require.NoError(t, err)
 	require.Equal(t, "analysed 2, rechecked 1, file missing 1", summary)
+
+	// Total is the four tracks the operation started with; every track has
+	// an event, the missing file's with no issues.
+	events := analysedEvents(f)
+	require.Len(t, events, 4)
+	outcomes := make([]string, len(events))
+	for i, ev := range events {
+		require.Equal(t, id, ev.Data.OperationID)
+		require.Equal(t, 4, ev.Data.Total)
+		require.Equal(t, i+1, ev.Data.Done)
+		outcomes[i] = ev.Data.Outcome
+	}
+	require.ElementsMatch(t, []string{outcomeAnalysed, outcomeRechecked, outcomeAnalysed, outcomeMissing}, outcomes)
+	for _, ev := range events {
+		if ev.Data.TrackID == 4 {
+			require.Equal(t, outcomeMissing, ev.Data.Outcome)
+			require.Empty(t, ev.Data.QualityIssues)
+		}
+	}
 
 	require.Equal(t, []library.QualityIssue{library.IssueLoudness}, f.store.track(1).Issues)
 	require.Equal(t, sha("N"), *f.store.track(1).Checksum)
@@ -383,12 +455,31 @@ func TestAnalyse(t *testing.T) {
 	require.Equal(t, []library.QualityIssue{library.IssueFileMissing}, f.store.track(4).Issues)
 
 	// Force decodes the unchanged file.
-	_, err = f.svc.Analyse(t.Context(), AnalyseRequest{TrackIDs: []uint64{2}, Force: true})
+	id, err = f.svc.Analyse(t.Context(), AnalyseRequest{TrackIDs: []uint64{2}, Force: true})
 	require.NoError(t, err)
 	summary, err = f.runQueued(t)
 	require.NoError(t, err)
 	require.Equal(t, "analysed 1", summary)
 	require.Empty(t, f.store.track(2).Issues)
+	events = analysedEvents(f)
+	require.Len(t, events, 5)
+	last := events[4].Data
+	require.Equal(t, id, last.OperationID)
+	require.Equal(t, 1, last.Done)
+	require.Equal(t, 1, last.Total)
+}
+
+// analysedEvents returns the track.analysed events published so far.
+func analysedEvents(f *fixture) []ws.TrackAnalysedEvent {
+	f.ops.mu.Lock()
+	defer f.ops.mu.Unlock()
+	var out []ws.TrackAnalysedEvent
+	for _, e := range f.ops.published {
+		if ev, ok := e.(ws.TrackAnalysedEvent); ok {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func TestAnalyseAllUnanalysed(t *testing.T) {
@@ -641,4 +732,110 @@ func TestImportable(t *testing.T) {
 	} {
 		require.Equal(t, want, importable(name), name)
 	}
+}
+
+func TestReplaceFile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	old := goodMP3()
+	f.files.put("library/old.mp3", "O")
+	f.store.add(Track{ID: 1, FilePath: "library/old.mp3", Checksum: new(sha("O")), Measurements: old, AnalyzedAt: new(testNow)})
+	info := mp3Info("", "")
+	info.DurationMS = new(200000)
+	f.tools.audio("library/new.mp3", "N", info, loud(-16, -2))
+	f.store.cueResets[1] = true
+
+	require.NoError(t, f.svc.ReplaceFile(t.Context(), 1, "library/new.mp3"))
+
+	tr := f.store.track(1)
+	require.Equal(t, "library/new.mp3", tr.FilePath)
+	require.Equal(t, sha("N"), *tr.Checksum)
+	require.Equal(t, 200000, *tr.Measurements.DurationMS)
+	require.Nil(t, tr.Measurements.SourceBitrate, "a replaced file is an original")
+	require.Equal(t, testNow, *tr.AnalyzedAt)
+	_, kept := f.files.get("library/old.mp3")
+	require.True(t, kept, "the old file stays")
+}
+
+func TestReplaceFileSamePathSameContentIsANoOp(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.tools.audio("library/a.mp3", "A", mp3Info("", ""), loud(-16, -2))
+	before := Track{ID: 1, FilePath: "library/a.mp3", Checksum: new(sha("A")), Measurements: goodMP3(), AnalyzedAt: new(testNow)}
+	f.store.add(before)
+	encodes := len(f.tools.encodes)
+
+	require.NoError(t, f.svc.ReplaceFile(t.Context(), 1, "library/a.mp3"))
+
+	require.Equal(t, before, f.store.track(1), "nothing analysed or written")
+	require.Equal(t, encodes, len(f.tools.encodes))
+}
+
+func TestReplaceFileConflictsWithOtherTrack(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.files.put("library/old.mp3", "O")
+	f.store.add(Track{ID: 1, FilePath: "library/old.mp3"})
+	f.store.add(Track{ID: 2, FilePath: "library/taken.mp3"})
+	f.tools.audio("library/taken.mp3", "T", mp3Info("", ""), loud(-16, -2))
+
+	err := f.svc.ReplaceFile(t.Context(), 1, "library/taken.mp3")
+	var invalid *validation.Error
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, "file_path", invalid.Fields[0].Field)
+	require.Equal(t, validation.Taken, invalid.Fields[0].Rule)
+	require.Contains(t, invalid.Fields[0].Message, "track 2")
+	require.Equal(t, "library/old.mp3", f.store.track(1).FilePath, "track unchanged")
+}
+
+func TestReplaceFileMissingFile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.store.add(Track{ID: 1, FilePath: "library/old.mp3"})
+
+	err := f.svc.ReplaceFile(t.Context(), 1, "library/none.mp3")
+	require.ErrorIs(t, err, media.ErrFileNotFound)
+	require.Equal(t, "library/old.mp3", f.store.track(1).FilePath, "track unchanged")
+}
+
+func TestReplaceFileNotAudio(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.store.add(Track{ID: 1, FilePath: "library/old.mp3"})
+	f.files.put("library/junk.mp3", "junk") // no probe result: not audio
+
+	var invalid *validation.Error
+	require.ErrorAs(t, f.svc.ReplaceFile(t.Context(), 1, "library/junk.mp3"), &invalid)
+	require.Equal(t, validation.Invalid, invalid.Fields[0].Rule)
+	require.Equal(t, "library/old.mp3", f.store.track(1).FilePath)
+}
+
+func TestReplaceFileRefusals(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.store.add(Track{ID: 1, FilePath: "library/old.mp3"})
+	f.tools.audio("library/new.mp3", "N", mp3Info("", ""), loud(-16, -2))
+
+	var invalid *validation.Error
+	require.ErrorAs(t, f.svc.ReplaceFile(t.Context(), 1, "../new.mp3"), &invalid, "invalid path")
+	require.ErrorIs(t, f.svc.ReplaceFile(t.Context(), 99, "library/new.mp3"), library.ErrTrackNotFound)
+
+	f.uses.inUse[1] = []library.Ref{{Kind: library.KindClock, ID: 3, Name: "Morning"}}
+	var inUse *library.InUseError
+	require.ErrorAs(t, f.svc.ReplaceFile(t.Context(), 1, "library/new.mp3"), &inUse)
+	require.ErrorIs(t, inUse, library.ErrTrackInUse)
+	require.Equal(t, f.uses.inUse[1], inUse.UsedBy)
+	delete(f.uses.inUse, 1)
+
+	f.store.busy[1] = true
+	require.ErrorAs(t, f.svc.ReplaceFile(t.Context(), 1, "library/new.mp3"), &inUse, "queued or on air")
+	require.Equal(t, library.KindPlayout, inUse.UsedBy[0].Kind)
+	delete(f.store.busy, 1)
+
+	f.svc.running.Store(true)
+	require.ErrorIs(t, f.svc.ReplaceFile(t.Context(), 1, "library/new.mp3"), ErrRunning)
+	f.svc.running.Store(false)
+
+	require.Equal(t, "library/old.mp3", f.store.track(1).FilePath, "track unchanged by every refusal")
+	require.Empty(t, f.tools.encodes)
 }

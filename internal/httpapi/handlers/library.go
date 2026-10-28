@@ -32,7 +32,7 @@ type Library interface {
 	ListTracks(ctx context.Context, f library.TrackFilter) (library.TrackPage, error)
 	GetTrack(ctx context.Context, id uint64) (library.Track, error)
 	CreateTrack(ctx context.Context, in library.TrackInput) (library.Track, error)
-	UpdateTrack(ctx context.Context, id uint64, in library.TrackInput) (library.Track, error)
+	UpdateTrack(ctx context.Context, id uint64, in library.TrackEdit) (library.Track, error)
 	DeleteTrack(ctx context.Context, id uint64) error
 	DeleteTracks(ctx context.Context, ids []uint64) (library.DeleteTracksResult, error)
 	ReviewTracks(ctx context.Context, ids []uint64, reviewed bool) (library.ReviewTracksResult, error)
@@ -99,6 +99,14 @@ func trackInput(b dto.TrackBody) library.TrackInput {
 	return library.TrackInput{
 		Title: b.Title, ArtistID: b.ArtistID, FilePath: b.FilePath, TypeID: b.TypeID,
 		DurationMS: b.DurationMS, Format: b.Format, Bitrate: b.Bitrate, SampleRate: b.SampleRate,
+		QualityOK: b.QualityOK, QualityNotes: b.QualityNotes, PlaylistIDs: b.PlaylistIDs,
+	}
+}
+
+// trackEdit maps the body of PUT /api/tracks/{id}.
+func trackEdit(b dto.UpdateTrackBody) library.TrackEdit {
+	return library.TrackEdit{
+		Title: b.Title, ArtistID: b.ArtistID, TypeID: b.TypeID,
 		QualityOK: b.QualityOK, QualityNotes: b.QualityNotes, PlaylistIDs: b.PlaylistIDs,
 	}
 }

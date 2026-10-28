@@ -229,6 +229,12 @@ func (t *Tracker) Progress(id uint64, kind Kind, done, total int, message string
 	})
 }
 
+// Publish sends an event that is not an operation event, such as
+// track.analysed. It is not stored.
+func (t *Tracker) Publish(event any) {
+	t.pub.Publish(event)
+}
+
 func (t *Tracker) finish(ctx context.Context, id uint64, status Status, at time.Time, errMsg, summary *string) (Kind, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()

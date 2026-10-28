@@ -167,19 +167,26 @@ func (s *Store) EnsureArtist(ctx context.Context, name string) (uint64, error) {
 	return id, nil
 }
 
-// CreateTrack adds a track with its playlists and analysis.
+// CreateTrack adds a track with its playlists and analysis. An analysis
+// without AnalyzedAt is the probe of a track that is analysed later: its
+// quality_ok stays null until then.
 func (s *Store) CreateTrack(ctx context.Context, t ingest.NewTrack) (uint64, error) {
 	a, m := t.Analysis, t.Analysis.Measurements
+	var analysedAt *time.Time
+	if !a.AnalyzedAt.IsZero() {
+		analysedAt = &a.AnalyzedAt
+	}
 	var id uint64
 	err := s.q.QueryRow(ctx, `
 INSERT INTO tracks (title, artist_id, type_id, file_path, file_checksum, duration_ms, format, codec, bitrate,
                     sample_rate, channels, loudness_lufs, true_peak_dbtp, loudness_range_lu, source_bitrate,
                     quality_issues, quality_ok, analyzed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, cardinality($16::text[]) = 0, $17)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+        CASE WHEN $17::timestamptz IS NULL THEN NULL ELSE cardinality($16::text[]) = 0 END, $17)
 RETURNING id`,
 		t.Title, t.ArtistID, t.TypeID, a.FilePath, a.Checksum, m.DurationMS, m.Format, m.Codec, m.Bitrate,
 		m.SampleRate, m.Channels, m.LoudnessLUFS, m.TruePeakDBTP, m.LoudnessRangeLU, m.SourceBitrate,
-		codes(a.Issues), a.AnalyzedAt).Scan(&id)
+		codes(a.Issues), analysedAt).Scan(&id)
 	if err != nil {
 		return 0, trackError(err, "insert track")
 	}
@@ -268,17 +275,18 @@ const cueInvalid = `(
 
 // SaveAnalysis stores the analysis of a track and its file path.
 // quality_ok follows the issues: the manager's override lasts until the
-// next analysis. A new checksum (a transcode, a file replaced on disk)
-// clears the reviewed mark and resets a cue that does not fit the new
-// duration (docs/phase-22-plan.md decision 7), in the same statement; o
-// reads the stored row under its lock, so the result tells whether the cue
-// was reset.
+// next analysis. A new file path (a transcode to another name, a replace)
+// or a new checksum (a file replaced on disk) clears the reviewed mark, as
+// the title or the artist does in the library; a new checksum also resets a
+// cue that does not fit the new duration (docs/phase-22-plan.md decision 7).
+// All of it is one statement; o reads the stored row under its lock, so the
+// result tells whether the cue was reset.
 func (s *Store) SaveAnalysis(ctx context.Context, id uint64, a ingest.Analysis) (bool, error) {
 	m := a.Measurements
 	var reset bool
 	err := s.q.QueryRow(ctx, `
 WITH o AS (
-    SELECT t.id, t.file_checksum IS DISTINCT FROM $3 AS new_file,
+    SELECT t.id, t.file_checksum IS DISTINCT FROM $3 OR t.file_path IS DISTINCT FROM $2 AS new_file,
            t.file_checksum IS DISTINCT FROM $3 AND $4::integer IS NOT NULL AND `+cueInvalid+` AS cue_reset
     FROM tracks t WHERE t.id = $1 FOR UPDATE
 )

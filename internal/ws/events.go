@@ -89,6 +89,30 @@ type OperationProgressData struct {
 	Message string `json:"message,omitempty" doc:"For example: 12 of 40 files analysed."`
 }
 
+// EventTrackAnalysed is the type of [TrackAnalysedEvent].
+const EventTrackAnalysed = "track.analysed"
+
+// TrackAnalysedEvent reports the analysis of one track, whatever its outcome:
+// an import analyses the tracks it registers, and so does an analysis
+// operation. Every track the operation processes has one event, so the last
+// event of an operation shows Done equal to Total. The quality issues are
+// those stored by the analysis.
+type TrackAnalysedEvent struct {
+	Type string            `json:"type" doc:"Always track.analysed."`
+	Time time.Time         `json:"time" doc:"UTC time the outcome was known."`
+	Data TrackAnalysedData `json:"data"`
+}
+
+// TrackAnalysedData is the payload of [TrackAnalysedEvent].
+type TrackAnalysedData struct {
+	TrackID       uint64   `json:"track_id"`
+	Outcome       string   `json:"outcome" enum:"analysed,rechecked,file missing,unreadable,failed,track deleted" doc:"What happened to the track: analysed (decoded and stored), rechecked (unchanged file, issues checked again), file missing, unreadable (not readable as audio, or its loudness not measurable), failed (a step failed; see the log), track deleted (removed while the operation ran). Only analysed and rechecked store the analysis."`
+	QualityIssues []string `json:"quality_issues" doc:"Codes of the problems found; empty when there are none, and always empty unless the outcome is analysed or rechecked."`
+	OperationID   uint64   `json:"operation_id" doc:"The import or analyse operation that processed the track."`
+	Done          int      `json:"done" doc:"Tracks the operation has processed so far, this one included, whatever their outcome. Rises by one with each event of the operation."`
+	Total         int      `json:"total" doc:"Tracks the operation has registered so far: for an import, the tracks it registered, final once the import phase has ended (the last event then carries it); for an analyse operation, the tracks it started with. Never below done."`
+}
+
 // EventTrackPlanWarning is the type of [TrackPlanWarningEvent].
 const EventTrackPlanWarning = "track_plan.warning"
 

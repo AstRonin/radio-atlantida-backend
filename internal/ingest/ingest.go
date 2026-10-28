@@ -48,6 +48,11 @@ type Track struct {
 	Issues       []library.QualityIssue
 	// AnalyzedAt is nil until the file is analysed.
 	AnalyzedAt *time.Time
+	// Hashed is the checksum an import read of the file just before it
+	// registered the track, so the analysis does not read the file again.
+	// Empty means unknown: the analysis hashes the file (an analysis
+	// operation, whose stored checksum may be stale, always does).
+	Hashed string
 }
 
 // TrackFile is a track and the path of its file.
@@ -157,6 +162,14 @@ type Operations interface {
 	Start(ctx context.Context, kind operations.Kind) (uint64, error)
 	Execute(ctx context.Context, id uint64, component logging.Component, fn operations.Func) error
 	Progress(id uint64, kind operations.Kind, done, total int, message string)
+	// Publish sends an event that is not an operation event.
+	Publish(event any)
+}
+
+// FileUses tells what keeps the file of a track from being replaced: clock
+// inserts, one-time inserts, and plan items that have not aired (*library.Service).
+type FileUses interface {
+	FileInUse(ctx context.Context, id uint64) error
 }
 
 // Settings are the settings of the service, read when an operation starts.
@@ -189,6 +202,7 @@ type job struct {
 type Service struct {
 	tx       TxRunner
 	store    Store
+	uses     FileUses
 	files    Files
 	prober   Prober
 	ff       Encoder
@@ -207,11 +221,11 @@ type Service struct {
 
 // NewService returns the service. log is the root logger; now is the
 // clock.
-func NewService(tx TxRunner, store Store, files Files, prober Prober, ff Encoder, ops Operations,
+func NewService(tx TxRunner, store Store, uses FileUses, files Files, prober Prober, ff Encoder, ops Operations,
 	settings SettingsFunc, log *slog.Logger, now func() time.Time,
 ) *Service {
 	return &Service{
-		tx: tx, store: store, files: files, prober: prober, ff: ff, ops: ops, settings: settings,
+		tx: tx, store: store, uses: uses, files: files, prober: prober, ff: ff, ops: ops, settings: settings,
 		log: logging.For(log, logging.ComponentMedia), now: now,
 		queue: make(chan job, 1), decodes: make(chan struct{}, waveformDecodes),
 	}

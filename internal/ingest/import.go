@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	// importWorkers: probing is quick, measuring decodes the whole file
-	// on one core. Two files at a time use two cores and leave the rest to
-	// playout.
+	// importWorkers: an import only probes and hashes the files it registers;
+	// the loudness measurement, which decodes the whole file, is the
+	// analysis (analyseWorkers).
 	importWorkers = 10
 	// maxImportFiles bounds the files walked in one import run, those
 	// already in the library included; the rest wait for the next run
@@ -133,7 +133,24 @@ func (s *Service) runImport(ctx context.Context, id uint64, req ImportRequest) (
 		return "", err
 	}
 	t := newTally()
-	im := &importer{s: s, req: req, set: set, idx: idx, seen: map[string]string{}}
+	// The analysis of each registered track runs beside the import, on
+	// analyseWorkers goroutines; the operation ends when both are done.
+	registered := make(chan Track)
+	im := &importer{
+		s: s, req: req, idx: idx, seen: map[string]string{}, registered: registered,
+		opID: id, total: newTrackTotal(0),
+	}
+	var analysing sync.WaitGroup
+	ta := newTally()
+	for range analyseWorkers {
+		analysing.Go(func() {
+			for tr := range registered {
+				res := s.analyseTrack(ctx, tr, set.Standard, false, ta)
+				s.publishAnalysed(im.opID, im.total, ta, tr, res)
+			}
+		})
+	}
+
 	err = workerpool.ForEach(ctx, importWorkers, files, func(ctx context.Context, f media.File) error {
 		outcome := im.file(ctx, f)
 		done := t.add(outcome, f.Path, outcome == outcomeFailed)
@@ -142,11 +159,16 @@ func (s *Service) runImport(ctx context.Context, id uint64, req ImportRequest) (
 		// counted and logged.
 		return ctx.Err()
 	})
+	// No file is registered after the walk: the analysis drains what is
+	// left, whether the walk finished or was cancelled.
+	close(registered)
+	analysing.Wait()
 	if err != nil {
 		return "", fmt.Errorf("import stopped after %d of %d files: %w", t.done, len(files), err)
 	}
 	summary := folderLabel(req.Folder) + ": " +
-		t.summary(outcomeImported, outcomeInLibrary, outcomeDuplicate, outcomeUnreadable, outcomeSkipped, outcomeFailed)
+		t.summary(outcomeImported, outcomeInLibrary, outcomeDuplicate, outcomeUnreadable, outcomeSkipped, outcomeFailed) +
+		"; analysis: " + ta.summary(outcomeAnalysed, outcomeRechecked, outcomeMissing, outcomeDeleted, outcomeUnreadable, outcomeFailed)
 	if more {
 		summary += fmt.Sprintf("; more than %d files: run the import again for the rest", maxImportFiles)
 	}
@@ -165,7 +187,6 @@ func folderLabel(folder string) string {
 type importer struct {
 	s   *Service
 	req ImportRequest
-	set Settings
 	// idx holds the tracks of the folder when the run started.
 	idx libraryIndex
 
@@ -173,10 +194,18 @@ type importer struct {
 	// of one file import once.
 	mu   sync.Mutex
 	seen map[string]string
+	// registered receives every track the run registers, with the checksum
+	// the import read; its analysis runs on the other side of the channel.
+	registered chan<- Track
+	// opID is the import operation; total counts the tracks it has
+	// registered, for the track.analysed events.
+	opID  uint64
+	total *trackTotal
 }
 
 // file imports one file (decision 7) and returns its outcome. The file
-// stays where it is in every case.
+// stays where it is in every case. The track is registered with what the
+// probe reads; its loudness and issues come from the analysis.
 func (im *importer) file(ctx context.Context, f media.File) string {
 	s := im.s
 	switch st, _ := im.idx.status(f.Path); st {
@@ -209,7 +238,7 @@ func (im *importer) file(ctx context.Context, f media.File) string {
 		return outcomeDuplicate
 	}
 
-	info, loud, err := s.analyse(ctx, f.Path)
+	info, err := s.probe(ctx, f.Path)
 	if err != nil {
 		if ctx.Err() != nil {
 			return outcomeFailed
@@ -217,21 +246,25 @@ func (im *importer) file(ctx context.Context, f media.File) string {
 		s.log.WarnContext(ctx, "import: file not readable as audio", "file_path", f.Path, logging.KeyError, err)
 		return outcomeUnreadable
 	}
-	m := measurementsOf(info, loud, nil)
-	err = im.register(ctx, info, Analysis{
-		FilePath: f.Path, Checksum: sum, Measurements: m, Issues: Check(m, im.set.Standard), AnalyzedAt: s.now().UTC(),
+	id, err := im.register(ctx, info, Analysis{
+		FilePath: f.Path, Checksum: sum, Measurements: measurementsOf(info, nil, nil),
 	})
 	if err != nil {
 		return im.fail(ctx, f.Path, "register track", err)
 	}
+	// Counted before the analysis can see the track, so that the total
+	// is never below the tracks analysed.
+	im.total.register()
+	im.registered <- Track{ID: id, FilePath: f.Path, Hashed: sum}
 	return outcomeImported
 }
 
 // register creates the track at a.FilePath and, when needed, its artist,
-// in one transaction. The title and the artist are decided each on its
-// own (decision 6a): the title from the tag, else from the file name; the
-// artist from the request, else the tag, else the file name, else none.
-func (im *importer) register(ctx context.Context, info media.Info, a Analysis) error {
+// in one transaction, and returns its ID. The title and the artist are
+// decided each on its own (decision 6a): the title from the tag, else from
+// the file name; the artist from the request, else the tag, else the file
+// name, else none.
+func (im *importer) register(ctx context.Context, info media.Info, a Analysis) (uint64, error) {
 	s := im.s
 	base := path.Base(a.FilePath)
 	nameTitle, nameArtist := nameParts(strings.TrimSuffix(base, path.Ext(base)))
@@ -245,7 +278,8 @@ func (im *importer) register(ctx context.Context, info media.Info, a Analysis) e
 	}
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	return s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
+	var id uint64
+	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		st := s.store.WithTx(tx)
 		if nt.ArtistID == nil && artist != "" {
 			aid, err := st.EnsureArtist(ctx, truncate(artist, maxArtistLength))
@@ -254,9 +288,11 @@ func (im *importer) register(ctx context.Context, info media.Info, a Analysis) e
 			}
 			nt.ArtistID = &aid
 		}
-		_, err := st.CreateTrack(ctx, nt)
+		var err error
+		id, err = st.CreateTrack(ctx, nt)
 		return err
 	})
+	return id, err
 }
 
 // seenBefore records the checksum of the file at p and returns the file of
@@ -278,16 +314,25 @@ func (im *importer) fail(ctx context.Context, rel, step string, err error) strin
 	return outcomeFailed
 }
 
-// analyse probes the file at rel and measures its loudness. A silent file
-// has no loudness (nil); a file without a duration is not audio the
-// planner can use.
-func (s *Service) analyse(ctx context.Context, rel string) (media.Info, *media.Loudness, error) {
+// probe reads the format and tags of the file at rel. A file without a
+// duration is not audio the planner can use.
+func (s *Service) probe(ctx context.Context, rel string) (media.Info, error) {
 	info, err := s.prober.Probe(ctx, rel)
 	if err != nil {
-		return media.Info{}, nil, err
+		return media.Info{}, err
 	}
 	if info.DurationMS == nil {
-		return media.Info{}, nil, errors.New("no duration")
+		return media.Info{}, errors.New("no duration")
+	}
+	return info, nil
+}
+
+// analyse probes the file at rel and measures its loudness. A silent file
+// has no loudness (nil).
+func (s *Service) analyse(ctx context.Context, rel string) (media.Info, *media.Loudness, error) {
+	info, err := s.probe(ctx, rel)
+	if err != nil {
+		return media.Info{}, nil, err
 	}
 	l, err := s.ff.Measure(ctx, rel)
 	switch {

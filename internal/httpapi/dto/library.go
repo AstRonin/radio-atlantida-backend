@@ -178,10 +178,9 @@ type TrackPage struct {
 	Total      int     `json:"total" minimum:"0" doc:"Tracks matching the filters, on every page."`
 }
 
-// TrackBody is the body of POST /api/tracks and PUT /api/tracks/{id}. PUT
-// replaces the whole track: an optional field left out is cleared. Metadata
-// left out (duration, format, bitrate, sample rate) is read from the file
-// when it exists.
+// TrackBody is the body of POST /api/tracks, which registers a file by its
+// path. Metadata left out (duration, format, bitrate, sample rate) is read
+// from the file when it exists.
 type TrackBody struct {
 	Title        string   `json:"title" minLength:"1" maxLength:"500"`
 	ArtistID     *uint64  `json:"artist_id,omitempty" nullable:"true" minimum:"1"`
@@ -194,6 +193,29 @@ type TrackBody struct {
 	QualityOK    *bool    `json:"quality_ok,omitempty" nullable:"true" doc:"Manual override of the quality check."`
 	QualityNotes string   `json:"quality_notes,omitempty" maxLength:"2000"`
 	PlaylistIDs  []uint64 `json:"playlist_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every playlist of the track; playlists not listed lose it."`
+}
+
+// UpdateTrackBody is the body of PUT /api/tracks/{id}. It has no file_path,
+// duration_ms, format, bitrate, or sample_rate: the analysis of a track file
+// (those fields and the quality) is stored only by the analysis and the
+// replace of the file (ReplaceTrackFileBody). A request that sends one of
+// them is refused as an unknown field, so an old client fails loudly.
+type UpdateTrackBody struct {
+	Title        string   `json:"title" minLength:"1" maxLength:"500"`
+	ArtistID     *uint64  `json:"artist_id,omitempty" nullable:"true" minimum:"1"`
+	TypeID       uint64   `json:"type_id" minimum:"1" doc:"Playlist type of the track (GET /api/playlist-types)."`
+	QualityOK    *bool    `json:"quality_ok,omitempty" nullable:"true" doc:"Manual override of the quality check."`
+	QualityNotes string   `json:"quality_notes,omitempty" maxLength:"2000"`
+	PlaylistIDs  []uint64 `json:"playlist_ids" nullable:"false" uniqueItems:"true" maxItems:"1000" doc:"Every playlist of the track; playlists not listed lose it."`
+}
+
+// ReplaceTrackFileBody is the body of POST /api/tracks/{id}/replace-file. It
+// points the track at another file under the media root and analyses that
+// file (checksum, format, loudness, quality against the broadcast standard)
+// in the same request. The old file is not removed. The reviewed mark is
+// cleared unless the path and the content are both unchanged.
+type ReplaceTrackFileBody struct {
+	FilePath string `json:"file_path" minLength:"1" maxLength:"1024" doc:"The new file, relative to the media root, with forward slashes, for example music/new.mp3. No absolute paths, backslashes, or .. elements."`
 }
 
 // DeleteTracksBody is the body of POST /api/tracks/delete.

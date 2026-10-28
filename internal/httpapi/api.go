@@ -119,6 +119,7 @@ func registerEventSchemas(reg huma.Registry) {
 		{reflect.TypeFor[ws.OperationCompletedEvent](), completed},
 		{reflect.TypeFor[ws.OperationFailedEvent](), failed},
 		{reflect.TypeFor[ws.OperationProgressEvent](), progress},
+		{reflect.TypeFor[ws.TrackAnalysedEvent](), []string{ws.EventTrackAnalysed}},
 		{reflect.TypeFor[ws.TrackPlanWarningEvent](), []string{ws.EventTrackPlanWarning}},
 		{reflect.TypeFor[ws.NowPlayingEvent](), []string{ws.EventNowPlaying}},
 		{reflect.TypeFor[ws.TrackEndedEvent](), []string{ws.EventTrackEnded}},

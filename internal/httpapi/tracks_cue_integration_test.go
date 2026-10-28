@@ -108,7 +108,7 @@ func TestTrackCueRefusals(t *testing.T) {
 	require.Nil(t, res.BuildOperationID, "not planned")
 	// PUT /api/tracks/{id} keeps the cue.
 	a.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/tracks/%d", id), map[string]any{
-		"title": "Live", "file_path": "live.mp3", "type_id": music, "duration_ms": 60000, "playlist_ids": []uint64{},
+		"title": "Live", "type_id": music, "playlist_ids": []uint64{},
 	}, &res.Track)
 	require.Equal(t, 10000, res.Track.CueInMS)
 	require.Equal(t, 15000, *res.Track.CueOutMS)

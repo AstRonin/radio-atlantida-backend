@@ -103,6 +103,18 @@ type TrackInput struct {
 	PlaylistIDs  []uint64
 }
 
+// TrackEdit is the part of a track that PUT changes. The file path and the
+// length are not in it: the file of a track changes only through its replace
+// (ingest.Service.ReplaceFile), which analyses the new file.
+type TrackEdit struct {
+	Title        string
+	ArtistID     *uint64
+	TypeID       uint64
+	QualityOK    *bool
+	QualityNotes string
+	PlaylistIDs  []uint64
+}
+
 // QualityIssue is a problem that the analysis found in a track file
 // (docs/phase-11-plan.md §2, decision 5). The codes are part of the API and
 // of ck_tracks_quality_issues: add codes, never rename one.
@@ -273,11 +285,11 @@ type TrackStore interface {
 	// Create adds a track without playlists. ErrFilePathTaken,
 	// ErrUnknownType, ErrUnknownArtist.
 	Create(ctx context.Context, in TrackInput) (uint64, error)
-	// Update changes the metadata of a track (not its playlists) and, in
-	// the same statement, clears its reviewed mark when the title, the
-	// artist, or the file path differs from the stored one.
-	// ErrTrackNotFound, ErrFilePathTaken, ErrUnknownType, ErrUnknownArtist.
-	Update(ctx context.Context, id uint64, in TrackInput) error
+	// Update changes the metadata of a track (not its playlists or its
+	// file) and, in the same statement, clears its reviewed mark when the
+	// title or the artist differs from the stored one.
+	// ErrTrackNotFound, ErrUnknownType, ErrUnknownArtist.
+	Update(ctx context.Context, id uint64, in TrackEdit) error
 	// SetPlaylists makes playlistIDs the playlists of the track.
 	// ErrUnknownPlaylist.
 	SetPlaylists(ctx context.Context, id uint64, playlistIDs []uint64) error
@@ -422,15 +434,21 @@ func (s *Service) CreateTrack(ctx context.Context, in TrackInput) (Track, error)
 }
 
 // UpdateTrack replaces the metadata and the playlists of a track. A new
-// title, artist, or file path clears the reviewed mark.
-func (s *Service) UpdateTrack(ctx context.Context, id uint64, in TrackInput) (Track, error) {
-	in, err := s.prepareTrack(ctx, in)
-	if err != nil {
+// title or artist clears the reviewed mark. The file path and the length do
+// not change here (see TrackEdit).
+func (s *Service) UpdateTrack(ctx context.Context, id uint64, in TrackEdit) (Track, error) {
+	errs := &validation.Error{}
+	in.Title = checkTitle(errs, "title", in.Title)
+	in.QualityNotes = strings.TrimSpace(in.QualityNotes)
+	if err := errs.Err(); err != nil {
+		return Track{}, err
+	}
+	if _, err := s.GetTrack(ctx, id); err != nil {
 		return Track{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	err = s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
+	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		ts := s.tracks.WithTx(tx)
 		if uerr := ts.Update(ctx, id, in); uerr != nil {
 			return uerr
@@ -688,15 +706,8 @@ func (s *Service) prepareTrack(ctx context.Context, in TrackInput) (TrackInput, 
 	if in.DurationMS != nil && in.Format != nil && in.Bitrate != nil && in.SampleRate != nil {
 		return in, nil
 	}
-	info, err := s.prober.Probe(ctx, in.FilePath)
-	switch {
-	case errors.Is(err, media.ErrFileNotFound), errors.Is(err, media.ErrProbeUnavailable):
-		// Registered by path before the file arrives, or no ffprobe on a
-		// development host: the metadata stays as entered.
-		return in, nil
-	case err != nil:
-		// Not fatal: the import phase analyses files properly.
-		s.log.WarnContext(ctx, "read track metadata failed", "file_path", in.FilePath, logging.KeyError, err)
+	info, ok := s.probeFile(ctx, in.FilePath)
+	if !ok {
 		return in, nil
 	}
 	// The entered value wins; the file fills the gaps.
@@ -705,4 +716,45 @@ func (s *Service) prepareTrack(ctx context.Context, in TrackInput) (TrackInput, 
 	in.Bitrate = cmp.Or(in.Bitrate, info.Bitrate)
 	in.SampleRate = cmp.Or(in.SampleRate, info.SampleRate)
 	return in, nil
+}
+
+// probeFile reads the metadata of the file at rel. ok is false when there is
+// none to read: the file is missing or ffprobe is not available (a file
+// registered before it arrives, a development host), or the read failed.
+func (s *Service) probeFile(ctx context.Context, rel string) (info media.Info, ok bool) {
+	info, err := s.prober.Probe(ctx, rel)
+	switch {
+	case errors.Is(err, media.ErrFileNotFound), errors.Is(err, media.ErrProbeUnavailable):
+		return media.Info{}, false
+	case err != nil:
+		// Not fatal: the import phase analyses files properly.
+		s.log.WarnContext(ctx, "read track metadata failed", "file_path", rel, logging.KeyError, err)
+		return media.Info{}, false
+	}
+	return info, true
+}
+
+// FileInUse refuses a change of the file of a track while a clock insert, a
+// one-time insert, or a track plan item that has not aired refers to it. The
+// refusal is an *InUseError naming them, as a delete of the track would be.
+// The check that the track is queued or on air is the ingest service's (it
+// owns the busy check of the media operations).
+func (s *Service) FileInUse(ctx context.Context, id uint64) error {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	users, err := s.tracks.Users(ctx, id, MaxUsers)
+	if err != nil {
+		return fmt.Errorf("list users of track %d: %w", id, err)
+	}
+	planned, err := s.tracks.PlannedHours(ctx, id)
+	if err != nil {
+		return fmt.Errorf("list planned hours of track %d: %w", id, err)
+	}
+	if planned != nil {
+		users = append(users, Ref{Kind: KindPlanItem, Name: "planned from " + planned.From.Format(time.RFC3339)})
+	}
+	if len(users) == 0 {
+		return nil
+	}
+	return &InUseError{Err: ErrTrackInUse, UsedBy: users}
 }

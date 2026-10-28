@@ -164,14 +164,16 @@ func (f *fakeFiles) Remove(rel string) error {
 // fakeTools probe, measure, and encode by file content: what a file is
 // depends only on its bytes, so it survives moves.
 type fakeTools struct {
-	files     *fakeFiles
-	mu        sync.Mutex
-	infos     map[string]media.Info     // content → info
-	loudness  map[string]media.Loudness // content → loudness; missing: silent
-	encodes   []encodeCall
-	encodeErr error
-	missing   bool // Available reports false
-	peaks     int  // Peaks calls
+	files    *fakeFiles
+	mu       sync.Mutex
+	infos    map[string]media.Info     // content → info
+	loudness map[string]media.Loudness // content → loudness; missing: silent
+	// unmeasurable: content whose loudness measurement fails.
+	unmeasurable map[string]bool
+	encodes      []encodeCall
+	encodeErr    error
+	missing      bool // Available reports false
+	peaks        int  // Peaks calls
 }
 
 type encodeCall struct {
@@ -181,7 +183,7 @@ type encodeCall struct {
 }
 
 func newFakeTools(files *fakeFiles) *fakeTools {
-	return &fakeTools{files: files, infos: map[string]media.Info{}, loudness: map[string]media.Loudness{}}
+	return &fakeTools{files: files, infos: map[string]media.Info{}, loudness: map[string]media.Loudness{}, unmeasurable: map[string]bool{}}
 }
 
 // audio puts a file at p whose probe returns info and whose loudness is l
@@ -219,6 +221,9 @@ func (ft *fakeTools) Measure(_ context.Context, rel string) (media.Loudness, err
 	}
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
+	if ft.unmeasurable[c] {
+		return media.Loudness{}, errors.New("decoder failed")
+	}
 	l, ok := ft.loudness[c]
 	if !ok {
 		return media.Loudness{}, media.ErrSilent
@@ -525,12 +530,13 @@ func (fakeTx) WithTx(ctx context.Context, fn func(ctx context.Context, tx db.Tx)
 
 // fakeOps runs nothing itself: Execute calls fn and keeps the outcome.
 type fakeOps struct {
-	mu       sync.Mutex
-	nextID   uint64
-	started  []operations.Kind
-	summary  map[uint64]string
-	failure  map[uint64]error
-	progress int
+	mu        sync.Mutex
+	nextID    uint64
+	started   []operations.Kind
+	summary   map[uint64]string
+	failure   map[uint64]error
+	progress  int
+	published []any
 }
 
 func newFakeOps() *fakeOps {
@@ -559,22 +565,42 @@ func (o *fakeOps) Progress(uint64, operations.Kind, int, int, string) {
 	o.progress++
 }
 
+func (o *fakeOps) Publish(event any) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.published = append(o.published, event)
+}
+
+// fakeUses are the clock inserts and plan items that refer to tracks: the
+// refusals of FileInUse (the library decides them).
+type fakeUses struct {
+	inUse map[uint64][]library.Ref
+}
+
+func (u *fakeUses) FileInUse(_ context.Context, id uint64) error {
+	if refs := u.inUse[id]; len(refs) > 0 {
+		return &library.InUseError{Err: library.ErrTrackInUse, UsedBy: refs}
+	}
+	return nil
+}
+
 type fixture struct {
 	svc   *Service
 	files *fakeFiles
 	tools *fakeTools
 	store *fakeStore
+	uses  *fakeUses
 	ops   *fakeOps
 	set   Settings
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{files: newFakeFiles(), store: newFakeStore(), ops: newFakeOps()}
+	f := &fixture{files: newFakeFiles(), store: newFakeStore(), ops: newFakeOps(), uses: &fakeUses{inUse: map[uint64][]library.Ref{}}}
 	f.tools = newFakeTools(f.files)
 	f.set = Settings{Standard: testStandard(), BusyAhead: 10 * time.Minute}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f.svc = NewService(fakeTx{}, f.store, f.files, f.tools, f.tools, f.ops,
+	f.svc = NewService(fakeTx{}, f.store, f.uses, f.files, f.tools, f.tools, f.ops,
 		func(context.Context) (Settings, error) { return f.set, nil }, log, func() time.Time { return testNow })
 	return f
 }

@@ -74,18 +74,16 @@ func TestUpdateClearsReviewedMarkOnContentChange(t *testing.T) {
 	}
 	tests := []struct {
 		name  string
-		edit  func(in *library.TrackInput)
+		edit  func(in *library.TrackEdit)
 		clear bool
 	}{
-		{"same content", func(*library.TrackInput) {}, false},
-		{"type, notes, quality override", func(in *library.TrackInput) {
+		{"same content", func(*library.TrackEdit) {}, false},
+		{"type, notes, quality override", func(in *library.TrackEdit) {
 			in.TypeID, in.QualityNotes, in.QualityOK = jingle, "checked by ear", new(true)
 		}, false},
-		{"duration and format", func(in *library.TrackInput) { in.DurationMS, in.Format = new(1000), new("mp3") }, false},
-		{"title", func(in *library.TrackInput) { in.Title = "Song (Edit)" }, true},
-		{"artist", func(in *library.TrackInput) { in.ArtistID = &other }, true},
-		{"artist removed", func(in *library.TrackInput) { in.ArtistID = nil }, true},
-		{"file path", func(in *library.TrackInput) { in.FilePath = "music/moved.mp3" }, true},
+		{"title", func(in *library.TrackEdit) { in.Title = "Song (Edit)" }, true},
+		{"artist", func(in *library.TrackEdit) { in.ArtistID = &other }, true},
+		{"artist removed", func(in *library.TrackEdit) { in.ArtistID = nil }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -96,7 +94,7 @@ func TestUpdateClearsReviewedMarkOnContentChange(t *testing.T) {
 			_, cerr = f.tracks.SetReviewed(ctx, []uint64{id}, true)
 			require.NoError(t, cerr)
 
-			edited := in
+			edited := library.TrackEdit{Title: in.Title, ArtistID: in.ArtistID, TypeID: in.TypeID}
 			tt.edit(&edited)
 			require.NoError(t, f.tracks.Update(ctx, id, edited))
 			require.Equal(t, tt.clear, f.reviewedAt(ctx, id) == nil)

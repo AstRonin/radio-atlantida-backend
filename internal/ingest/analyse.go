@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
@@ -12,11 +13,14 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
+	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
 const (
-	// analyseWorkers: as importWorkers, two files decoded at a time.
-	analyseWorkers = 2
+	// analyseWorkers: files decoded at a time, by an import and by an
+	// analysis. Four cores decode while the rest stay with playout on the
+	// same machine (docs/phase-11-plan.md §2, decision 9).
+	analyseWorkers = 4
 	// maxAnalyseAll bounds an analysis of every unanalysed track; the
 	// library holds a few thousand.
 	maxAnalyseAll = 50000
@@ -95,9 +99,10 @@ func (s *Service) runAnalyse(ctx context.Context, id uint64, req AnalyseRequest)
 		return "", fmt.Errorf("read tracks: %w", err)
 	}
 	t := newTally()
+	total := newTrackTotal(len(ts))
 	err = workerpool.ForEach(ctx, analyseWorkers, ts, func(ctx context.Context, tr Track) error {
-		outcome := s.analyseTrack(ctx, tr, set.Standard, req.Force, t)
-		done := t.add(outcome, tr.FilePath, outcome == outcomeFailed)
+		res := s.analyseTrack(ctx, tr, set.Standard, req.Force, t)
+		done := s.publishAnalysed(id, total, t, tr, res)
 		s.ops.Progress(id, operations.KindAnalyse, done, len(ts), tr.FilePath)
 		return ctx.Err()
 	})
@@ -107,24 +112,80 @@ func (s *Service) runAnalyse(ctx context.Context, id uint64, req AnalyseRequest)
 	return t.summary(outcomeAnalysed, outcomeRechecked, outcomeMissing, outcomeDeleted, outcomeUnreadable, outcomeFailed), nil
 }
 
+// analysis is the result of analyseTrack. Issues are set only when the
+// analysis was stored, that is for the outcomes analysed and rechecked.
+type analysis struct {
+	outcome string
+	// issues are the codes of the quality issues stored by the analysis.
+	issues []string
+}
+
+// trackTotal is the number of tracks an operation reports in its
+// track.analysed events. An import raises it as it registers tracks; an
+// analysis fixes it at the tracks it started with. Its lock also covers the
+// counting and the publishing of those events, so Done and Total reach the
+// wire in order and the last event published carries the last total.
+type trackTotal struct {
+	mu sync.Mutex
+	n  int
+}
+
+func newTrackTotal(n int) *trackTotal { return &trackTotal{n: n} }
+
+// register counts one more track of the operation. It runs before the
+// track is handed to the analysis, so the total is never below the number
+// of tracks analysed.
+func (c *trackTotal) register() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+}
+
+// publishAnalysed counts the track as processed by operation opID, whatever
+// its outcome, and sends its track.analysed event. The count and the event
+// are made under the lock of total, so Done rises by one on the wire with
+// every event. It returns the number of tracks processed, this one included.
+func (s *Service) publishAnalysed(opID uint64, total *trackTotal, t *tally, tr Track, res analysis) int {
+	total.mu.Lock()
+	defer total.mu.Unlock()
+	done := t.add(res.outcome, tr.FilePath, res.outcome == outcomeFailed)
+	issues := res.issues
+	if issues == nil {
+		issues = []string{}
+	}
+	s.ops.Publish(ws.TrackAnalysedEvent{
+		Type: ws.EventTrackAnalysed, Time: s.now().UTC(),
+		Data: ws.TrackAnalysedData{
+			TrackID: tr.ID, QualityIssues: issues, Outcome: res.outcome,
+			OperationID: opID, Done: done, Total: total.n,
+		},
+	})
+	return done
+}
+
 // analyseTrack analyses the file of one track and stores the result; a
-// reset cue is recorded in t.
-func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, force bool, t *tally) string {
-	sum, err := s.files.Checksum(ctx, tr.FilePath)
-	switch {
-	case errors.Is(err, media.ErrFileNotFound), errors.Is(err, media.ErrInvalidPath):
-		dctx, cancel := context.WithTimeout(ctx, dbTimeout)
-		defer cancel()
-		if merr := s.store.MarkMissing(dctx, tr.ID, s.now().UTC()); merr != nil {
-			if errors.Is(merr, library.ErrTrackNotFound) {
-				return s.trackDeleted(ctx, tr)
+// reset cue is recorded in t. The result tells the outcome and, when the
+// analysis was stored, what it stored.
+func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, force bool, t *tally) analysis {
+	sum := tr.Hashed
+	if sum == "" {
+		var err error
+		sum, err = s.files.Checksum(ctx, tr.FilePath)
+		switch {
+		case errors.Is(err, media.ErrFileNotFound), errors.Is(err, media.ErrInvalidPath):
+			dctx, cancel := context.WithTimeout(ctx, dbTimeout)
+			defer cancel()
+			if merr := s.store.MarkMissing(dctx, tr.ID, s.now().UTC()); merr != nil {
+				if errors.Is(merr, library.ErrTrackNotFound) {
+					return analysis{outcome: s.trackDeleted(ctx, tr)}
+				}
+				return analysis{outcome: s.trackFailed(ctx, tr, "mark file missing", merr)}
 			}
-			return s.trackFailed(ctx, tr, "mark file missing", merr)
+			s.log.WarnContext(ctx, "analysis: track file missing", "track_id", tr.ID, "file_path", tr.FilePath)
+			return analysis{outcome: outcomeMissing}
+		case err != nil:
+			return analysis{outcome: s.trackFailed(ctx, tr, "read file", err)}
 		}
-		s.log.WarnContext(ctx, "analysis: track file missing", "track_id", tr.ID, "file_path", tr.FilePath)
-		return outcomeMissing
-	case err != nil:
-		return s.trackFailed(ctx, tr, "read file", err)
 	}
 
 	unchanged := tr.Checksum != nil && *tr.Checksum == sum
@@ -138,10 +199,10 @@ func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, forc
 		info, loud, aerr := s.analyse(ctx, tr.FilePath)
 		if aerr != nil {
 			if ctx.Err() != nil {
-				return outcomeFailed
+				return analysis{outcome: outcomeFailed}
 			}
 			s.log.WarnContext(ctx, "analysis: file not readable as audio", "track_id", tr.ID, "file_path", tr.FilePath, logging.KeyError, aerr)
-			return outcomeUnreadable
+			return analysis{outcome: outcomeUnreadable}
 		}
 		// A transcoded file keeps the bitrate of its source; a file
 		// replaced on disk is an original again.
@@ -158,12 +219,21 @@ func (s *Service) analyseTrack(ctx context.Context, tr Track, std Standard, forc
 	reset, err := s.store.SaveAnalysis(dctx, tr.ID, a)
 	if err != nil {
 		if errors.Is(err, library.ErrTrackNotFound) {
-			return s.trackDeleted(ctx, tr)
+			return analysis{outcome: s.trackDeleted(ctx, tr)}
 		}
-		return s.trackFailed(ctx, tr, "save analysis", err)
+		return analysis{outcome: s.trackFailed(ctx, tr, "save analysis", err)}
 	}
 	s.cueReset(ctx, tr, reset, t)
-	return outcome
+	return analysis{outcome: outcome, issues: issueCodes(a.Issues)}
+}
+
+// issueCodes returns the codes of the quality issues.
+func issueCodes(issues []library.QualityIssue) []string {
+	out := make([]string, len(issues))
+	for i, c := range issues {
+		out[i] = string(c)
+	}
+	return out
 }
 
 // cueReset logs and records a track whose cue did not fit its new file.
