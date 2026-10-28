@@ -329,6 +329,9 @@ type TrackStore interface {
 	// PlannedHours returns the range of the built plan hours that hold a
 	// planned item of the track; nil when none does.
 	PlannedHours(ctx context.Context, id uint64) (*HourRange, error)
+	// MissedHours returns the range of the hours of the open missed items of
+	// the track (neither rescheduled nor dismissed); nil when none is open.
+	MissedHours(ctx context.Context, id uint64) (*HourRange, error)
 }
 
 // TrackBlockers is what keeps a track from being deleted.
@@ -735,26 +738,58 @@ func (s *Service) probeFile(ctx context.Context, rel string) (info media.Info, o
 }
 
 // FileInUse refuses a change of the file of a track while a clock insert, a
-// one-time insert, or a track plan item that has not aired refers to it. The
-// refusal is an *InUseError naming them, as a delete of the track would be.
+// one-time insert, a track plan item that has not aired, or an open missed
+// item (not dismissed, not rescheduled) refers to it. The refusal is an
+// *InUseError naming them, as a delete of the track would be.
 // The check that the track is queued or on air is the ingest service's (it
 // owns the busy check of the media operations).
 func (s *Service) FileInUse(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	users, err := s.tracks.Users(ctx, id, MaxUsers)
+	users, err := s.trackUsers(ctx, id)
 	if err != nil {
-		return fmt.Errorf("list users of track %d: %w", id, err)
-	}
-	planned, err := s.tracks.PlannedHours(ctx, id)
-	if err != nil {
-		return fmt.Errorf("list planned hours of track %d: %w", id, err)
-	}
-	if planned != nil {
-		users = append(users, Ref{Kind: KindPlanItem, Name: "planned from " + planned.From.Format(time.RFC3339)})
+		return err
 	}
 	if len(users) == 0 {
 		return nil
 	}
 	return &InUseError{Err: ErrTrackInUse, UsedBy: users}
+}
+
+// TrackInUse reports whether FileInUse refuses the track: a clock insert, a
+// one-time insert, a plan item that has not aired, or an open missed item
+// uses it. The track detail shows it so that the panel can disable Replace
+// file.
+func (s *Service) TrackInUse(ctx context.Context, id uint64) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	users, err := s.trackUsers(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return len(users) > 0, nil
+}
+
+// trackUsers lists what uses the track, as FileInUse names it. ctx carries
+// the caller's deadline.
+func (s *Service) trackUsers(ctx context.Context, id uint64) ([]Ref, error) {
+	users, err := s.tracks.Users(ctx, id, MaxUsers)
+	if err != nil {
+		return nil, fmt.Errorf("list users of track %d: %w", id, err)
+	}
+	planned, err := s.tracks.PlannedHours(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("list planned hours of track %d: %w", id, err)
+	}
+	if planned != nil {
+		users = append(users, Ref{Kind: KindPlanItem, Name: "planned from " + planned.From.Format(time.RFC3339)})
+	}
+	missed, err := s.tracks.MissedHours(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("list missed hours of track %d: %w", id, err)
+	}
+	if missed != nil {
+		users = append(users, Ref{Kind: KindPlanItem, Name: "missed from " + missed.From.Format(time.RFC3339)})
+	}
+	return users, nil
 }

@@ -166,7 +166,13 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		if err != nil {
 			return nil, err
 		}
-		return &trackOutput{Body: trackDTO(t)}, nil
+		inUse, err := svc.TrackInUse(ctx, in.ID)
+		if err != nil {
+			return nil, err
+		}
+		out := trackDTO(t)
+		out.InUse = new(inUse)
+		return &trackOutput{Body: out}, nil
 	})
 
 	register(api, log, huma.Operation{

@@ -712,3 +712,26 @@ WHERE EXISTS (SELECT 1 FROM scheduled_items si
 	}
 	return &library.HourRange{From: r.First.UTC(), To: r.Last.UTC().Add(time.Hour)}, nil
 }
+
+// MissedHours returns the range of the hours of the open missed items of the
+// track: play_log rows that are missed and unresolved. A missed item is moved
+// out of scheduled_items into the play log (outage.MarkMissed), so it is
+// read there and is not bounded by the plan horizon; the probe is on
+// ix_play_log_track_id_started_at.
+func (s *Tracks) MissedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
+	var r struct {
+		First *time.Time
+		Last  *time.Time
+	}
+	err := s.g.WithContext(ctx).Raw(`
+SELECT min(date_trunc('hour', p.planned_start_utc)) AS first, max(date_trunc('hour', p.planned_start_utc)) AS last
+FROM play_log p
+WHERE p.track_id = ? AND p.status = 'missed' AND p.resolution = 'open'`, id).Scan(&r).Error
+	if err != nil {
+		return nil, fmt.Errorf("select missed hours of track %d: %w", id, err)
+	}
+	if r.First == nil || r.Last == nil {
+		return nil, nil
+	}
+	return &library.HourRange{From: r.First.UTC(), To: r.Last.UTC().Add(time.Hour)}, nil
+}

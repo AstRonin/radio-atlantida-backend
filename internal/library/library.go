@@ -73,8 +73,9 @@ const (
 	KindClock    = "clock"
 	// KindHourInsert is a one-time insert of a planned hour (§7.2).
 	KindHourInsert = "hour_insert"
-	// KindPlanItem is a track plan item of the track that has not aired
-	// (a change of the track's file names it, see FileInUse).
+	// KindPlanItem is a track plan item of the track that has not aired, or
+	// an open missed item of it (a change of the track's file names it, see
+	// FileInUse).
 	KindPlanItem = "plan_item"
 	// KindPlayout is a track queued in Liquidsoap or on air (named by the
 	// ingest service, which owns the check).

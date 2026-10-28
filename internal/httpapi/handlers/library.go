@@ -31,6 +31,7 @@ type Library interface {
 
 	ListTracks(ctx context.Context, f library.TrackFilter) (library.TrackPage, error)
 	GetTrack(ctx context.Context, id uint64) (library.Track, error)
+	TrackInUse(ctx context.Context, id uint64) (bool, error)
 	CreateTrack(ctx context.Context, in library.TrackInput) (library.Track, error)
 	UpdateTrack(ctx context.Context, id uint64, in library.TrackEdit) (library.Track, error)
 	DeleteTrack(ctx context.Context, id uint64) error

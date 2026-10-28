@@ -144,6 +144,7 @@ type Track struct {
 	AirDurationMS *int       `json:"air_duration_ms,omitempty" doc:"Length on air: cue out (or the duration) minus cue in. The planner fits the track by it. Absent while the duration is unknown."`
 	NextPlannedAt *time.Time `json:"next_planned_at,omitempty" doc:"Earliest planned start of the track in the track plan (planned or queued items); absent when it is not planned."`
 	PlayoutState  string     `json:"playout_state,omitempty" enum:"on_air,queued" doc:"on_air: the track is on air; queued: a plan item of it waits in Liquidsoap's queue. Absent otherwise. The panel reloads on the playout and plan events."`
+	InUse         *bool      `json:"in_use" nullable:"true" doc:"True when a clock insert, a one-time insert, a plan item that has not aired, or an open missed item (not dismissed or rescheduled) uses the track (the refusal of replace-file); false otherwise. null in lists; computed on the track detail. Queued or on-air items are not counted."`
 }
 
 // TrackCueBody is the body of PUT /api/tracks/{id}/cue: the whole cue,
