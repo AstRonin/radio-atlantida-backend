@@ -12,6 +12,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/logsearch"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 )
 
@@ -21,10 +22,9 @@ type OperationStore interface {
 	List(ctx context.Context, f operations.ListFilter) ([]operations.Operation, error)
 }
 
-// LogFiles reads the daily log files.
-type LogFiles interface {
-	List() ([]logging.FileInfo, error)
-	Read(ctx context.Context, name string, f logging.Filter) (logging.Page, error)
+// LogSearch searches the log lines in Loki (GET /api/logs).
+type LogSearch interface {
+	Search(ctx context.Context, q logsearch.Query) (logsearch.Page, error)
 }
 
 // Deps are the services behind the handlers. When only the OpenAPI document
@@ -33,7 +33,7 @@ type Deps struct {
 	// Log is the root logger.
 	Log        *slog.Logger
 	Operations OperationStore
-	Logs       LogFiles
+	LogSearch  LogSearch
 	Settings   Settings
 	Library    Library
 	PlayRules  PlayRules
@@ -54,7 +54,7 @@ type Deps struct {
 func Register(api huma.API, d Deps) {
 	log := logging.For(d.Log, logging.ComponentAPI)
 	registerOperations(api, log, d.Operations)
-	registerLogs(api, log, d.Logs)
+	registerLogs(api, log, d.LogSearch)
 	registerStatus(api, log, d.Now, d.Live, d.Outages, d.Grid)
 	registerBroadcast(api, log, d.Now, d.Broadcast)
 	registerSettings(api, log, d.Settings)

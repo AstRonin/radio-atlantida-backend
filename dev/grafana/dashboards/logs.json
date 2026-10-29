@@ -1,7 +1,7 @@
 {
   "uid": "radio-logs",
   "title": "Logs",
-  "description": "Backend log and playout journal from Loki (docs/tech-design.md §10.4). Kept 10 days, like the files.",
+  "description": "Backend log and playout journal from Loki (docs/tech-design.md §10.4). Kept 10 days.",
   "tags": [
     "radio",
     "logs"
@@ -235,7 +235,7 @@
     {
       "id": 3,
       "title": "Backend log",
-      "description": "Entries of LOG_ROOT/app-*.log, newest first, filtered by level, component, and search text. The line shows msg and err; expand an entry for every field (request_id, …).",
+      "description": "Backend log lines, newest first, filtered by level, component, and search text. The line shows msg and err; expand an entry for every field (request_id, …).",
       "type": "logs",
       "datasource": {
         "type": "loki",

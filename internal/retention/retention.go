@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// Periods are the retention periods, read before every pass from the admin
-// settings retention.play_log_days and retention.log_days (§6.3). The play
-// log period also bounds the intervals of play rules (§4.1); operations
-// follow the log period (§6.5).
+// Periods are the retention periods, read before every pass. The play log
+// period comes from the admin setting retention.play_log_days (§6.3) and also
+// bounds the intervals of play rules (§4.1); operations have their own period
+// (§6.5).
 type Periods struct {
 	PlayLog    time.Duration
 	Operations time.Duration
@@ -45,8 +45,7 @@ func New(store Store, periods PeriodsFunc, now func() time.Time) *Service {
 	return &Service{store: store, periods: periods, now: now}
 }
 
-// Run performs one retention pass and returns a summary. Log files are
-// cleaned by the log rotator, not here.
+// Run performs one retention pass and returns a summary.
 func (s *Service) Run(ctx context.Context) (string, error) {
 	p, err := s.periods(ctx)
 	if err != nil {

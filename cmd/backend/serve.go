@@ -26,6 +26,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
 	"github.com/AstRonin/radio-atlantida-backend/internal/live"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/logsearch"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
@@ -73,12 +74,9 @@ func serve(ctx context.Context) error {
 		return err
 	}
 
-	logs, err := logging.New(cfg.LogRoot)
-	if err != nil {
-		return fmt.Errorf("start logging: %w", err)
-	}
+	logs := logging.New(cfg.LokiURL)
 	// Logs are closed last, so every shutdown step can still log.
-	defer func() { _ = logs.Close() }()
+	defer logs.Close(ctx)
 	log := logs.Logger
 	apiLog := logging.For(log, logging.ComponentAPI)
 	dbLog := logging.For(log, logging.ComponentDB)
@@ -152,7 +150,6 @@ func serve(ctx context.Context) error {
 	bridge := live.NewBridge(live.Config{UDPAddr: cfg.LiveUDPAddr, PublicIPs: cfg.LivePublicIPs}, live.DefaultTimeouts,
 		harborTarget(settingsSvc, cfg.Secrets), hub, log, time.Now)
 
-	applyLogRetention(ctx, settingsSvc, logs, apiLog)
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
 	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log,
 		jobs.Retention(cleanup.Run), jobs.TrackPlan(rotationSvc.RunJob))
@@ -168,7 +165,7 @@ func serve(ctx context.Context) error {
 		Version:    version,
 		Events:     hub,
 		Operations: tracker,
-		Logs:       logging.NewFileReader(cfg.LogRoot),
+		LogSearch:  logsearch.NewService(logsearch.NewClient(cfg.LokiURL, &http.Client{}), logging.For(log, logging.ComponentAPI)),
 		Settings:   settingsSvc,
 		Library:    librarySvc,
 		PlayRules:  playRulesSvc,
@@ -193,6 +190,9 @@ func serve(ctx context.Context) error {
 		return nil
 	})
 	g.Go(func() error { return scheduler.Run(gctx) })
+	// The log sink pushes the lines to Loki and flushes them on shutdown
+	// (logs-loki-plan §4.1). It returns at once when LOKI_URL is empty.
+	g.Go(func() error { return logs.RunPush(gctx) })
 	// The planner runs the clock_build operations started by requests.
 	g.Go(func() error { return rotationSvc.Run(gctx) })
 	// The pusher keeps Liquidsoap's hour queues filled (§8.1).
@@ -352,42 +352,21 @@ func playoutSettings(svc *settings.Service) playout.SettingsFunc {
 	}
 }
 
-// applyLogRetention keeps the log files for retention.log_days: the saved
-// value now, and every value saved later. If the database is unreachable at
-// startup, the rotator keeps its default (equal to the setting's default)
-// until the next change.
-func applyLogRetention(ctx context.Context, svc *settings.Service, logs *logging.Logging, log *slog.Logger) {
-	set := func(days int) {
-		if err := logs.SetRetentionDays(days); err != nil {
-			log.Warn("apply log retention failed", "days", days, logging.KeyError, err)
-		}
-	}
-	settings.OnChange(svc, settings.RetentionLogDays, set)
+// operationsRetentionDays keeps finished operations this many days. Until the
+// log files were removed, operations followed their retention setting, whose
+// default was this period (docs/logs-loki-plan.md §4.4); the period is kept.
+const operationsRetentionDays = 10
 
-	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	days, err := settings.Value(rctx, svc, settings.RetentionLogDays)
-	if err != nil {
-		log.Warn("read log retention failed, keeping the default", logging.KeyError, err)
-		return
-	}
-	set(days)
-}
-
-// retentionPeriods reads the retention periods from the settings before
-// each pass. Operations are kept as long as the logs (§6.5).
+// retentionPeriods reads the play log period from the settings before each
+// pass; operations are kept for operationsRetentionDays (§6.5).
 func retentionPeriods(svc *settings.Service) retention.PeriodsFunc {
 	return func(ctx context.Context) (retention.Periods, error) {
 		playLog, err := settings.Value(ctx, svc, settings.RetentionPlayLogDays)
 		if err != nil {
 			return retention.Periods{}, err
 		}
-		logDays, err := settings.Value(ctx, svc, settings.RetentionLogDays)
-		if err != nil {
-			return retention.Periods{}, err
-		}
 		day := 24 * time.Hour
-		return retention.Periods{PlayLog: time.Duration(playLog) * day, Operations: time.Duration(logDays) * day}, nil
+		return retention.Periods{PlayLog: time.Duration(playLog) * day, Operations: operationsRetentionDays * day}, nil
 	}
 }
 

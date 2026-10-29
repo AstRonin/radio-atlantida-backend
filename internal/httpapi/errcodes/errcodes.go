@@ -39,8 +39,6 @@ const (
 	InternalError Problem = "internal_error"
 	// OperationNotFound: no operation has the requested ID.
 	OperationNotFound Problem = "operation_not_found"
-	// LogFileNotFound: no log file has the requested name.
-	LogFileNotFound Problem = "log_file_not_found"
 	// SettingNotFound: no setting has the requested key.
 	SettingNotFound Problem = "setting_not_found"
 	// SettingNotEditable: the key is a secret; it is set in the environment
@@ -134,6 +132,12 @@ const (
 	// WaveformUnavailable: the track file is missing or cannot be decoded,
 	// so it has no waveform.
 	WaveformUnavailable Problem = "waveform_unavailable"
+	// RangeTooLong: the log search's time range is longer than Loki accepts
+	// (its query length limit); search a shorter range.
+	RangeTooLong Problem = "range_too_long"
+	// LogsUnavailable: Loki did not answer in time, so the log lines cannot
+	// be read now; the logs are still written to stdout.
+	LogsUnavailable Problem = "logs_unavailable"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -141,7 +145,7 @@ func Problems() []Problem {
 	return []Problem{
 		BadRequest, ValidationFailed, NotFound, MethodNotAllowed, BodyTooLarge,
 		UnsupportedMediaType, NotAcceptable, InternalError,
-		OperationNotFound, LogFileNotFound,
+		OperationNotFound,
 		SettingNotFound, SettingNotEditable,
 		PlaylistTypeNotFound, SystemTypeNotDeletable, PlaylistTypeInUse,
 		PlaylistNotFound, PlaylistInUse,
@@ -156,6 +160,7 @@ func Problems() []Problem {
 		MediaOperationRunning, MediaToolsUnavailable,
 		LiveSessionActive, LiveOfferInvalid, LiveUnavailable,
 		TrackOnAir, TrackNotAnalysed, WaveformUnavailable,
+		RangeTooLong, LogsUnavailable,
 	}
 }
 

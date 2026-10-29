@@ -35,7 +35,7 @@ func TestOperationEventOverWebSocketAndREST(t *testing.T) {
 	t.Cleanup(pool.Close)
 	tracker := operations.NewTracker(operationsrepo.New(d.Pool), hub, pool, log, time.Now)
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
-		Log: log, DB: d.Pool, Events: hub, Operations: tracker, Logs: logging.NewFileReader(t.TempDir()),
+		Log: log, DB: d.Pool, Events: hub, Operations: tracker,
 	}))
 	t.Cleanup(func() {
 		hub.Close()

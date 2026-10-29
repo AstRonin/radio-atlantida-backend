@@ -20,6 +20,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/live"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
+	"github.com/AstRonin/radio-atlantida-backend/internal/logsearch"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
@@ -91,8 +92,14 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 		p = dto.NewProblem(r.status, r.code, r.err.Error())
 	case errors.Is(err, operations.ErrNotFound):
 		p = dto.NewProblem(http.StatusNotFound, errcodes.OperationNotFound, "operation not found")
-	case errors.Is(err, logging.ErrFileNotFound):
-		p = dto.NewProblem(http.StatusNotFound, errcodes.LogFileNotFound, "log file not found")
+	case errors.Is(err, logsearch.ErrUnavailable):
+		// The manager sees "logs unavailable"; the log keeps why (the
+		// cause is the Loki error, its status or its deadline).
+		log.WarnContext(ctx, "log search unavailable",
+			logging.KeyRequestID, middleware.GetReqID(ctx),
+			logging.KeyError, err,
+		)
+		p = dto.NewProblem(http.StatusServiceUnavailable, errcodes.LogsUnavailable, "")
 	case errors.Is(err, settings.ErrNotFound):
 		p = dto.NewProblem(http.StatusNotFound, errcodes.SettingNotFound, "setting not found")
 	case errors.Is(err, settings.ErrNotEditable):
@@ -153,6 +160,7 @@ var refusals = []refusal{
 	{ingest.ErrWaveformUnavailable, http.StatusConflict, errcodes.WaveformUnavailable},
 	{live.ErrSessionActive, http.StatusConflict, errcodes.LiveSessionActive},
 	{live.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiveUnavailable},
+	{logsearch.ErrRangeTooLong, http.StatusUnprocessableEntity, errcodes.RangeTooLong},
 }
 
 func refusalFor(err error) *refusal {
@@ -204,6 +212,8 @@ var validationRuleCodes = map[validation.Rule]errcodes.Field{
 	validation.Required:   errcodes.Required,
 	validation.Range:      errcodes.Range,
 	validation.Format:     errcodes.Format,
+	validation.Enum:       errcodes.Enum,
+	validation.Pattern:    errcodes.Pattern,
 	validation.Taken:      errcodes.Taken,
 	validation.UnknownID:  errcodes.UnknownID,
 	validation.Invalid:    errcodes.Invalid,
@@ -395,6 +405,9 @@ var paramCodes = []struct {
 	{"invalid boolean", errcodes.Type},
 	{"invalid date/time", errcodes.Format},
 	{"invalid url.URL", errcodes.Format},
+	// huma writes this text for a missing required parameter (huma.go).
+	{"required query parameter is missing", errcodes.Required},
+	{"required path parameter is missing", errcodes.Required},
 }
 
 // fieldCode returns the code of a validation message. A template without

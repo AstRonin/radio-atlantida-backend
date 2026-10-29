@@ -62,9 +62,9 @@ db-up: env ## Start only PostgreSQL
 db-down: ## Stop PostgreSQL
 	$(COMPOSE) stop db
 
-stack-up: env ## Start db, icecast, liquidsoap and wait until healthy
-	@mkdir -p .dev/media .dev/journal .dev/logs
-	$(COMPOSE) up -d --wait db icecast liquidsoap
+stack-up: env ## Start db, icecast, liquidsoap, loki, alloy and wait until healthy
+	@mkdir -p .dev/media .dev/journal
+	$(COMPOSE) up -d --wait db icecast liquidsoap loki alloy
 
 stack-down: ## Stop the dev stack (data volumes are kept)
 	$(COMPOSE) --profile app --profile monitoring down
@@ -72,17 +72,17 @@ stack-down: ## Stop the dev stack (data volumes are kept)
 stack-logs: ## Follow the dev stack logs
 	$(COMPOSE) --profile app --profile monitoring logs -f
 
-monitoring-up: env ## Start Grafana (database view, log search) on 127.0.0.1:3000 with Loki and Alloy; starts db if needed
-	@mkdir -p .dev/journal .dev/logs
+monitoring-up: env ## Start Grafana (database view, log search) on 127.0.0.1:3000; starts db, loki and alloy if needed
+	@mkdir -p .dev/journal
 	$(COMPOSE) --profile monitoring up -d --wait grafana-role loki alloy grafana
 
-monitoring-down: ## Stop Grafana, Loki, and Alloy only
-	$(COMPOSE) --profile monitoring stop grafana alloy loki
+monitoring-down: ## Stop Grafana only (Loki and Alloy are core services: make stack-down stops them)
+	$(COMPOSE) --profile monitoring stop grafana
 
-monitoring-reset: ## Remove Grafana's, Loki's, and Alloy's volumes (new admin password; logs reloaded from the files)
+monitoring-reset: ## Remove Grafana's, Loki's, and Alloy's volumes (new admin password; Loki and Alloy start empty, so the journal is read again)
 	$(COMPOSE) --profile monitoring rm -s -f grafana alloy loki
 	$(DOCKER) volume rm -f radio-atlantida-dev_grafana-data radio-atlantida-dev_loki-data radio-atlantida-dev_alloy-data
-	@echo "run make monitoring-up to start Grafana with the password from .env and reload the log files"
+	@echo "run make monitoring-up to start Grafana with the password from .env"
 
 media: ## Generate test MP3 files into .dev/media
 	dev/scripts/gen-media.sh ./.dev/media

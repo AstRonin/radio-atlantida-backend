@@ -40,6 +40,7 @@ func TestFieldCode(t *testing.T) {
 		{validation.MsgExpectedRFC3339DateTime, errcodes.Format},
 		{validation.MsgExpectedArrayItemsUnique, errcodes.Unique},
 		{"invalid integer", errcodes.Type},
+		{"required query parameter is missing", errcodes.Required},
 		{"invalid date/time for format 2006-01-02T15:04:05Z07:00", errcodes.Format},
 		{"something else", errcodes.Invalid},
 	}
@@ -111,7 +112,6 @@ func TestProblemForMapsDomainErrorsAndLogsUnexpectedOnce(t *testing.T) {
 
 	require.Equal(t, errcodes.OperationNotFound,
 		problemFor(ctx, log, fmt.Errorf("get: %w", operations.ErrNotFound)).Code)
-	require.Equal(t, errcodes.LogFileNotFound, problemFor(ctx, log, logging.ErrFileNotFound).Code)
 	require.Empty(t, logs.String())
 
 	p := problemFor(ctx, log, errors.New("boom"))

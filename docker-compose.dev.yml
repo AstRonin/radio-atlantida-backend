@@ -1,12 +1,12 @@
 # Development and test stack. NOT for production: the production compose file
 # lives in radio-atlantida-deploy (§1.1 of docs/tech-design.md).
 #
-#   make stack-up                      db, icecast, liquidsoap (backend runs on the host: make run)
+#   make stack-up                      db, icecast, liquidsoap, loki, alloy (backend runs on the host: make run)
 #   docker compose -f docker-compose.dev.yml --profile app up --build
 #                                      the same plus the backend container
 #   make monitoring-up                 Grafana (profile monitoring) with the live
-#                                      database view and log search (Loki,
-#                                      Alloy), http://127.0.0.1:3000
+#                                      database view and the log search (Loki),
+#                                      http://127.0.0.1:3000
 #
 # Startup configuration of every service is set here through `environment:`
 # (values from .env). The connection values the backend uses to reach Icecast
@@ -116,7 +116,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
       MEDIA_ROOT: /media
-      LOG_ROOT: /logs
+      # The backend pushes its log to Loki and does not wait for it (docs/logs-loki-plan.md §5.2).
+      LOKI_URL: http://loki:3100
       PLAYOUT_JOURNAL_ROOT: /journal
       HTTP_ADDR: 0.0.0.0:8090
       # Live voice (WebRTC): one UDP port for every session. The browser
@@ -134,7 +135,6 @@ services:
       # Read-write: a transcode writes fixed files (docs/phase-11-plan.md);
       # an import only reads (docs/phase-18-plan.md).
       - ${MEDIA_ROOT:?set in .env}:/media
-      - ${LOG_ROOT:?set in .env}:/logs
       # Playout journal, read for reconciliation (§7.1).
       - ${PLAYOUT_JOURNAL_ROOT:?set in .env}:/journal:ro
     depends_on:
@@ -206,27 +206,31 @@ services:
       loki:
         condition: service_started
 
-  # Log storage for Grafana's log search (docs/phase-15-plan.md). Not
-  # published: only Grafana and Alloy reach it on this network.
+  # Log storage (docs/logs-loki-plan.md). A core service: the backend pushes its
+  # log here, Alloy sends the playout journal here, and the Logs page of the panel
+  # and Grafana query it. Published on 127.0.0.1 in development only, so a backend
+  # on the host (make run) can push; production publishes no port.
   #
   # No health check: the image is distroless (only /usr/bin/loki, no shell,
-  # wget, or curl) and loki has no health subcommand. Alloy retries its
-  # pushes with backoff and Grafana's data source answers once Loki is
-  # ready (/ready on 3100), so nothing needs to wait for it.
+  # wget, or curl) and loki has no health subcommand. The backend retries its
+  # pushes and drops lines when Loki is down (never blocks), Alloy retries with
+  # backoff, and Grafana's data source answers once Loki is ready (/ready on
+  # 3100), so nothing needs to wait for it.
   loki:
-    profiles: ["monitoring"]
     image: grafana/loki:3.7.8
     command: ["-config.file=/etc/loki/loki.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
     volumes:
       - loki-data:/loki
       - ./dev/loki/loki.yaml:/etc/loki/loki.yaml:ro
 
-  # Reads the backend's log files and the playout journal from the host
-  # (read-only) and sends every line to Loki (dev/alloy/config.alloy). Read
-  # positions live in alloy-data, so a restart neither loses nor repeats
-  # lines. Its UI shows the pipeline: http://127.0.0.1:12345 (dev only).
+  # Reads the playout journal from the host (read-only) and sends every line to
+  # Loki (dev/alloy/config.alloy). Read positions live in alloy-data, so a restart
+  # neither loses nor repeats lines. Its UI shows the pipeline:
+  # http://127.0.0.1:12345 (dev only).
+  # A core service (docs/logs-loki-plan.md §3.4): the journal needs it.
   alloy:
-    profiles: ["monitoring"]
     image: grafana/alloy:v1.20.1
     command:
       - run
@@ -238,7 +242,6 @@ services:
     volumes:
       - alloy-data:/var/lib/alloy/data
       - ./dev/alloy/config.alloy:/etc/alloy/config.alloy:ro
-      - ${LOG_ROOT:?set in .env}:/logs:ro
       - ${PLAYOUT_JOURNAL_ROOT:?set in .env}:/journal:ro
     healthcheck:
       # The image has bash but neither wget nor curl.

@@ -1,91 +1,22 @@
-// Grafana Alloy: reads the backend's log files and the playout journal from
-// the host and sends every line to Loki (docs/tech-design.md §10.4,
-// docs/phase-15-plan.md decisions 6 and 7). The production copy lives in
+// Grafana Alloy: reads the playout journal from the host and sends every line
+// to Loki (docs/tech-design.md §10.4, docs/phase-15-plan.md decisions 6 and 7).
+// The backend pushes its own log to Loki (docs/logs-loki-plan.md §3.1), so
+// Alloy has no pipeline for it. The production copy lives in
 // radio-atlantida-deploy (config/alloy/); keep both in step.
 //
-// Mounts (read-only): LOG_ROOT at /logs, PLAYOUT_JOURNAL_ROOT at /journal.
+// Mounts (read-only): PLAYOUT_JOURNAL_ROOT at /journal.
 // Read positions live under --storage.path (volume alloy-data), so a restart
 // resumes where it stopped. A file without a position is read from the start.
 //
-// Labels are small closed sets only: job, level, component (backend); job,
-// event, source (journal); and file, the daily file's name. Everything else
-// (request_id, err, item_id, track_id, uri, filename) stays in the line and
-// is filtered with `| json` in queries.
+// Labels are small closed sets only: job, event, source (journal), and file,
+// the journal file's name. Everything else (item_id, track_id, uri, filename)
+// stays in the line and is filtered with `| json` in queries.
 //
 // Why file is a label: Loki accepts a line at most 1 h (max_chunk_age / 2)
 // older than the newest line of its stream. With one stream per daily file,
 // yesterday's file is still accepted when it is read after today's (a first
-// start, a long stop of Alloy). Ten files at most, as the files are kept
-// 10 days.
-
-// --- Backend log: LOG_ROOT/app-YYYY-MM-DD.log (§10.1) ----------------------
-
-// The glob is resolved again every 10 s, so the new daily file is picked up
-// shortly after midnight UTC and a deleted file is let go.
-local.file_match "backend" {
-	path_targets = [{"__path__" = "/logs/app-*.log"}]
-	sync_period  = "10s"
-}
-
-discovery.relabel "backend" {
-	targets = local.file_match.backend.targets
-
-	rule {
-		source_labels = ["__path__"]
-		regex         = ".*/([^/]+)"
-		target_label  = "file"
-	}
-}
-
-loki.source.file "backend" {
-	targets    = discovery.relabel.backend.output
-	forward_to = [loki.process.backend.receiver]
-
-	// Poll the files: change notifications do not cross the WSL2 layer
-	// reliably on the Windows machine (§9.1). Once a second is enough for a
-	// log view and keeps stat calls through WSL2 low.
-	file_watch {
-		min_poll_frequency = "1s"
-		max_poll_frequency = "1s"
-	}
-}
-
-loki.process "backend" {
-	forward_to = [loki.write.loki.receiver]
-
-	// {"time":"…Z","level":"ERROR","msg":"…","component":"outage",…}
-	stage.json {
-		expressions = {
-			time      = "",
-			level     = "",
-			component = "",
-		}
-	}
-
-	// The entry's own time (UTC, nanoseconds), not the time Alloy read it.
-	stage.timestamp {
-		source = "time"
-		format = "RFC3339Nano"
-	}
-
-	stage.labels {
-		values = {
-			level     = "",
-			component = "",
-		}
-	}
-
-	stage.static_labels {
-		values = {
-			job = "backend",
-		}
-	}
-
-	// loki.source.file adds the full path; file (above) replaces it.
-	stage.label_drop {
-		values = ["filename"]
-	}
-}
+// start, a long stop of Alloy). Ten files at most, as the journal files are
+// deleted after 10 days.
 
 // --- Playout journal: PLAYOUT_JOURNAL_ROOT/journal-YYYY-MM-DD.jsonl (§8.3) ---
 
@@ -108,7 +39,9 @@ loki.source.file "journal" {
 	targets    = discovery.relabel.journal.output
 	forward_to = [loki.process.journal.receiver]
 
-	// As for the backend log.
+	// Poll the files: change notifications do not cross the WSL2 layer
+	// reliably on the Windows machine (§9.1). Once a second is enough for a
+	// log view and keeps stat calls through WSL2 low.
 	file_watch {
 		min_poll_frequency = "1s"
 		max_poll_frequency = "1s"

@@ -134,7 +134,6 @@ var (
 	OutageFailedChecks            = Key[int]{"outage.failed_checks_to_open"}
 
 	RetentionPlayLogDays = Key[int]{"retention.play_log_days"}
-	RetentionLogDays     = Key[int]{"retention.log_days"}
 
 	PlayoutEmergencyPlaylistID = Key[*uint64]{"playout.emergency_playlist_id"}
 	PlayoutPrepushMinutes      = Key[int]{"playout.prepush_minutes"}
@@ -230,7 +229,6 @@ func NewRegistry() *Registry {
 	// play rules ("Music rotation": 72 hours by default); serve guards it.
 	r.add(intDef(RetentionPlayLogDays, "Days aired history is kept; at least the longest interval of the play rules. Open missed items are kept until resolved.",
 		"days", 10, 3, 365), ApplyImmediate, false)
-	r.add(intDef(RetentionLogDays, "Days application log files and finished operations are kept.", "days", 10, 1, 365), ApplyImmediate, false)
 
 	// Playout (§8.6).
 	r.add(optionalIDDef(PlayoutEmergencyPlaylistID, "Playlist played when the pool and the plan are both empty. Null: none."), ApplyImmediate, true)

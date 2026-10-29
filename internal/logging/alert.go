@@ -8,7 +8,7 @@ import (
 )
 
 // alertBuffer is the number of alerts queued for the panel. Alerts beyond it
-// are dropped (they are still in the log file).
+// are dropped (they are still on stdout and in Loki).
 const alertBuffer = 256
 
 // Alert is an ERROR entry forwarded to the panel as an error popup (§10.1).

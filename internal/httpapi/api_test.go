@@ -7,10 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -58,7 +55,7 @@ func (f *fakeOperations) List(_ context.Context, filter operations.ListFilter) (
 	return out, f.err
 }
 
-func newAPIRouter(t *testing.T, ops *fakeOperations, logRoot string) (http.Handler, *syncBuffer) {
+func newAPIRouter(t *testing.T, ops *fakeOperations) (http.Handler, *syncBuffer) {
 	t.Helper()
 	logs := &syncBuffer{}
 	log := slog.New(logging.NewHandler(logs, slog.LevelDebug))
@@ -66,7 +63,6 @@ func newAPIRouter(t *testing.T, ops *fakeOperations, logRoot string) (http.Handl
 		Log:        log,
 		DB:         fakePinger{},
 		Operations: ops,
-		Logs:       logging.NewFileReader(logRoot),
 		Events:     ws.NewHub(log),
 		Now:        func() time.Time { return testNow },
 	}), logs
@@ -100,7 +96,7 @@ func TestGetOperation(t *testing.T) {
 	ops := &fakeOperations{ops: map[uint64]operations.Operation{
 		12: {ID: 12, Kind: "retention", Status: operations.StatusCompleted, StartedAt: started, FinishedAt: &finished, ResultSummary: &summary},
 	}}
-	h, _ := newAPIRouter(t, ops, t.TempDir())
+	h, _ := newAPIRouter(t, ops)
 
 	rec := do(t, h, http.MethodGet, "/api/operations/12")
 
@@ -114,7 +110,7 @@ func TestGetOperation(t *testing.T) {
 // an explicit null (the update script treats it as on air).
 func TestLiveStatusUnknown(t *testing.T) {
 	t.Parallel()
-	h, _ := newAPIRouter(t, &fakeOperations{}, t.TempDir())
+	h, _ := newAPIRouter(t, &fakeOperations{})
 
 	rec := do(t, h, http.MethodGet, "/api/status/live")
 
@@ -162,7 +158,7 @@ func TestOperationErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h, _ := newAPIRouter(t, &fakeOperations{err: tt.err}, t.TempDir())
+			h, _ := newAPIRouter(t, &fakeOperations{err: tt.err})
 
 			rec := do(t, h, http.MethodGet, tt.target)
 
@@ -177,7 +173,7 @@ func TestOperationErrors(t *testing.T) {
 
 func TestMethodNotAllowedIsProblem(t *testing.T) {
 	t.Parallel()
-	h, _ := newAPIRouter(t, &fakeOperations{}, t.TempDir())
+	h, _ := newAPIRouter(t, &fakeOperations{})
 
 	rec := do(t, h, http.MethodDelete, "/api/operations/1")
 
@@ -187,7 +183,7 @@ func TestMethodNotAllowedIsProblem(t *testing.T) {
 
 func TestUnexpectedErrorLoggedOnceWithRequestID(t *testing.T) {
 	t.Parallel()
-	h, logs := newAPIRouter(t, &fakeOperations{err: errors.New("connection reset")}, t.TempDir())
+	h, logs := newAPIRouter(t, &fakeOperations{err: errors.New("connection reset")})
 
 	rec := do(t, h, http.MethodGet, "/api/operations/7")
 
@@ -205,7 +201,7 @@ func TestUnexpectedErrorLoggedOnceWithRequestID(t *testing.T) {
 func TestListOperationsDefaults(t *testing.T) {
 	t.Parallel()
 	ops := &fakeOperations{}
-	h, _ := newAPIRouter(t, ops, t.TempDir())
+	h, _ := newAPIRouter(t, ops)
 
 	rec := do(t, h, http.MethodGet, "/api/operations?since=2026-10-13T00:00:00Z&after_id=5")
 
@@ -214,53 +210,6 @@ func TestListOperationsDefaults(t *testing.T) {
 	require.Equal(t, operations.ListFilter{
 		Since: time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC), AfterID: 5, Limit: 100,
 	}, ops.filter)
-}
-
-func TestLogsEndpoints(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	lines := []string{
-		`{"time":"2026-10-13T06:00:00Z","level":"INFO","msg":"first","component":"api"}`,
-		`{"time":"2026-10-13T06:01:00Z","level":"ERROR","msg":"second","component":"db","err":"down","pool":"main"}`,
-		`{"time":"2026-10-13T06:02:00Z","level":"WARN","msg":"third","component":"api"}`,
-	}
-	require.NoError(t, os.WriteFile(filepath.Join(root, "app-2026-10-13.log"), []byte(strings.Join(lines, "\n")+"\n"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "app-2026-10-12.log"), nil, 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "other.txt"), nil, 0o600))
-	h, _ := newAPIRouter(t, &fakeOperations{}, root)
-
-	rec := do(t, h, http.MethodGet, "/api/logs/files")
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.JSONEq(t, `{"items":[
-		{"name":"app-2026-10-13.log","date":"2026-10-13","size_bytes":`+itoa(len(strings.Join(lines, "\n"))+1)+`},
-		{"name":"app-2026-10-12.log","date":"2026-10-12","size_bytes":0}]}`, rec.Body.String())
-
-	rec = do(t, h, http.MethodGet, "/api/logs/files/app-2026-10-13.log?level=WARN")
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.JSONEq(t, `{"total":2,"items":[
-		{"time":"2026-10-13T06:02:00Z","level":"WARN","message":"third","component":"api"},
-		{"time":"2026-10-13T06:01:00Z","level":"ERROR","message":"second","component":"db","error":"down","attrs":{"pool":"main"}}]}`,
-		rec.Body.String())
-
-	rec = do(t, h, http.MethodGet, "/api/logs/files/app-2026-10-13.log?component=api&limit=1&offset=1")
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.JSONEq(t, `{"total":2,"items":[
-		{"time":"2026-10-13T06:00:00Z","level":"INFO","message":"first","component":"api"}]}`, rec.Body.String())
-
-	rec = do(t, h, http.MethodGet, "/api/logs/files/app-2026-10-11.log")
-	require.Equal(t, http.StatusNotFound, rec.Code)
-	require.Equal(t, errcodes.LogFileNotFound, decodeProblem(t, rec).Code)
-
-	for _, name := range []string{"..%2F..%2Fetc%2Fpasswd", "other.txt"} {
-		rec = do(t, h, http.MethodGet, "/api/logs/files/"+name)
-		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, name)
-		require.Equal(t, errcodes.Pattern, decodeProblem(t, rec).Errors[0].Code)
-	}
-}
-
-func itoa(n int) string {
-	b, _ := json.Marshal(n)
-	return string(b)
 }
 
 func TestOpenAPIDocument(t *testing.T) {
@@ -292,7 +241,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	require.Equal(t, "3.1.0", doc.OpenAPI)
 	require.Equal(t, "1.2.3", doc.Info.Version)
 	for _, p := range []string{
-		"/api/operations", "/api/operations/{id}", "/api/logs/files", "/api/logs/files/{name}", "/api/status/live", "/api/ws",
+		"/api/operations", "/api/operations/{id}", "/api/logs", "/api/status/live", "/api/ws",
 		"/api/settings", "/api/settings/{key}", "/api/settings/secrets",
 		"/api/playlist-types", "/api/playlist-types/{id}",
 		"/api/playlists", "/api/playlists/{id}", "/api/playlists/{id}/tracks", "/api/playlists/{id}/play-rules",
@@ -312,6 +261,8 @@ func TestOpenAPIDocument(t *testing.T) {
 		require.Contains(t, doc.Paths, p)
 	}
 	require.NotContains(t, doc.Paths, "/api/import/inbox", "replaced by the folders (docs/phase-18-plan.md)")
+	require.NotContains(t, doc.Paths, "/api/logs/files", "replaced by /api/logs, the Loki search (docs/logs-loki-plan.md §4.2)")
+	require.NotContains(t, doc.Paths, "/api/logs/files/{name}")
 	for _, p := range []string{ // removed by docs/phase-23-plan.md
 		"/api/separation-rules", "/api/separation-rules/{id}", "/api/filler-requests", "/api/filler-requests/{id}/answer",
 		"/api/clocks/{id}/save-with-filler", "/api/clocks/{id}/save-incomplete", "/api/clocks/{id}/filler-pool",
@@ -357,32 +308,6 @@ func TestOpenAPIDocument(t *testing.T) {
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindClockBuild.CompletedEvent())
 	require.Contains(t, schemas["OperationCompletedEvent"].Properties["type"].Enum, operations.KindRetention.CompletedEvent())
 	require.Contains(t, schemas["OperationFailedEvent"].Properties["type"].Enum, operations.KindRetention.FailedEvent())
-}
-
-// The component filter of the logs API is a literal enum tag; it must list
-// exactly the logging components.
-func TestLogComponentEnumMatchesLogging(t *testing.T) {
-	t.Parallel()
-	raw, err := OpenAPI("dev")
-	require.NoError(t, err)
-	var doc struct {
-		Paths map[string]map[string]struct {
-			Parameters []struct {
-				Name   string `json:"name"`
-				Schema struct {
-					Enum []string `json:"enum"`
-				} `json:"schema"`
-			} `json:"parameters"`
-		} `json:"paths"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &doc))
-
-	enums := map[string][]string{}
-	for _, p := range doc.Paths["/api/logs/files/{name}"]["get"].Parameters {
-		enums[p.Name] = p.Schema.Enum
-	}
-	require.Equal(t, stringsOf(logging.Components()), enums["component"])
-	require.Equal(t, logging.LevelNames(), enums["level"])
 }
 
 // The quality issue codes and fixes of the track DTO are the domain's: the

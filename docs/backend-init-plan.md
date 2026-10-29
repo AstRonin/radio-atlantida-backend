@@ -122,7 +122,7 @@ radio-atlantida-backend/
   cmd/backend/main.go            # subcommand dispatch: serve | migrate | openapi
   internal/
     config/                      # env config (caarlos0/env + godotenv)
-    logging/                     # slog JSON, async writer, daily rotator, secret masking
+    logging/                     # slog JSON, async writer, daily rotator (removed 2026-10-29, see logs-loki-plan.md), secret masking
     db/                          # pgx pool, GORM handle, tx helper, UTC session, SQLSTATE mapping (no SQL statements)
     migrations/                  # embedded *.up.sql + runner (golang-migrate, iofs)
     httpapi/                     # chi router, middleware, error format, OpenAPI wiring
@@ -178,7 +178,7 @@ Tasks:
 
 1. `go mod init`, `.gitignore`, `.editorconfig` (LF line endings; development is on macOS, runtime on Windows — see §9.1 of the design), `.gitattributes` with `* text=auto eol=lf`.
 2. `internal/config`: config struct with `caarlos0/env/v11` tags; load `.env` with `godotenv` without overriding variables that are already set.
-   - Required: `DATABASE_URL`, `MEDIA_ROOT`, `LOG_ROOT`.
+   - Required: `DATABASE_URL`, `MEDIA_ROOT`, `LOG_ROOT` (`LOG_ROOT` and the log files were removed on 2026-10-29, see `logs-loki-plan.md`).
    - Secrets (required later, optional in Phase 1): `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`.
    - `HTTP_ADDR` (default `127.0.0.1:8090`) — see 10.4.
    - Fail fast with a clear message listing every missing variable.
@@ -187,7 +187,7 @@ Tasks:
    - Allowed `component` values as typed constants: `api`, `db`, `rotation`, `filler`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`.
    - Masking handler: any attribute whose key matches `password|secret|token|credential` (case-insensitive) is replaced with `***`.
    - Async writer: buffered channel; when full, drop and count; log one WARN with the drop count after the buffer drains. A write failure never panics.
-   - Daily rotator `io.Writer`: file `LOG_ROOT/app-YYYY-MM-DD.log` (UTC date), switches at UTC midnight, deletes files older than 10 days on rotation. Also writes to stdout.
+   - Daily rotator `io.Writer`: file `LOG_ROOT/app-YYYY-MM-DD.log` (UTC date), switches at UTC midnight, deletes files older than 10 days on rotation. Also writes to stdout. *Status 2026-10-29: removed; the handler writes stdout and pushes to Loki, see `logs-loki-plan.md` §4.1.*
 4. `internal/httpapi`: chi router with middleware: request ID, recoverer (logs panic with `component=api`), request logging, timeout for normal endpoints (not for streaming or WebSocket).
 5. Health endpoints: `GET /healthz` (process alive), `GET /readyz` (database reachable). Used by the Docker health check.
 6. Graceful shutdown on SIGINT/SIGTERM: stop accepting requests, drain, close the DB pool, flush logs.
@@ -200,7 +200,7 @@ Tasks:
    | `db` | `postgres:17` (pinned minor) | Database | `127.0.0.1:5432` | named volume `pgdata` |
    | `icecast` | `libretime/icecast:2.4.4-alpine` (see 10.5) | Stream server; the backend checks its mount (§7.1 of the design) | `127.0.0.1:8000` | none (configured by environment variables) |
    | `liquidsoap` | `savonet/liquidsoap` (pinned 2.x tag) | Playout: request queue, fades, fallback, harbor input, callbacks, playout journal | `127.0.0.1:1234` (telnet control), `127.0.0.1:8005` (harbor) | `${MEDIA_ROOT}` → `/media` (ro), `./.dev/journal` → `/journal` (rw), `dev/liquidsoap/radio.liq` (ro) |
-   | `backend` | built from `docker/Dockerfile` | The application in a container (profile `app`) | `127.0.0.1:8090` | `${MEDIA_ROOT}` (ro), `${LOG_ROOT}` (rw), `./.dev/journal` (ro) |
+   | `backend` | built from `docker/Dockerfile` | The application in a container (profile `app`) | `127.0.0.1:8090` | `${MEDIA_ROOT}` (ro), `${LOG_ROOT}` (rw; removed 2026-10-29, see `logs-loki-plan.md` §5.4), `./.dev/journal` (ro) |
 
    Details:
    - `db`: user, password, and database from `.env` (dev values in `.env.example`). Health check `pg_isready`.
@@ -215,7 +215,7 @@ Tasks:
      - Health check: the telnet port answers.
    - The control and harbor ports are published to `127.0.0.1` only so that a backend running on the host can reach them in development. In production they stay on the internal network (§8.9 of the design).
    - `backend` runs only with `docker compose --profile app up`. By default developers run the stack without it and start the backend with `make run`. The `migrate` service (`backend migrate up`, `service_completed_successfully` before `backend`) is added in Phase 2.
-   - Test media: `dev/scripts/gen-media.sh` (run by `make media`) generates about 10 short MP3 files with ffmpeg (sine tones of different durations: 20 s, 45 s, 3 min, 4 min) into `./.dev/media`, using ffmpeg from a container so no local install is needed. `.env.example` sets `MEDIA_ROOT=./.dev/media`, `LOG_ROOT=./.dev/logs`.
+   - Test media: `dev/scripts/gen-media.sh` (run by `make media`) generates about 10 short MP3 files with ffmpeg (sine tones of different durations: 20 s, 45 s, 3 min, 4 min) into `./.dev/media`, using ffmpeg from a container so no local install is needed. `.env.example` sets `MEDIA_ROOT=./.dev/media`, `LOG_ROOT=./.dev/logs` (`LOG_ROOT` removed 2026-10-29, see `logs-loki-plan.md` §5.4).
    - Make targets: `make stack-up` (db, icecast, liquidsoap), `make stack-down`, `make stack-logs`, `make media`.
    - Integration tests of repositories still use testcontainers-go (isolated database per test package). The compose stack is for manual testing and for the end-to-end tests of later phases (Liquidsoap, outages).
 10. `.golangci.yml` with a sensible default set (errcheck, govet, staticcheck, gosec, revive, gofumpt).
@@ -226,7 +226,7 @@ Tasks:
     - The layout of Section 2 and the commands from the Makefile.
     - "If the code, the design, and the requirements disagree, stop and ask."
 
-**Done when:** `make stack-up` starts `db`, `icecast`, and `liquidsoap` and all three are healthy; the Icecast mount `/radio` plays the safety source in a player; `make media` creates the test files; `make run` starts the service against the dev database; `/healthz` and `/readyz` answer 200; a log file appears in `LOG_ROOT`; Ctrl+C exits cleanly; `make lint test` passes; `docker compose --profile app up` runs the backend container and its health check passes.
+**Done when:** `make stack-up` starts `db`, `icecast`, and `liquidsoap` and all three are healthy; the Icecast mount `/radio` plays the safety source in a player; `make media` creates the test files; `make run` starts the service against the dev database; `/healthz` and `/readyz` answer 200; a log file appears in `LOG_ROOT` (removed 2026-10-29: the log goes to stdout and to Loki, see `logs-loki-plan.md`); Ctrl+C exits cleanly; `make lint test` passes; `docker compose --profile app up` runs the backend container and its health check passes.
 
 ## 4. Phase 2 — Database and migrations
 
@@ -278,8 +278,8 @@ Tasks:
 4. `internal/operations`: `Start(ctx, kind) (id)`, `Complete(id, summary)`, `Fail(id, component, err)`. Writes the `operations` row and emits exactly one terminal event (`<kind>.completed` / `<kind>.failed`). Optional `Progress`. Helper to run a function as an operation in a goroutine with panic recovery.
    - `GET /api/operations/{id}` and `GET /api/operations?since=` so a reconnecting panel can catch up.
 5. Errors at ERROR level are also pushed to the panel as an `error.alert` event (§10.1 of the design).
-6. Logs API: `GET /api/logs/files`, `GET /api/logs/files/{name}?level=&component=&limit=&offset=`. File name must match `^app-\d{4}-\d{2}-\d{2}\.log$`; read only from `LOG_ROOT`.
-7. `internal/jobs`: a small in-process scheduler (ticker-based, UTC). First jobs: log file cleanup (already in the rotator) and `operations` retention (10 days). Play log retention is added here too (`DELETE ... WHERE status IN ('aired','truncated') AND started_at < now() - interval '10 days'`, plus resolved missed rows by `resolved_at`), because the table already exists.
+6. Logs API: `GET /api/logs/files`, `GET /api/logs/files/{name}?level=&component=&limit=&offset=`. File name must match `^app-\d{4}-\d{2}-\d{2}\.log$`; read only from `LOG_ROOT`. *Status 2026-10-29: replaced by `GET /api/logs` on Loki, see `logs-loki-plan.md` §4.2.*
+7. `internal/jobs`: a small in-process scheduler (ticker-based, UTC). First jobs: log file cleanup (already in the rotator; removed 2026-10-29) and `operations` retention (10 days). Play log retention is added here too (`DELETE ... WHERE status IN ('aired','truncated') AND started_at < now() - interval '10 days'`, plus resolved missed rows by `resolved_at`), because the table already exists.
 8. Live status endpoint `GET /api/status/live` (deploy plan, 8.5): returns `{ "on_air": bool|null, "open_outage_id": int|null, "current_clock": string|null, "time": "<UTC>" }`. Until the Liquidsoap and outage phases (Section 9, items 9 and 10) exist, `on_air`, `open_outage_id` and `current_clock` are `null`. `null` means unknown, never off-air; callers must treat it as on air. Documented in the OpenAPI spec and covered by one test.
 
 **Done when:** `backend openapi` outputs a valid spec (checked by a validator in CI); a test operation emits its event over WebSocket and is readable via REST; validation errors come back per field; `GET /api/status/live` answers with the unknown-state values.
@@ -298,7 +298,7 @@ Tasks:
    - `operations` (Phase 3): insert of the running row, terminal status update, select by ID, and list since a time → `internal/repository/operations`.
    - Retention (Phase 3, in `internal/jobs`): delete of `operations` older than 10 days, and delete of `play_log` rows with status `aired` or `truncated` older than 10 days → `internal/repository/retention`. The rule lives in `internal/retention`; `internal/jobs` only schedules it.
    - Advisory lock of the scheduler (Phase 3, in `internal/jobs`): `pg_try_advisory_lock` and `pg_advisory_unlock` → `internal/repository/jobs`, behind the `jobs.Locker` interface. The repository package is named after the domain package `internal/jobs`.
-   - Not moved, because they are not query statements: the connection probe behind `/readyz` (stays in `internal/db`), the migration runner and its SQL files (`internal/migrations`), and log file cleanup (file I/O in `internal/logging`).
+   - Not moved, because they are not query statements: the connection probe behind `/readyz` (stays in `internal/db`), the migration runner and its SQL files (`internal/migrations`), and log file cleanup (file I/O in `internal/logging`; removed 2026-10-29, the rotator is gone).
 6. **Architecture test.** A test in `internal/architecture` scans all non-test Go files. It fails if SQL statements (`SELECT`, `INSERT INTO`, `UPDATE … SET`, `DELETE FROM`, `ON CONFLICT`) or imports of `gorm.io/gorm` and `github.com/jackc/pgx` appear outside `internal/repository/`, `internal/db/`, `internal/dbtest/`, and `internal/migrations/`. The failure message names the file and line. A deliberate exception needs a comment and an entry in the test's allow list.
 7. **Repository tests.** Integration tests for each repository against PostgreSQL (testcontainers, through `internal/dbtest`). The existing operations and retention tests keep their behaviour; only the location of the SQL changes. Tests may use SQL for fixtures and assertions.
 8. **CLAUDE.md.** Add the layer rule (tech-design §5.1), the rule "a new domain package gets a repository package with the same name", and the updated layout of Section 2.
@@ -312,7 +312,7 @@ Tasks:
 Tasks:
 
 1. `internal/settings`: a registry of typed definitions. Persistence goes through `internal/repository/settings`; the registry itself holds no SQL: key, Go type, default, validator, `apply` mode (`immediate` or `reconnect`), and a `secret` flag (secrets are never stored here; the API only reports whether the env secret is set).
-2. Initial keys (grouped as in §6.3): station (timezone `Asia/Yerevan`, name), stream output (Icecast host, port, mount, codec, bitrate, sample rate, channels, loudness target, metadata, HLS flag), Liquidsoap (music gain, `fade_out_ms` 2500 in 2000..3000, harbor port, control host/port — see 10.4), rotation (horizons, lookahead 2..3, tolerance defaults, default filler mode), filler (reminder deadline, fallback `random`), outage detection (heartbeat 10 s, Icecast check 5 s, failures 2), retention (play log 10, logs 10), emergency playlist id.
+2. Initial keys (grouped as in §6.3): station (timezone `Asia/Yerevan`, name), stream output (Icecast host, port, mount, codec, bitrate, sample rate, channels, loudness target, metadata, HLS flag), Liquidsoap (music gain, `fade_out_ms` 2500 in 2000..3000, harbor port, control host/port — see 10.4), rotation (horizons, lookahead 2..3, tolerance defaults, default filler mode), filler (reminder deadline, fallback `random`), outage detection (heartbeat 10 s, Icecast check 5 s, failures 2), retention (play log 10, logs 10; the logs key was removed 2026-10-29, see `logs-loki-plan.md` §4.4), emergency playlist id.
    - **Code defaults equal the dev compose values** (10.4, item 2). The connection settings to Icecast and Liquidsoap are stored in the database and edited in the admin panel; until the manager saves a value, the code default is used. Defaults: Icecast host `icecast`, port `8000`, mount `/radio`, codec MP3, bitrate 128 kbps, sample rate 44100, channels 2; Liquidsoap control host `liquidsoap`, port `1234`, harbor port `8005`. The host names are the compose service names, so the defaults work for the `app` profile and for the production stack in `radio-atlantida-deploy`, which uses the same service names.
    - For a backend started on the host with `make run`, the README tells the developer to add one line to the hosts file: `127.0.0.1 icecast liquidsoap` (the ports are published to `127.0.0.1`). The alternative is to change the two hosts in the admin panel.
    - The defaults are not seeded by a migration. Migrations seed only system rows (1.2), and `GET /api/settings` must be able to report `is_default` (§6.3 of the design: "Defaults are defined in code and used until a value is saved").

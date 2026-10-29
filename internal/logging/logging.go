@@ -1,16 +1,15 @@
 // Package logging builds the application logger: JSON Lines through log/slog,
-// UTC timestamps, secret masking, a non-blocking writer, and daily log files
-// (§10.1 of the design).
+// UTC timestamps, secret masking, a non-blocking writer, and the push of every
+// line to Loki (docs/logs-loki-plan.md §4.1). The backend keeps no log files.
 package logging
 
 import (
-	"fmt"
+	"context"
 	"io"
 	"log/slog"
 	"os"
 	"regexp"
 	"sync/atomic"
-	"time"
 )
 
 // Component names the part of the system an entry comes from (§10.1).
@@ -39,12 +38,10 @@ const (
 	KeyError     = "err"
 )
 
-const (
-	bufferEntries = 4096
-	// retentionDays applies until the admin setting retention.log_days is
-	// read at startup (SetRetentionDays); it equals that setting's default.
-	retentionDays = 10
-)
+// bufferEntries is how many entries wait for the stdout writer. A busy
+// backend fills it only when stdout itself stalls; the entry is then dropped
+// and counted (see AsyncWriter).
+const bufferEntries = 4096
 
 // For returns a logger that tags every entry with the component.
 func For(log *slog.Logger, c Component) *slog.Logger {
@@ -58,36 +55,51 @@ type Logging struct {
 	// Level can be changed at runtime (a future admin setting).
 	Level *slog.LevelVar
 
-	async   *AsyncWriter
-	rotator *DailyRotator
+	async *AsyncWriter
+	// loki pushes the lines to Loki; nil when LOKI_URL is empty.
+	loki *LokiSink
 
 	alerts        chan Alert
 	alertsDropped atomic.Uint64
 }
 
-// New creates the application logger. Entries go to stdout and to daily files
-// in logRoot, through a buffered channel, so logging never blocks the caller.
-func New(logRoot string) (*Logging, error) {
-	rotator, err := NewDailyRotator(logRoot, retentionDays, time.Now)
-	if err != nil {
-		return nil, err
-	}
-
+// New creates the application logger. Entries go to stdout and, when lokiURL
+// is set, to Loki's push API (run by RunPush). Every destination is fed
+// through buffered channels, so logging never blocks the caller.
+func New(lokiURL string) *Logging {
 	level := new(slog.LevelVar)
 	level.Set(slog.LevelInfo)
 
-	async := NewAsyncWriter(teeWriter{os.Stdout, rotator}, bufferEntries, func(w io.Writer) *slog.Logger {
+	var out io.Writer = os.Stdout
+	var loki *LokiSink
+	if lokiURL != "" {
+		// The sink reports its own losses to stdout only (see LokiSink.report).
+		report := For(slog.New(NewHandler(os.Stdout, slog.LevelInfo)), ComponentAPI)
+		loki = newLokiSink(lokiURL, report, lokiBuffer)
+		out = teeWriter{os.Stdout, loki}
+	}
+	async := NewAsyncWriter(out, bufferEntries, func(w io.Writer) *slog.Logger {
 		return slog.New(NewHandler(w, level))
 	})
 
 	l := &Logging{
-		Level:   level,
-		async:   async,
-		rotator: rotator,
-		alerts:  make(chan Alert, alertBuffer),
+		Level:  level,
+		async:  async,
+		loki:   loki,
+		alerts: make(chan Alert, alertBuffer),
 	}
 	l.Logger = slog.New(newAlertHandler(NewHandler(async, level), l.alerts, &l.alertsDropped))
-	return l, nil
+	return l
+}
+
+// RunPush sends the lines to Loki until ctx ends, then flushes what is still
+// buffered. It returns at once when LOKI_URL is empty. serve runs it in its
+// errgroup.
+func (l *Logging) RunPush(ctx context.Context) error {
+	if l.loki == nil {
+		return nil
+	}
+	return l.loki.Run(ctx)
 }
 
 // Alerts delivers every ERROR entry, for the panel's error popups (§10.1).
@@ -100,19 +112,17 @@ func (l *Logging) Alerts() <-chan Alert { return l.alerts }
 // full.
 func (l *Logging) AlertsDropped() uint64 { return l.alertsDropped.Load() }
 
-// SetRetentionDays changes how many days of log files are kept (admin
-// setting retention.log_days, §6.3).
-func (l *Logging) SetRetentionDays(days int) error {
-	return l.rotator.SetRetentionDays(days)
-}
-
-// Close flushes buffered entries and closes the current log file.
-func (l *Logging) Close() error {
+// Close flushes buffered entries and sends the lines still buffered to Loki
+// (when the push runs). ctx is the shutdown's context: the Loki flush gets its
+// own timeout from it, so it still runs after ctx is cancelled. RunPush must
+// have returned before Close.
+func (l *Logging) Close(ctx context.Context) {
 	l.async.Close()
-	if err := l.rotator.Close(); err != nil {
-		return fmt.Errorf("close log file: %w", err)
+	if l.loki != nil {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lokiFlushTimeout)
+		l.loki.Close(fctx)
+		cancel()
 	}
-	return nil
 }
 
 // NewHandler returns the JSON handler with the project conventions: UTC
@@ -141,7 +151,7 @@ func replaceAttr(groups []string, a slog.Attr) slog.Attr {
 }
 
 // teeWriter writes every entry to all writers, even when one of them fails,
-// so a broken log file never hides entries on stdout.
+// so a failing destination never hides entries on the others.
 type teeWriter []io.Writer
 
 func (t teeWriter) Write(p []byte) (int, error) {
@@ -152,4 +162,19 @@ func (t teeWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), first
+}
+
+// LevelNames are the level names written by the logger, lowest first.
+func LevelNames() []string {
+	return []string{
+		slog.LevelDebug.String(), slog.LevelInfo.String(), slog.LevelWarn.String(), slog.LevelError.String(),
+	}
+}
+
+// Components lists the allowed components (§10.1).
+func Components() []Component {
+	return []Component{
+		ComponentAPI, ComponentDB, ComponentRotation, ComponentLiquidsoap,
+		ComponentIcecast, ComponentWebRTC, ComponentRetention, ComponentOutage, ComponentReconcile, ComponentMedia,
+	}
 }

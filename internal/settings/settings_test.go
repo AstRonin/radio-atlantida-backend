@@ -336,6 +336,27 @@ func TestUnknownAndSecretKeys(t *testing.T) {
 	require.NotContains(t, logs.String(), "hunter2")
 }
 
+// A saved row whose key is no longer in the registry (retention.log_days was
+// removed) is ignored: it is not listed, it reads as not found, and loading
+// does not warn or fail. The row stays in the table.
+func TestStoredKeyNotInRegistryIsIgnored(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.rows["retention.log_days"] = settings.Stored{Key: "retention.log_days", Value: json.RawMessage(`3`), UpdatedAt: t0}
+	svc, logs := newService(t, store)
+
+	all, err := svc.List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, all, len(settings.NewRegistry().Settings()))
+	for _, s := range all {
+		require.NotEqual(t, "retention.log_days", s.Definition.Key)
+	}
+	_, err = svc.Get(t.Context(), "retention.log_days")
+	require.ErrorIs(t, err, settings.ErrNotFound)
+	require.NotContains(t, logs.String(), `"level":"WARN"`)
+	require.Contains(t, store.rows, "retention.log_days", "the row is left in the table")
+}
+
 func TestSecretsReportOnlyIsSet(t *testing.T) {
 	t.Parallel()
 	set := allSecretsSet()

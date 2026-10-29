@@ -21,7 +21,7 @@ Last updated: 2026-10-15
 - **No application code.** No Go, no Angular, no build steps for them. Application images are referenced by tag only, `ghcr.io/astronin/radio-atlantida-backend:${IMAGE_TAG}` and `ghcr.io/astronin/radio-atlantida-frontend:${IMAGE_TAG}`.
 - **Infrastructure images are pinned** to exact tags (Icecast, PostgreSQL, Liquidsoap, Grafana, Loki, Alloy). No `latest` anywhere. The same infrastructure tags as the dev stack in `radio-atlantida-backend` (backend plan, §10.5).
 - **Secrets never in git.** `.env` is git-ignored. `.env.example` lists every variable with a placeholder value and a comment. The secrets are `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`, the database password, the registry token, `GRAFANA_ADMIN_PASSWORD`, and `GRAFANA_DB_PASSWORD`.
-- **Host paths come from `.env` and never change**: `MEDIA_ROOT`, `LOG_ROOT`, `PLAYOUT_JOURNAL_ROOT`, `BACKUP_ROOT` (design §3.1, §9, decision 25). Media files are never inside a container or a named volume (design §8.7).
+- **Host paths come from `.env` and never change**: `MEDIA_ROOT`, `PLAYOUT_JOURNAL_ROOT`, `BACKUP_ROOT` (design §3.1, §9, decision 25). Media files are never inside a container or a named volume (design §8.7).
 - **Network exposure follows design §9 and §8.9.** Only the panel port (bound to `127.0.0.1` by default, see 8.1), the Icecast listener port, and the Grafana port (always bound to `127.0.0.1`, see 8.12) are published to the host. Loki and Alloy are never published. PostgreSQL and the Liquidsoap control port are never published. The panel has no authentication, so it must be reachable only from the local machine or a trusted private network (design §10).
 - **Forward-only migrations.** The update tooling never runs `migrate down` and never restores a database without the manager's explicit confirmation (design §9.2).
 - **The update script is the only way to change the production stack.** Manual `docker compose` commands are allowed for diagnostics, not for updates, because the update script records state needed for rollback and restore.
@@ -34,8 +34,8 @@ Last updated: 2026-10-15
 
 - Use the Compose Specification (no top-level `version:` key).
 - Every service has a `healthcheck`, a `restart: unless-stopped` policy, and an explicit `image:`. Services that build locally do not exist in this repository.
-- Dependencies use `depends_on` with `condition: service_healthy` or `service_completed_successfully`. Never rely on start order alone.
-- Named volumes only for PostgreSQL data and the monitoring state: `grafana-data`, `loki-data`, `alloy-data` (all rebuildable from this repository and the files on the host, not backed up). Everything else is a bind mount from a host path in `.env` or a read-only file of this repository.
+- Dependencies use `depends_on` with `condition: service_healthy` or `service_completed_successfully`. The one exception is `condition: service_started` on a service that has no health check (`loki`, see item 5). Never rely on start order alone.
+- Named volumes only for PostgreSQL data and the monitoring state: `grafana-data`, `loki-data`, `alloy-data` (none is backed up). `grafana-data` is rebuildable from this repository; `loki-data` is rebuildable from the backend's log push, and `alloy-data` (positions) from the playout journal files on the host, not from log files. Everything else is a bind mount from a host path in `.env` or a read-only file of this repository.
 - Service names are identical to the dev stack (`db`, `icecast`, `liquidsoap`, `migrate`, `backend`, `frontend`, `grafana-role`, `grafana`, `loki`, `alloy`). The backend, the frontend nginx, and the Liquidsoap callback URL depend on these names (backend plan §3 task 9, frontend plan §3 task 9).
 - Resource limits are not set in v1 (DEFAULT). They can be added after the first measured run on the production machine.
 
@@ -65,7 +65,7 @@ radio-atlantida-deploy/
       dashboards/database.json        # the live database dashboard
       dashboards/logs.json            # log search: backend logs, playout journal, errors by component
     loki/loki.yaml                    # single process, filesystem storage, 10 days retention
-    alloy/config.alloy                # reads LOG_ROOT and PLAYOUT_JOURNAL_ROOT (polling), labels, pushes to loki
+    alloy/config.alloy                # reads PLAYOUT_JOURNAL_ROOT only (polling), labels, pushes to loki
   docs/
     base.md
     tech-design.md
@@ -106,12 +106,12 @@ Tasks:
 4. `.env.example`: every variable the stack reads, grouped and commented:
    - Release: `IMAGE_TAG` (for example `1.4.2`).
    - Registry: `GHCR_USER`, `GHCR_READ_TOKEN` (read:packages).
-   - Host paths: `MEDIA_ROOT`, `LOG_ROOT`, `PLAYOUT_JOURNAL_ROOT`, `BACKUP_ROOT` (default `./backups`).
+   - Host paths: `MEDIA_ROOT`, `PLAYOUT_JOURNAL_ROOT`, `BACKUP_ROOT` (default `./backups`).
    - Database: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DATABASE_URL` (built from the same values, or set explicitly).
    - Secrets: `ICECAST_SOURCE_PASSWORD`, `ICECAST_ADMIN_PASSWORD`, `ICECAST_RELAY_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`.
    - Network: `PANEL_BIND_ADDRESS` (default `127.0.0.1`, see 8.1), `PANEL_PORT` (default `8080`), `ICECAST_PUBLIC_PORT` (default `8000`).
    - Pinned infrastructure tags: `POSTGRES_IMAGE`, `ICECAST_IMAGE`, `LIQUIDSOAP_IMAGE`, `GRAFANA_IMAGE`, `LOKI_IMAGE`, `ALLOY_IMAGE`, so a change is an explicit commit.
-   - Monitoring (8.12): `MONITORING_ENABLED` (`true` or `false`, default `true`), `GRAFANA_PORT` (default `3000`, always bound to `127.0.0.1`), `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_DB_PASSWORD`.
+   - Monitoring (8.12): `MONITORING_ENABLED` (`true` or `false`, default `true`; switches Grafana only, Loki and Alloy always run), `GRAFANA_PORT` (default `3000`, always bound to `127.0.0.1`), `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_DB_PASSWORD`.
    - Callback URL: `BACKEND_CALLBACK_URL` is fixed to `http://backend:8090/api/playout/callback` in the compose file, not in `.env` (it is a service-name fact, not a deployment choice).
 5. `docs/`: the four context files copied from the Claude project (`base.md`, `tech-design.md`, `backend-init-plan.md`, `frontend-init-plan.md`) and this plan.
 6. `README.md`: a short placeholder that points to the runbook section to be written in D5.
@@ -130,14 +130,14 @@ Tasks:
    |---------|-------|---------|----------------|--------|
    | `db` | `${POSTGRES_IMAGE}` (`postgres:17.x`, pinned minor) | Database | none | named volume `pgdata` |
    | `migrate` | `ghcr.io/astronin/radio-atlantida-backend:${IMAGE_TAG}` | Runs `backend migrate up` and exits (profile-less, run by the update script) | none | none |
-   | `backend` | `ghcr.io/astronin/radio-atlantida-backend:${IMAGE_TAG}` | API, WebSocket, rotation, outage detection | none (reached through `frontend`) | `${MEDIA_ROOT}` ro, `${LOG_ROOT}` rw, `${PLAYOUT_JOURNAL_ROOT}` ro |
+   | `backend` | `ghcr.io/astronin/radio-atlantida-backend:${IMAGE_TAG}` | API, WebSocket, rotation, outage detection; pushes its log to `loki` (`LOKI_URL=http://loki:3100`, no log files) | none (reached through `frontend`) | `${MEDIA_ROOT}` ro, `${PLAYOUT_JOURNAL_ROOT}` ro |
    | `liquidsoap` | `${LIQUIDSOAP_IMAGE}` (pinned 2.x, same tag as dev) | Playout, fallback, harbor, journal | none (control and harbor stay internal, design §8.9) | `${MEDIA_ROOT}` ro at `/media`, `${PLAYOUT_JOURNAL_ROOT}` rw at `/journal`, `./config/liquidsoap/radio.liq` ro |
    | `icecast` | `${ICECAST_IMAGE}` (`libretime/icecast:2.4.4-alpine`, backend plan §10.5) | Stream server | `${ICECAST_PUBLIC_PORT}` | none |
    | `frontend` | `ghcr.io/astronin/radio-atlantida-frontend:${IMAGE_TAG}` | Panel (nginx, proxies `/api` to `backend`) | `${PANEL_BIND_ADDRESS}:${PANEL_PORT}` → 8080 | none |
    | `grafana-role` | `${POSTGRES_IMAGE}` | Profile `monitoring`. Runs `psql -v ON_ERROR_STOP=1 -f /role.sql` as `POSTGRES_USER` against `db`, with `GRAFANA_DB_PASSWORD` passed as the session setting `radio.grafana_password` (`PGOPTIONS`), and exits (design §10.3) | none | `./config/grafana/role.sql` ro |
    | `grafana` | `${GRAFANA_IMAGE}` (Grafana OSS, pinned, same tag as dev) | Profile `monitoring`. Live database view and log search (design §10.3, §10.4) | `127.0.0.1:${GRAFANA_PORT}` → 3000 | named volume `grafana-data`, `./config/grafana/provisioning` ro, `./config/grafana/dashboards` ro |
-   | `loki` | `${LOKI_IMAGE}` (pinned, same tag as dev) | Profile `monitoring`. Log storage (design §10.4) | none | named volume `loki-data`, `./config/loki/loki.yaml` ro |
-   | `alloy` | `${ALLOY_IMAGE}` (pinned, same tag as dev) | Profile `monitoring`. Collects the log and journal files into `loki` (design §10.4) | none | named volume `alloy-data`, `${LOG_ROOT}` ro at `/logs`, `${PLAYOUT_JOURNAL_ROOT}` ro at `/journal`, `./config/alloy/config.alloy` ro |
+   | `loki` | `${LOKI_IMAGE}` (pinned, same tag as dev) | Core service, no profile. Log storage: the backend pushes to it, the panel and Grafana read it (design §10.4) | none | named volume `loki-data`, `./config/loki/loki.yaml` ro |
+   | `alloy` | `${ALLOY_IMAGE}` (pinned, same tag as dev) | Core service, no profile. Collects the playout journal files into `loki` (design §10.4) | none | named volume `alloy-data`, `${PLAYOUT_JOURNAL_ROOT}` ro at `/journal`, `./config/alloy/config.alloy` ro |
 
 2. Networks: one internal network `radio` for all services. Only `frontend`, `icecast`, and `grafana` have published ports; the `grafana` port is bound to `127.0.0.1` in the compose file, not through a variable.
 3. Startup order:
@@ -145,7 +145,7 @@ Tasks:
    - `migrate` runs with `depends_on: db: condition: service_healthy` and exits `0`. `backend` depends on `migrate: condition: service_completed_successfully`.
    - `backend` healthy (`/healthz`) before `frontend` starts (`condition: service_healthy`).
    - `liquidsoap` depends on `icecast: condition: service_healthy`.
-   - `grafana-role` depends on `db: condition: service_healthy`; `grafana` depends on `grafana-role: condition: service_completed_successfully` and `loki: condition: service_healthy`; `alloy` depends on `loki: condition: service_healthy`. No application service depends on a monitoring service.
+   - `grafana-role` depends on `db: condition: service_healthy`; `grafana` depends on `grafana-role: condition: service_completed_successfully` and `loki: condition: service_started` (Loki has no health check, see item 5); `alloy` depends on `loki: condition: service_started`. `loki` and `alloy` have no profile and are core services. No application service depends on a monitoring service, and the backend does not wait for Loki (it keeps logging to stdout and retries the push).
 4. Environment values for every service are set in the compose file through `environment:` with values from `.env`, the same way the dev stack does it (backend plan §3, task 9). The Liquidsoap startup values match the dev script exactly: `ICECAST_HOST=icecast`, `ICECAST_PORT=8000`, `ICECAST_MOUNT=/radio`, `TELNET_PORT=1234`, `HARBOR_PORT=8005`, `JOURNAL_DIR=/journal`, `BACKEND_CALLBACK_URL=http://backend:8090/api/playout/callback`.
 5. Health checks:
    - `db`: `pg_isready`.
@@ -153,9 +153,9 @@ Tasks:
    - `frontend`: `/` on port 8080.
    - `icecast`: `/status-json.xsl`.
    - `liquidsoap`: the telnet port answers.
-   - `grafana`: `/api/health` on port 3000; `loki`: `/ready` on port 3100; `alloy`: `/-/ready` on port 12345 (each with a tool the pinned image contains; checked when the tag is chosen).
+   - `grafana`: `/api/health` on port 3000; `alloy`: `/-/ready` on port 12345 (each with a tool the pinned image contains; checked when the tag is chosen). `loki` has no health check: its image is distroless and has no tool to probe it, so it is started, not health-gated (item 3).
 6. Restart policy `unless-stopped` for every long-running service. `migrate` and `grafana-role` have `restart: "no"`.
-7. Log driver: `json-file` with `max-size: 10m` and `max-file: 3` for every container. Application logs go to `LOG_ROOT` (design §10.1), Docker logs are only a fallback.
+7. Log driver: `json-file` with `max-size: 10m` and `max-file: 3` for every container. Application logs go to Loki, pushed by the backend (design §10.1); Docker's copy of stdout is only a fallback.
 8. `grafana` environment (design §10.3): `GF_SECURITY_ADMIN_USER=admin`, `GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}`, `GF_AUTH_ANONYMOUS_ENABLED=false`, `GF_USERS_ALLOW_SIGN_UP=false`, `GF_ANALYTICS_REPORTING_ENABLED=false`, `GF_ANALYTICS_CHECK_FOR_UPDATES=false`, `GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false`, `GF_NEWS_NEWS_FEED_ENABLED=false`, and `GRAFANA_DB_PASSWORD` and `POSTGRES_DB` for the data source file. The monitoring variables are interpolated with `:-` (empty allowed), so the stack renders with monitoring off; the preflight (D4, step 1) enforces them when it is on. `config/grafana/`, `config/loki/`, and `config/alloy/` are copies of `dev/grafana/`, `dev/loki/`, and `dev/alloy/` in `radio-atlantida-backend`; a change to either side is made in both (8.12).
 
 **Done when:** `docker compose --env-file .env.example config` and `docker compose --env-file .env.example --profile monitoring config` render without errors and without any `latest` tag; a check in CI (D5) confirms that no published port other than `frontend`, `icecast`, and `grafana` appears, that the `grafana` port is bound to `127.0.0.1`, and that `loki` and `alloy` publish nothing.
@@ -199,7 +199,7 @@ Tasks:
    - `update.bat restore` — restore the database from the dump recorded for the last update (`pg_restore --clean`). Shows the dump file name and its UTC time, and asks for confirmation by typing `RESTORE`.
    - `update.bat -DryRun` (any command) — prints every step and performs no change. Used for testing and for the first run.
 3. Steps of an update, in order (design §9.2):
-   1. Preflight: Docker Desktop running and the engine responds. Stop with a message otherwise. Do not install or upgrade Docker. When `MONITORING_ENABLED` is `true`, `GRAFANA_ADMIN_PASSWORD` and `GRAFANA_DB_PASSWORD` must be non-empty; otherwise stop before any change and name the missing variable (the values are never printed). Then create the host paths from `.env` (`MEDIA_ROOT`, `LOG_ROOT`, `PLAYOUT_JOURNAL_ROOT`, `BACKUP_ROOT`), and `backups/` and `logs/`, if they are missing. An existing folder is left as it is; an empty `MEDIA_ROOT` is valid on a fresh machine. If `.env` is missing, the first-run rules below apply; on a regular update a missing `.env` stops the script with a message to copy `.env.example`.
+   1. Preflight: Docker Desktop running and the engine responds. Stop with a message otherwise. Do not install or upgrade Docker. When `MONITORING_ENABLED` is `true`, `GRAFANA_ADMIN_PASSWORD` and `GRAFANA_DB_PASSWORD` must be non-empty; otherwise stop before any change and name the missing variable (the values are never printed). Then create the host paths from `.env` (`MEDIA_ROOT`, `PLAYOUT_JOURNAL_ROOT`, `BACKUP_ROOT`), and `backups/` and `logs/`, if they are missing. An existing folder is left as it is; an empty `MEDIA_ROOT` is valid on a fresh machine. If `.env` is missing, the first-run rules below apply; on a regular update a missing `.env` stops the script with a message to copy `.env.example`.
    2. Live check: call the backend's live status endpoint `GET /api/status/live` (backend plan, Phase 3, task 8). If on air, ask for confirmation. If an outage is open, stop and report it. If the endpoint does not answer (connection refused, timeout, or 5xx), stop and ask for confirmation: an unreachable endpoint is never read as off-air (§8.5). This step is skipped on the first run.
    3. Fetch this repository: `git pull --ff-only` when Git is available; otherwise download the `main` zip archive and overwrite the tracked files, keeping `.env`, `backups/`, `logs/`, and `state.json`. Show what changed.
    4. Record the current tag in `state.json` (previous tag, new tag, UTC time). `last_result` is `pending` until step 12. On the first run `previous_tag` is `null`.
@@ -209,7 +209,7 @@ Tasks:
    8. Migrate: `docker compose run --rm migrate`. On failure: stop, do not start the new `backend`, report, and keep the dump recorded for restore.
    9. Restart: `docker compose up -d`. Compose recreates only changed containers. This call never names the `monitoring` profile, so it does not start `grafana-role` or `grafana`.
    10. Health: wait for the health checks of `db`, `backend`, `liquidsoap`, and `frontend`, with a timeout (default 180 seconds).
-   10a. Monitoring: when `MONITORING_ENABLED` is `true`, `docker compose --profile monitoring up -d --wait grafana-role loki alloy grafana` (same timeout); when it is `false`, `docker compose --profile monitoring stop grafana alloy loki` for those that run. A failure here is logged as a warning, sets `monitoring: "failed"` in the run log, and never triggers step 11: monitoring does not affect the air (design §9.2, §10.3).
+   10a. Monitoring: when `MONITORING_ENABLED` is `true`, `docker compose --profile monitoring up -d --wait grafana-role grafana` (same timeout); when it is `false`, `docker compose --profile monitoring stop grafana` if it runs. `loki` and `alloy` are core services started in step 9; this switch does not stop them. A failure here is logged as a warning, sets `monitoring: "failed"` in the run log, and never triggers step 11: monitoring does not affect the air (design §9.2, §10.3).
    11. On failure after step 9: set `IMAGE_TAG` back to the recorded previous tag, run `docker compose up -d`, and report. Migrations are not rolled back. Because of the expand and contract rule (design §9.2), the previous code runs against the new schema. If the migration itself failed, the database is restored only through `update.bat restore`. On the first run there is no previous tag to return to: the script does not roll back, reports the failure, and leaves the containers as they are.
    12. Log the run: `logs/update-YYYY-MM-DDTHHMMSSZ.log` with the steps, the tags, the dump path, and the result. Secrets are never written to the log.
 **First run (fresh machine).** The first run is any update where no successful run is recorded: `state.json` is absent, or it is present with `last_result` other than `"ok"` and `previous_tag` null. A failed first run is therefore repeated as a first run. Rules:
@@ -255,9 +255,9 @@ Tasks:
    - Prerequisites on the production machine: Windows 10 or 11, Docker Desktop with WSL2, NTP enabled, Git (optional), the GHCR read token, and the media directory with the tracks.
    - First installation: run `update.bat -DryRun` to see the first-run plan, then `update.bat`. When `.env` is missing, the script creates it from `.env.example` and asks for the GHCR credentials, the image tag, and the host paths (D4, first run).
    - Regular update, rollback, and restore, with the warnings about air.
-   - Where the logs, dumps, and the playout journal are, and how they are backed up (design §10).
+   - Where the update logs (`logs/`), the dumps (`backups/`), and the playout journal are, and how they are backed up (design §10). The application log is in Loki, kept 10 days, and is not backed up.
    - Firewall: allow the panel port only on the private network (design §10).
-   - Monitoring: open `http://127.0.0.1:3000` (or `GRAFANA_PORT`), log in as `admin`; what the "Database" and "Logs" dashboards show, and that the log files on the host stay the source (Loki keeps a 10-day searchable copy); turn monitoring off and on with `MONITORING_ENABLED`; reset a lost admin password with `docker compose exec grafana grafana cli admin reset-admin-password <new>`; change `GRAFANA_DB_PASSWORD` by editing `.env` and running `update.bat`.
+   - Monitoring: open `http://127.0.0.1:3000` (or `GRAFANA_PORT`), log in as `admin`; what the "Database" and "Logs" dashboards show, and that the Logs dashboard and the panel's Logs page read Loki, so the host log files are no longer the log source (Loki keeps 10 days); the playout journal is still read from `PLAYOUT_JOURNAL_ROOT`; turn Grafana off and on with `MONITORING_ENABLED` (the panel's Logs page works either way); reset a lost admin password with `docker compose exec grafana grafana cli admin reset-admin-password <new>`; change `GRAFANA_DB_PASSWORD` by editing `.env` and running `update.bat`.
    - Troubleshooting: Docker not running, registry login failed, health timeout, Liquidsoap not connected to Icecast.
 3. A manual acceptance checklist in `docs/` is not added in v1. Acceptance is the procedure in the runbook.
 
@@ -311,7 +311,7 @@ The production machine pulls images from `ghcr.io/astronin` with a read-only tok
 
 ### 8.12 Database monitoring — DECIDED
 
-An optional Grafana (design §10.3) shows the live state of PostgreSQL. It is on by default (`MONITORING_ENABLED=true`) and can be switched off to save memory. It requires a login (admin password in `.env`), is bound to `127.0.0.1` only, and reads the database through the read-only role `grafana_ro`, which the one-shot `grafana-role` service keeps in step with `.env`. Loki and Alloy (design §10.4) under the same switch add search over the application logs and the playout journal, collected from the host files, kept 10 days, not published, no alerts. There is no metrics history (no Prometheus). The files in `config/grafana/`, `config/loki/`, and `config/alloy/` are copies of `dev/grafana/`, `dev/loki/`, and `dev/alloy/` in `radio-atlantida-backend`, where the dashboards and configuration are developed and tested first (`docs/phase-14-plan.md` and `docs/phase-15-plan.md` in that repository); both are changed together. Monitoring is outside the update's health gate: its failure is a warning, never a rollback.
+An optional Grafana (design §10.3) shows the live state of PostgreSQL. It is on by default (`MONITORING_ENABLED=true`) and can be switched off to save memory. It requires a login (admin password in `.env`), is bound to `127.0.0.1` only, and reads the database through the read-only role `grafana_ro`, which the one-shot `grafana-role` service keeps in step with `.env`. Loki and Alloy (design §10.4) are core services, not under this switch: the backend pushes its application log to Loki, Alloy reads the playout journal from the host files, Loki keeps 10 days, neither is published, and there are no alerts. `MONITORING_ENABLED=false` turns off Grafana only. There is no metrics history (no Prometheus). The files in `config/grafana/`, `config/loki/`, and `config/alloy/` are copies of `dev/grafana/`, `dev/loki/`, and `dev/alloy/` in `radio-atlantida-backend`, where the dashboards and configuration are developed and tested first (`docs/phase-14-plan.md` and `docs/phase-15-plan.md` in that repository); both are changed together. Monitoring is outside the update's health gate: its failure is a warning, never a rollback.
 
 ## 9. Prompt for the first Claude Code session
 

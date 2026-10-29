@@ -20,6 +20,10 @@ const (
 	Range Rule = "range"
 	// Format: a value is not in the required form.
 	Format Rule = "format"
+	// Enum: the value is not one of the allowed values.
+	Enum Rule = "enum"
+	// Pattern: a text does not match the required pattern.
+	Pattern Rule = "pattern"
 	// Taken: another entity already uses the value.
 	Taken Rule = "taken"
 	// UnknownID: the field refers to an entity that does not exist.

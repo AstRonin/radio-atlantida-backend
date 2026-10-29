@@ -108,12 +108,12 @@ Responsibilities:
 | PostgreSQL driver           | `github.com/jackc/pgx/v5`      | Hot paths: play log, rotation queries, play rule interval checks, reconciliation (§5) |
 | ORM                         | `gorm.io/gorm`                 | Admin CRUD (§5) |
 | Migrations                  | `golang-migrate`               | Versioned schema changes (§5). Migration files are kept in `radio-atlantida-backend` |
-| Logging                     | `log/slog` (standard library)  | JSON handler, daily file rotation (§10.1) |
+| Logging                     | `log/slog` (standard library)  | JSON handler to stdout, with a push of each entry to Loki (§10.1) |
 | OpenAPI generation          | To be chosen at implementation | Generates the specification from Go code (§6.4) |
 
 **Configuration split**
 
-- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`), and the host paths `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. The host paths are set once in the Compose `.env` file and never change. Like the API listen address (`HTTP_ADDR`), the UDP address of the live voice bridge (`LIVE_UDP_ADDR`) and the addresses on which the browser reaches it (`LIVE_PUBLIC_IPS`) are environment variables, because they belong to the compose port mapping (v7-15, `docs/phase-12-plan.md` §2). `PLAYOUT_JOURNAL_ROOT` is the host directory to which Liquidsoap writes its playout journal (§7.1); the backend mounts it read-only. All other backend settings are managed in the admin panel (see §6.3).
+- **Environment variables** (`caarlos0/env`): the database connection (URL and credentials), secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`), the host paths `MEDIA_ROOT` and `PLAYOUT_JOURNAL_ROOT`, and the Loki push address `LOKI_URL` (empty turns the push off, §10.1). The host paths are set once in the Compose `.env` file and never change. Like the API listen address (`HTTP_ADDR`), the UDP address of the live voice bridge (`LIVE_UDP_ADDR`) and the addresses on which the browser reaches it (`LIVE_PUBLIC_IPS`) are environment variables, because they belong to the compose port mapping (v7-15, `docs/phase-12-plan.md` §2). `PLAYOUT_JOURNAL_ROOT` is the host directory to which Liquidsoap writes its playout journal (§7.1); the backend mounts it read-only. All other backend settings are managed in the admin panel (see §6.3).
 - **Admin settings (PostgreSQL)**: the Icecast output profile, station timezone, fade length, outage detection thresholds, and other backend settings are edited in the Angular admin panel and stored in the database (see §6.3).
 
 **Precedence (highest first)**
@@ -223,7 +223,7 @@ All database access goes through a repository layer. Business logic never contai
 
 - REST over JSON for commands and data queries.
 - WebSocket for UI events from the backend to the panel: now playing, track progress, live on/off, Liquidsoap state, Icecast connection state, broadcast state, outage start and end, missed-item updates, error alerts, plan warnings, and the outcome of asynchronous operations (§6.5). The panel does not poll for these.
-- Error alerts are shown in the panel as a popup window with the error text. Errors are also written to the log file (see §10.1).
+- Error alerts are shown in the panel as a popup window with the error text. Errors are also written to the log (see §10.1).
 - All timestamps in the API are ISO 8601 in UTC (ending with `Z`).
 - Database structs are never sent to or accepted from the frontend directly.
 - Separate DTOs (request and response structs with `json` tags) are defined for each endpoint.
@@ -296,7 +296,8 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 
 - Database connection (`DATABASE_URL` and credentials).
 - Secrets: `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`.
-- Host paths: `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT`. They are needed by Docker bind mounts before the backend starts, so they are set once in the Compose `.env` file and never change.
+- Host paths: `MEDIA_ROOT` and `PLAYOUT_JOURNAL_ROOT`. They are needed by Docker bind mounts before the backend starts, so they are set once in the Compose `.env` file and never change.
+- Loki push address: `LOKI_URL` (`http://loki:3100` in containers; empty turns the push off, §10.1).
 
 **Managed in the UI (settings pages)**
 
@@ -308,7 +309,7 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Air window** (v7-17): how many played items (`air.played_count`, default 10, allowed 1 to 50) and queued items (`air.queued_count`, default 9, allowed 0 to 50) `GET /api/air-window` returns around the item on air. A change applies to the next request.
 - **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), the default start tolerance of a new insert (`rotation.default_fixed_tolerance_ms`, default 60 s), and the shortest gap that gets music (`rotation.min_gap_ms`, default 10 s). Separation values, duration tolerances, the filler settings, and the tolerance relaxation are removed in v7-23: separation is a play rule (§7.3).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
-- **Retention**: play log days (default 10), application log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1).
+- **Retention**: play log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1). Log retention is not an admin setting: Loki keeps 10 days as deploy configuration (§10.4).
 - **Import** (v7-14; the inbox and library folder settings are removed in v7-18, the import registers files where they lie, §8.7): the broadcast standard of track files: target codec (`mp3`, `aac`, or `vorbis`; default `mp3`), bitrate (320 kbps), sample rate (44100 Hz), channels (2); the lowest acceptable bitrate of a lossy file (128 kbps), the loudness tolerance around `stream.loudness_target_lufs` (2 LU), and the highest true peak (−1 dBTP).
 - Any future backend setting follows the same pattern.
 
@@ -482,7 +483,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 - When the operation finishes, the backend sends exactly one terminal event over the WebSocket hub: either a success event or a failure event. The event carries the operation ID.
 - Long operations may also send progress events (for example, "12 of 40 files analysed"). Progress is optional. The terminal event is mandatory.
 - Event types are named `<operation>.completed` for success and `<operation>.failed` for failure (so the plan job ends with `track_plan.completed`, not `track_plan.built`), for example `track_plan.completed`, `track_plan.failed`, `clock_build.completed`, `clock_build.failed`, `import.completed`, `import.failed`, `missed_items.completed`, `missed_items.failed`, `reschedule.completed`, `reschedule.failed`, `hour_insert.completed`, `hour_insert.failed` (v7-23), `playout_reconcile.completed`, `playout_reconcile.failed`, `analyse.completed`, `transcode.completed` (and their `.failed` and `.progress` events).
-- A failure event contains a short error message, the component that failed (§10.1), and the UTC time. The same error is written to the log file (§10.1) and shown in the panel as an error popup (§6, §10.1).
+- A failure event contains a short error message, the component that failed (§10.1), and the UTC time. The same error is written to the log (§10.1) and shown in the panel as an error popup (§6, §10.1).
 - A success event contains the operation ID, a short result summary, and the UTC time, so the panel can refresh the affected view.
 - The event schemas are part of the OpenAPI contract (§6.4). Each event type is a named schema, so the TypeScript client has typed handlers for every event.
 
@@ -503,7 +504,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 
 - Each asynchronous operation has a row in an `operations` table: id, kind, status (`running`, `completed`, `failed`), started_at, finished_at, error_message, result_summary. The table is the source of truth for the operation state. A panel that reconnects can read it through the REST API to catch up on events it missed.
 - Events are not the only record. If the WebSocket connection is down when an event is sent, the operation still ends in its stored state, and the panel reads that state on reconnect.
-- The `operations` table follows the same retention as the logs (10 days).
+- The `operations` table keeps 10 days, a fixed retention in code (not an admin setting).
 
 **Examples**
 
@@ -782,23 +783,25 @@ Services in a single `docker-compose.yml` (kept in `radio-atlantida-deploy`):
 - `icecast`: test stream server with default configuration.
 - `frontend`: Angular build served by a static server (image `radio-atlantida-frontend`, built from `radio-atlantida-frontend`).
 - `proxy` (optional): reverse proxy for the panel and API.
-- `grafana` (optional, `monitoring` switch): a live view of the database (§10.3) and log search (§10.4) for the operator. With it, `grafana-role`: a one-shot job that keeps the read-only database role of Grafana in step with `.env` and exits; `loki`: log storage; `alloy`: the collector that reads the log and journal files into Loki.
+- `grafana` (optional, `monitoring` switch): a live view of the database (§10.3) and log search (§10.4) for the operator. With it, `grafana-role`: a one-shot job that keeps the read-only database role of Grafana in step with `.env` and exits.
+- `loki` (core service): log storage. The backend pushes its application log to it; the Logs page of the panel and Grafana read it (§10.4).
+- `alloy` (core service): the collector that reads the playout journal file into Loki (§10.4).
 
 Guidelines:
 
 - Each service has its own image; no secrets are baked into images.
 - Configuration comes from environment variables and `.env` files that are not committed, limited to the database connection, secrets, and host paths. All other settings are edited in the admin panel (see §6.3).
 - Media files are never inside a container image or a named volume (see §8.7).
-- Health checks are defined for `db`, `backend`, `liquidsoap`, `grafana`, and `alloy`. `loki` has none: its image is distroless (only the `loki` binary, no shell or HTTP client) and `loki` has no health subcommand. Nothing waits for it to be healthy: Alloy retries its pushes, and Grafana's data source answers once Loki is ready.
-- The log directory (`LOG_ROOT`) is a host bind mount writable by `backend`. Logs are never kept only inside a container (see §10.1).
+- Health checks are defined for `db`, `backend`, `liquidsoap`, `grafana`, and `alloy`. `loki` has none: its image is distroless (only the `loki` binary, no shell or HTTP client) and `loki` has no health subcommand. Nothing waits for it to be healthy: the backend keeps writing stdout and retries its pushes, Alloy retries its pushes, and Grafana's data source answers once Loki is ready.
+- The backend writes no log files and has no log directory. Its log goes to stdout and is pushed to Loki (§10.1), so it does not depend on a file inside a container.
 - The playout journal directory (`PLAYOUT_JOURNAL_ROOT`) is on the host. `liquidsoap` writes to it read-write, and `backend` mounts the same directory read-only for reconciliation (§7.1). It survives container recreation and is included in the backup set (§10).
-- Services communicate over an internal Docker network. Only the panel port, the Icecast listener port, and the Grafana port are published to the host. The Grafana port is always bound to `127.0.0.1` (§10.3); `loki` and `alloy` are not published.
+- Services communicate over an internal Docker network. Only the panel port, the Icecast listener port, and the Grafana port are published to the host. The Grafana port is always bound to `127.0.0.1` (§10.3). `alloy` is not published. `loki` is not published in production; in development it is bound to `127.0.0.1:3100` (§10.4).
 
 ### 9.1 Development and runtime platforms
 
 - **Development**: macOS. Docker Desktop runs the Linux containers.
 - **Runtime**: Windows 10 or 11 PC on SSD storage, running Docker Desktop. The Docker engine inside is Linux (WSL2 backend), so all containers are Linux containers.
-- Because development is on macOS and runtime is on Windows, the `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT` paths are set per machine in `.env`. Paths in the database stay relative (§8.7).
+- Because development is on macOS and runtime is on Windows, the `MEDIA_ROOT` and `PLAYOUT_JOURNAL_ROOT` paths are set per machine in `.env`. Paths in the database stay relative (§8.7).
 - Bind-mounted files from the Windows filesystem are accessed through the WSL2 layer. Read performance is adequate for playout.
 - File paths and line endings are checked in the build pipeline because they differ between macOS and Windows.
 
@@ -815,7 +818,7 @@ The production machine runs the stack from the **radio-atlantida-deploy** reposi
 
 **Deploy repository contents (`radio-atlantida-deploy`)**
 
-- `docker-compose.yml`: services `backend`, `migrate`, `db`, `liquidsoap`, `icecast`, `frontend`, and the monitoring services `grafana-role`, `grafana`, `loki`, and `alloy` (§10.3, §10.4).
+- `docker-compose.yml`: services `backend`, `migrate`, `db`, `liquidsoap`, `icecast`, `frontend`, the core services `loki` and `alloy` (§10.4), and the monitoring services `grafana-role` and `grafana` (§10.3).
 - `.env.example`: the template for the machine's `.env`. The real `.env` is not committed.
 - `IMAGE_TAG`: the release tag in use, for example `1.4.2`.
 - `update.bat`: the entry point the manager runs on double-click or from a terminal.
@@ -891,9 +894,9 @@ Steps, in order:
 
 **Format and library**
 
-- Logs are written as JSON Lines: one JSON object per line. The panel and tools like `jq` can read them directly.
+- Logs are written to stdout as JSON Lines: one JSON object per line, so `jq` can read the stdout copy. The backend also pushes each entry to Loki (see Log storage below), and the panel reads them from Loki through `GET /api/logs`.
 - Library: `log/slog` from the Go standard library, with its JSON handler. It needs no extra dependency and is fast enough for this volume. `zap` or `zerolog` are alternatives if profiling shows a need.
-- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`, `media` (import, analysis, transcoding; v7-14). API errors also carry `request_id`.
+- Each entry contains: `time` (RFC 3339 with offset), `level`, `msg`, `component`, and error details as fields. `component` is one of `api`, `db`, `rotation`, `liquidsoap`, `icecast`, `webrtc`, `retention`, `outage`, `reconcile`, `media` (import, analysis, transcoding; v7-14). API errors also carry `request_id`. An entry without a component is labelled `component="none"` in Loki.
 - Secrets (`ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD`) are never logged. A handler masks any field with a sensitive name.
 
 **What is logged**
@@ -914,19 +917,20 @@ Steps, in order:
 - An open outage is shown as a persistent banner until it closes, not as a popup that can be missed.
 - Alerts are shown with their UTC timestamp converted to the selected timezone.
 
-**Rotation**
+**Log storage**
 
-- One file per day: `app-YYYY-MM-DD.log` in a host directory set by `LOG_ROOT`. The date is the UTC date. Timestamps inside entries are UTC as well.
-- Cleanup of files older than 10 days is also computed in UTC.
-- A small daily rotator (an `io.Writer` in the backend) switches to a new file at midnight. On each rotation it deletes files older than 10 days.
-- Alternative for size limits: `gopkg.in/natefinch/lumberjack.v2`, which supports size-based rotation, maximum age, and backup count. It does not rotate by day by default, so it is a fallback if a single day's file grows too large.
-- Logging must never block playout. Entries are sent through a buffered channel. If the buffer is full, entries are dropped, the drop count is incremented, and a warning is logged once the buffer drains. A log write failure never stops the stream.
+- The backend writes no log files and does no rotation. The JSON handler writes each entry to stdout and also hands it to a Loki sink in `internal/logging`, which pushes it to Loki's push API (`POST /loki/api/v1/push`). The same code runs on the host and in a container.
+- Labels: `job="backend"`, `level`, `component` (set to `none` when an entry has none). The entry's UTC `time` is the Loki timestamp. Other fields stay in the line and are filtered in queries (§10.4).
+- The sink never blocks the logger. Entries go through a bounded buffer; when it is full, entries are dropped, and the count of dropped entries is written to stdout once a minute. When Loki does not answer, a batch is retried a few times and then dropped, with the loss counted. Lines dropped while Loki was down are not restored; they stay on stdout.
+- Logging must never block playout. A log write failure never stops the stream.
+- Retention is Loki's: 10 days (§10.4).
 
 **Access from the panel**
 
-- The Logs section in Angular has a dropdown of available files (one per day, newest first, showing date and size), loaded from `GET /api/logs/files`.
-- `GET /api/logs/files/{name}` returns entries, newest first, with optional filters `level`, `component`, `limit`, `offset`.
-- The file name must match `app-YYYY-MM-DD.log`, and the server reads only from `LOG_ROOT`. This prevents path traversal.
+- The Logs section in Angular reads `GET /api/logs`. The backend answers from Loki; the browser never talks to Loki.
+- Query parameters: `from` and `to` (required, `from` before `to`; the backend sets no limit on the window); `level` (minimum level: `DEBUG`, `INFO`, `WARN`, `ERROR`); `component` (one of the components listed above); `search` (1 to 200 characters, a case-insensitive substring of the decoded `msg` field); `request_id`; `limit` (default 100, 1 to 500); `cursor` (opaque, taken from the previous page's `next_cursor`).
+- The response (`LogEntryPage`) holds `items`, newest first, with `next_cursor` (absent on the last page) and `total` (optional: it is left out when the count does not finish in time).
+- Errors: 422 with field codes `query.<parameter>`; 422 `range_too_long` when Loki refuses the window for its own length limit; 503 `logs_unavailable` when Loki does not answer in time.
 - Timestamps are converted to the timezone selected in the panel (default `Asia/Yerevan`, see §10.2).
 - The API has no authentication (see §6), so this endpoint is subject to the same network restrictions.
 
@@ -937,7 +941,7 @@ Steps, in order:
 - Every column that holds an instant uses `timestamptz`. `timestamp without time zone` is not used.
 - The PostgreSQL session timezone is set to UTC.
 - The Go backend computes and stores all instants in UTC. Conversion happens only at the edges: parsing input and producing output.
-- Logs are UTC: timestamps inside entries and the date in file names (`app-YYYY-MM-DD.log`).
+- Logs are UTC: timestamps inside entries are UTC.
 - The playout journal uses UTC timestamps for every line.
 
 **Display**
@@ -998,27 +1002,27 @@ Steps, in order:
 
 - The same Grafana (§10.3) searches and filters the application logs (§10.1) and the playout journal (§7.1), and shows how many errors each component logged over time. It complements the Logs section of the panel; it does not replace it.
 - No alerts in this version. Grafana alert rules on log queries can be added later without backend changes.
-- The backend code does not change: the log format of §10.1 (JSON Lines, UTC `time`, `level`, `component`) is read as it is.
+- The backend pushes its log to Loki itself (§10.1). The log format of §10.1 (JSON Lines, UTC `time`, `level`, `component`) is used as it is.
 
 **Services**
 
-- `loki`: log storage, single process, filesystem storage in a named volume. Not published; Grafana reaches it on the internal network. No multi-tenancy (`auth_enabled: false`), since only Grafana and Alloy can reach it.
-- `alloy` (Grafana Alloy): the collector. It reads `LOG_ROOT` and `PLAYOUT_JOURNAL_ROOT` read-only and sends every new line to Loki. Its read positions live in a named volume, so a restart neither loses nor repeats lines. Not published.
-- Both are pinned images, part of the monitoring switch of §10.3 (one switch for all monitoring services), and nothing else depends on them.
+- `loki`: log storage, single process, filesystem storage in a named volume. Not published in production. In development it is bound to `127.0.0.1:3100`, so `make run` on the host can push to it. Grafana, Alloy and the backend reach it on the internal network. No multi-tenancy (`auth_enabled: false`), since only these services can reach it. Core service: it runs with `MONITORING_ENABLED=false` too, because the Logs page of the panel reads it.
+- `alloy` (Grafana Alloy): the collector for the playout journal. It reads `PLAYOUT_JOURNAL_ROOT` read-only and sends every new line to Loki. Alloy does not read the backend's log, which the backend pushes itself. Its read positions live in a named volume, so a restart neither loses nor repeats lines. Not published. Core service, outside the monitoring switch.
+- Both are pinned images. They are core services, outside the monitoring switch of §10.3: with `MONITORING_ENABLED=false` only Grafana is off.
 
 **What is collected**
 
-- Application logs: the files `app-YYYY-MM-DD.log` in `LOG_ROOT`, not the container's stdout, so each entry is collected once and survives container recreation. Labels: `job="backend"`, `level`, `component`. `request_id`, `err`, and other fields stay in the line and are filtered in queries, not as labels, so the label set stays small.
+- Application logs: pushed by the backend itself (§10.1), so no collector reads them and each entry is sent once. Labels: `job="backend"`, `level`, `component`. `request_id`, `err`, and other fields stay in the line and are filtered in queries (`| json`), not as labels, so the label set stays small.
 - Playout journal: the files `journal-YYYY-MM-DD.jsonl` in `PLAYOUT_JOURNAL_ROOT`. Labels: `job="playout-journal"`, `event` (`start`, `end`, `output`), `source`. The line time is the entry's `time` field, for both sources.
-- Both sources also carry `file`, the name of the daily file. Loki accepts a line at most about an hour older than the newest line of its stream; with one stream per file, an older file read after a newer one (a first start, a long stop of the collector) is still accepted. It has at most ten values per source.
+- The journal lines also carry `file`, the name of the daily journal file. Loki accepts a line at most about an hour older than the newest line of its stream; with one stream per file, an older file read after a newer one (a first start, a long stop of the collector) is still accepted. It has at most ten values.
 - Not collected: stdout of `liquidsoap`, `icecast`, `db`, and the other containers (Docker `json-file` logs, deploy plan D2). Collecting them needs access to the Docker socket and is a later step.
-- The files on the host stay the source of truth (§10.1, §7.1). Loki is a searchable copy.
+- The journal file on the host stays the source of truth (§7.1). Loki is the only store of the backend's log (§10.1), and a searchable copy of the journal.
 
 **Retention and files**
 
-- Loki keeps 10 days, like the log files (`retention.log_days` default) and the journal. Lines up to 10 days old are accepted, so a first start or a long stop of the collector loads the files still on disk.
-- The files are on the Windows file system through the WSL2 layer, where file change notifications are not reliable. Alloy polls the files and the folders, so new lines, the daily file switch, and the deletion of old files are seen without notifications.
-- Loki's and Alloy's volumes are not backed up: both can be rebuilt from the files on the host while they exist.
+- Loki keeps 10 days (`retention_period: 240h` in its configuration, which is deploy configuration, not an admin setting), for the backend's log and the journal. For the journal, lines up to 10 days old are accepted, so a first start or a long stop of the collector loads the files still on disk.
+- The journal files are on the Windows file system through the WSL2 layer, where file change notifications are not reliable. Alloy polls the folder, so new lines, the daily journal file switch, and the deletion of old files are seen without notifications.
+- Loki's and Alloy's volumes are not backed up. The journal can be rebuilt from its files on the host while they exist. The backend's log is kept only in Loki and on stdout; it is not backed up (a decision of 2026-10-29: the log is short-lived, 10 days, and not worth a backup).
 
 **Configuration as files**
 
@@ -1034,7 +1038,7 @@ The open questions from the previous version are closed. The decisions are recor
 4. **Live voice latency budget.** Target of at most 1 second from microphone to air. The system runs locally on one machine with local Docker (§8.4).
 5. **Production Icecast details.** Entered in the admin panel and stored in the database, like all other output settings. Nothing is set in code or files (§8.8, §6.3).
 6. **Windows host.** Windows 10 or 11 with Docker Desktop (WSL2 backend), SSD storage. No separate performance test is required before going live (§9.1).
-7. **Host paths.** `MEDIA_ROOT`, `LOG_ROOT`, and `PLAYOUT_JOURNAL_ROOT` are set once in the Compose `.env` file and never change. They are not editable in the UI (§6.3, §3.1).
+7. **Host paths.** `MEDIA_ROOT` and `PLAYOUT_JOURNAL_ROOT` are set once in the Compose `.env` file and never change. They are not editable in the UI (§6.3, §3.1).
 8. **Viper.** Removed. Runtime configuration lives in the admin settings, and no YAML profile is used (§3.1).
 9. **Source repositories.** Three repositories: `radio-atlantida-backend`, `radio-atlantida-frontend`, `radio-atlantida-deploy`. Their roles and release coupling are described in §1.1.
 10. **Missed items are not automatically re-aired.** A missed item is never pushed back into the plan by the system. Only the manager decides whether to reschedule or dismiss it (§7.1). Reason: an automatic repeat could place content in a wrong context, for example a news segment after its time.
@@ -1052,13 +1056,13 @@ The open questions from the previous version are closed. The decisions are recor
 22. **References to plan rows.** Missed items live in `play_log`, so `scheduled_items.reschedule_of_id` references `play_log`. `play_log.scheduled_item_id` and `resolved_item_id` are trace ids without a foreign key, because `scheduled_items` rows are deleted after they air (§4, §4.1).
 23. **History blocks deletes.** Tracks, artists, and clocks referenced by the play log or the track plan cannot be deleted (§4).
 24. **No filler** (v7-23). The fill playlists fill the hour; filler modes, pools, the save dialog, and reminders are removed. A gap no fill track can serve uses the emergency steps (§7).
-25. **Journal path is an environment variable.** `PLAYOUT_JOURNAL_ROOT` is a host path set in `.env`, like `MEDIA_ROOT` and `LOG_ROOT`. Liquidsoap writes the journal to it, and the backend reads it read-only (§3.1, §7.1, §9).
+25. **Journal path is an environment variable.** `PLAYOUT_JOURNAL_ROOT` is a host path set in `.env`, like `MEDIA_ROOT`. Liquidsoap writes the journal to it, and the backend reads it read-only (§3.1, §7.1, §9).
 
 26. **Repository layer.** All SQL lives in `internal/repository/<domain>`, one package per domain, named as the domain package. Domain code depends on interfaces it declares itself, and the repositories implement them. Reason: business rules stay free of SQL and driver errors, and a domain rename changes the domain and its repository in the same change (§5.1).
 27. **Import and transcoding.** The manager imports a folder of the media root, and its new files are registered where they lie (v7-18, decided 2026-10-16; the inbox and library folders of v7-14 are gone); there is no upload through the panel. Analysis flags problems against the broadcast standard set in the admin settings, and nothing changes audio without the manager: the panel offers "Fix loudness" and "Optimize track", and the manager chooses whether the fixed file replaces the original or is kept as an optimal copy next to it (§8.7, decided 2026-10-14).
 28. **Live voice without transcoding.** The bridge relays the browser's Opus packets to the harbor as Ogg/Opus, without decoding, using `pion/webrtc` (pure Go, no cgo). Its UDP port and public addresses are environment variables like `HTTP_ADDR`, because they belong to the compose port mapping (§8.4, decided 2026-10-14).
 29. **Database monitoring is a live view.** An optional Grafana reads PostgreSQL's statistics views directly through a read-only role, with a login, bound to localhost. No metrics history, no Prometheus, and no backend changes; a metrics history can be added later without backend changes (§10.3, decided 2026-10-15).
-30. **Log search in Grafana.** Loki stores the application logs and the playout journal, collected by Grafana Alloy from the files on the host (not from container stdout), with 10 days of retention like the files. No alerts in this version; the backend does not change (§10.4, decided 2026-10-15).
+30. **Log search in Grafana.** Loki stores the playout journal, collected by Grafana Alloy from its file on the host, and the backend's application log, which the backend pushes to Loki (changed on 2026-10-29 from collection of the daily files by Alloy; see `docs/logs-loki-plan.md`). Loki keeps 10 days. No alerts in this version (§10.4, decided 2026-10-15).
 31. **Cue points, never trimming.** The manager cuts the edges of a track (applause, talk, noise) by a cue in and cue out point with fades, edited on a waveform in the panel; the file is not changed, Liquidsoap plays only that part, and the planner fits the track by its length on air. Plan items keep the cut they were planned with; a changed cut rebuilds the future hours that hold the track (§4, §6.4, §7, §8.1, §8.5, decided 2026-10-16).
 
 ## 12. Non-functional Requirements
@@ -1067,7 +1071,7 @@ The open questions from the previous version are closed. The decisions are recor
 - A failure in the management panel or API must not stop the air. Playout continues from the planned queue.
 - Rotation generation for one hour completes within a few seconds for a library of tens of thousands of tracks.
 - The play log holds at most 10 days of aired history. Open missed items are kept until resolved.
-- Application logs are JSON, one file per day, and are kept for 10 days (see §10.1). Logging never blocks playout.
+- Application logs are JSON lines, written to stdout and pushed to Loki, and are kept there for 10 days (see §10.1, §10.4). Logging never blocks playout.
 - All changes that affect air are recorded with a UTC timestamp, including outages and missed-item decisions.
 - All stored times are UTC; the panel displays them in the selected timezone (default `Asia/Yerevan`, UTC+04:00).
 - Clock boundaries are exact: a clock starts within one second of its scheduled time (§8.10).

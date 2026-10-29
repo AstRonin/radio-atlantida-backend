@@ -32,7 +32,6 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/ingest"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/liquidsoap"
-	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
@@ -198,7 +197,7 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		hub.Close()
 	})
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.Deps{
-		Log: log, DB: d.Pool, Logs: logging.NewFileReader(t.TempDir()), Operations: tracker,
+		Log: log, DB: d.Pool, Operations: tracker,
 		Rotation: rotationSvc,
 		Library:  svc,
 		PlayRules: playrules.NewService(d, playrulesrepo.New(d.Pool), func(context.Context) (int, error) {

@@ -2,18 +2,6 @@ package dto
 
 import "time"
 
-// LogFile is one daily log file (§10.1).
-type LogFile struct {
-	Name      string `json:"name" example:"app-2026-10-13.log"`
-	Date      string `json:"date" format:"date" doc:"UTC date of the file."`
-	SizeBytes int64  `json:"size_bytes"`
-}
-
-// LogFileList lists the log files, newest first.
-type LogFileList struct {
-	Items []LogFile `json:"items" nullable:"false"`
-}
-
 // LogEntry is one log entry. Times are UTC; the panel converts them to the
 // selected timezone.
 type LogEntry struct {
@@ -29,5 +17,10 @@ type LogEntry struct {
 // LogEntryPage is a page of entries, newest first.
 type LogEntryPage struct {
 	Items []LogEntry `json:"items" nullable:"false"`
-	Total int        `json:"total" doc:"Number of entries in the file that match the filters."`
+	// NextCursor resumes the search with the next, older page. Absent on the
+	// last page.
+	NextCursor string `json:"next_cursor,omitempty" doc:"Pass as cursor to get the next, older page. Absent on the last page."`
+	// Total is the number of entries that match over the whole range. Absent
+	// when the count failed or timed out; the entries are still shown.
+	Total *int64 `json:"total,omitempty" doc:"Number of entries that match over the whole range. Absent when the count failed or timed out."`
 }

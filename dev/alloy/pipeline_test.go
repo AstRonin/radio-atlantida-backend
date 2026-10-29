@@ -1,10 +1,10 @@
 //go:build integration
 
-// Package alloy_test runs the log pipeline of the dev stack, Alloy with
+// Package alloy_test runs the journal pipeline of the dev stack, Alloy with
 // config.alloy sending to Loki with ../loki/loki.yaml, on the images pinned in
 // docker-compose.dev.yml, and checks what reaches Loki
-// (docs/phase-15-plan.md §5, task 3). The files are copied to
-// radio-atlantida-deploy, so this test guards both.
+// (docs/phase-15-plan.md §5, task 3; docs/logs-loki-plan.md §5.1). The files
+// are copied to radio-atlantida-deploy, so this test guards both.
 package alloy_test
 
 import (
@@ -41,9 +41,9 @@ const (
 
 func TestPipeline(t *testing.T) {
 	t.Parallel()
-	logs, journal := t.TempDir(), t.TempDir()
+	journal := t.TempDir()
 	now := time.Now().UTC()
-	yesterday, tomorrow := now.Add(-24*time.Hour), now.Add(24*time.Hour)
+	tomorrow := now.Add(24 * time.Hour)
 
 	tests := []struct {
 		name string
@@ -56,17 +56,6 @@ func TestPipeline(t *testing.T) {
 		want       time.Time
 		wantLabels map[string]string
 	}{
-		{
-			name: "backend entry",
-			dir:  logs, file: "app-" + day(now) + ".log",
-			line: fmt.Sprintf(`{"time":%q,"level":"ERROR","msg":"outage opened today","component":"outage","request_id":"req-1","err":"icecast mount gone"}`,
-				now.Format(time.RFC3339Nano)),
-			selector: `{job="backend", component="outage", level="ERROR"} |= "today"`,
-			want:     now,
-			wantLabels: map[string]string{
-				"job": "backend", "level": "ERROR", "component": "outage", "file": "app-" + day(now) + ".log",
-			},
-		},
 		{
 			name: "journal start",
 			dir:  journal, file: "journal-" + day(now) + ".jsonl",
@@ -89,30 +78,17 @@ func TestPipeline(t *testing.T) {
 			},
 		},
 		{
-			// Same stream labels as "backend entry", a day older, read on the
-			// same first start: accepted only because each file is a stream.
-			name: "yesterday's file",
-			dir:  logs, file: "app-" + day(yesterday) + ".log",
-			line: fmt.Sprintf(`{"time":%q,"level":"ERROR","msg":"outage opened yesterday","component":"outage"}`,
-				yesterday.Format(time.RFC3339Nano)),
-			selector: `{job="backend", component="outage", level="ERROR"} |= "yesterday"`,
-			want:     yesterday,
-			wantLabels: map[string]string{
-				"job": "backend", "level": "ERROR", "component": "outage", "file": "app-" + day(yesterday) + ".log",
-			},
-		},
-		{
 			// The daily switch at 00:00 UTC: a new file name while Alloy runs.
 			// The line time is now, as Loki refuses lines from the future.
-			name:       "next day's file",
+			name:       "next day's journal file",
 			afterStart: true,
-			dir:        logs, file: "app-" + day(tomorrow) + ".log",
-			line: fmt.Sprintf(`{"time":%q,"level":"WARN","msg":"control link lost","component":"liquidsoap"}`,
-				now.Add(2*time.Second).Format(time.RFC3339Nano)),
-			selector: `{job="backend", component="liquidsoap"} |= "control link lost"`,
-			want:     now.Add(2 * time.Second),
+			dir:        journal, file: "journal-" + day(tomorrow) + ".jsonl",
+			line: fmt.Sprintf(`{"event":"output","time":%q,"connected":true,"rid":"next-day"}`,
+				now.Add(2*time.Second).Format(journalTime)),
+			selector: `{job="playout-journal", event="output"} |= "next-day"`,
+			want:     now.Add(2 * time.Second).Truncate(time.Millisecond),
 			wantLabels: map[string]string{
-				"job": "backend", "level": "WARN", "component": "liquidsoap", "file": "app-" + day(tomorrow) + ".log",
+				"job": "playout-journal", "event": "output", "file": "journal-" + day(tomorrow) + ".jsonl",
 			},
 		},
 	}
@@ -122,7 +98,7 @@ func TestPipeline(t *testing.T) {
 		}
 	}
 
-	s := startStack(t, logs, journal)
+	s := startStack(t, journal)
 	from, to := now.Add(-48*time.Hour), now.Add(time.Hour)
 
 	for _, tt := range tests {
@@ -138,20 +114,20 @@ func TestPipeline(t *testing.T) {
 	}
 
 	t.Run("labels are small closed sets", func(t *testing.T) {
-		// request_id, err, item_id, uri, filename stay in the line.
-		require.Equal(t, []string{"component", "event", "file", "job", "level", "source"},
+		// item_id, track_id, uri and filename stay in the line.
+		require.Equal(t, []string{"event", "file", "job", "source"},
 			labelNames(t, s.loki, from, to))
 	})
 
 	t.Run("restart reads nothing twice", func(t *testing.T) {
-		all := `{job=~"backend|playout-journal"}`
+		all := `{job="playout-journal"}`
 		before := len(waitEntries(t, s.loki, all, from, to, len(tests)))
 
 		s.restartAlloy(t)
-		appendLine(t, filepath.Join(logs, "app-"+day(now)+".log"),
-			fmt.Sprintf(`{"time":%q,"level":"INFO","msg":"after restart","component":"api"}`,
-				now.Add(3*time.Second).Format(time.RFC3339Nano)))
-		waitEntries(t, s.loki, `{job="backend"} |= "after restart"`, from, to, 1)
+		appendLine(t, filepath.Join(journal, "journal-"+day(now)+".jsonl"),
+			fmt.Sprintf(`{"event":"output","time":%q,"connected":true,"rid":"after-restart"}`,
+				now.Add(3*time.Second).Format(journalTime)))
+		waitEntries(t, s.loki, `{job="playout-journal"} |= "after-restart"`, from, to, 1)
 
 		// Alloy's counter starts at zero with the process: only the new line
 		// was read. Loki may merge identical entries at query time, so its
@@ -168,7 +144,7 @@ type stack struct {
 	alloy    string // base URL from the host; changes on restart
 }
 
-func startStack(t *testing.T, logs, journal string) *stack {
+func startStack(t *testing.T, journal string) *stack {
 	t.Helper()
 	ctx := t.Context()
 	lokiImage, alloyImage := pinnedImages(t)
@@ -200,7 +176,7 @@ func startStack(t *testing.T, logs, journal string) *stack {
 		testcontainers.WithCmd("run", "--storage.path=/var/lib/alloy/data",
 			"--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"),
 		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
-			hc.Binds = append(hc.Binds, logs+":/logs:ro", journal+":/journal:ro")
+			hc.Binds = append(hc.Binds, journal+":/journal:ro")
 		}),
 		testcontainers.WithExposedPorts("12345/tcp"),
 		testcontainers.WithWaitStrategy(
@@ -274,7 +250,7 @@ func dumpLogsOnFailure(t *testing.T, name string, ctr *testcontainers.DockerCont
 	})
 }
 
-// appendLine appends one line like the backend's rotator and Liquidsoap do.
+// appendLine appends one line like Liquidsoap does.
 func appendLine(t *testing.T, path, line string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G302,G304: a test file in t.TempDir, read by Alloy in a container

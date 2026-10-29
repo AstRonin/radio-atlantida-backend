@@ -11,8 +11,8 @@ import (
 )
 
 // migrateUp applies the embedded migrations and exits. It logs JSON to out
-// only (not to LOG_ROOT): the migrate container runs once, and its output
-// goes to the update log of the deploy script (§9.2).
+// (stdout) only: the migrate container runs once, and its output goes to the
+// update log of the deploy script (§9.2).
 func migrateUp(ctx context.Context, out io.Writer) error {
 	cfg, err := config.LoadMigrate(".env")
 	if err != nil {

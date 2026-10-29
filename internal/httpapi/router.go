@@ -45,9 +45,9 @@ type Deps struct {
 	Version string
 	// Events serves the WebSocket at /api/ws.
 	Events http.Handler
-	// Operations and Logs back the REST handlers.
+	// Operations backs the REST handlers; LogSearch the log search.
 	Operations handlers.OperationStore
-	Logs       handlers.LogFiles
+	LogSearch  handlers.LogSearch
 	Settings   handlers.Settings
 	Library    handlers.Library
 	PlayRules  handlers.PlayRules
@@ -97,7 +97,7 @@ func NewRouter(d Deps) http.Handler {
 	// the timeout; every other operation on timed.
 	api := newAPI(timed, r, d.Version)
 	handlers.Register(api, handlers.Deps{
-		Log: d.Log, Operations: d.Operations, Logs: d.Logs, Settings: d.Settings,
+		Log: d.Log, Operations: d.Operations, LogSearch: d.LogSearch, Settings: d.Settings,
 		Library: d.Library, PlayRules: d.PlayRules,
 		Clocks: d.Clocks, Grid: d.Grid, Rotation: d.Rotation, Playout: d.Playout, Outages: d.Outages, Ingest: d.Ingest, Live: d.Live,
 		Broadcast: d.Broadcast, AirWindow: d.AirWindow, Now: d.Now,

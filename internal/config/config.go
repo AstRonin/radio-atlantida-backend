@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -26,8 +27,9 @@ type Config struct {
 	// MediaRoot is the directory that holds the audio files. Track paths in
 	// the database are relative to it (§8.7).
 	MediaRoot string `env:"MEDIA_ROOT,required,notEmpty"`
-	// LogRoot is the directory for the daily JSON log files (§10.1).
-	LogRoot string `env:"LOG_ROOT,required,notEmpty"`
+	// LokiURL is the base URL of Loki; the backend pushes its log lines to
+	// it. Empty turns the push off (tests, a run without the dev stack).
+	LokiURL string `env:"LOKI_URL"`
 	// PlayoutJournalRoot is the directory where Liquidsoap writes its
 	// playout journal; the backend only reads it, to reconcile what aired
 	// (§7.1).
@@ -100,6 +102,12 @@ func Load(dotenvPath string) (Config, error) {
 func (c *Config) validate() error {
 	if _, _, err := net.SplitHostPort(c.LiveUDPAddr); err != nil {
 		return fmt.Errorf("invalid environment variables: LIVE_UDP_ADDR: %w", err)
+	}
+	if c.LokiURL != "" {
+		u, err := url.Parse(c.LokiURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("invalid environment variables: LOKI_URL: want an http or https URL, got %q", c.LokiURL)
+		}
 	}
 	ips := c.LivePublicIPs[:0]
 	for _, ip := range c.LivePublicIPs {

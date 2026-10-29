@@ -15,7 +15,7 @@ import (
 // run in parallel (t.Setenv forbids it).
 
 var allVars = []string{
-	"DATABASE_URL", "MEDIA_ROOT", "LOG_ROOT", "PLAYOUT_JOURNAL_ROOT", "HTTP_ADDR", "LIVE_UDP_ADDR", "LIVE_PUBLIC_IPS",
+	"DATABASE_URL", "MEDIA_ROOT", "LOKI_URL", "PLAYOUT_JOURNAL_ROOT", "HTTP_ADDR", "LIVE_UDP_ADDR", "LIVE_PUBLIC_IPS",
 	"ICECAST_SOURCE_PASSWORD", "LIQUIDSOAP_CONTROL_USER", "LIQUIDSOAP_CONTROL_PASSWORD",
 }
 
@@ -34,14 +34,13 @@ func TestLoadMissingListsEveryVariable(t *testing.T) {
 	_, err := Load("")
 
 	require.EqualError(t, err,
-		"missing required environment variables: DATABASE_URL, LOG_ROOT, MEDIA_ROOT, PLAYOUT_JOURNAL_ROOT")
+		"missing required environment variables: DATABASE_URL, MEDIA_ROOT, PLAYOUT_JOURNAL_ROOT")
 }
 
 func TestLoadEmptyRequiredCountsAsMissing(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("MEDIA_ROOT", "")
-	t.Setenv("LOG_ROOT", "/logs")
 	t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
 
 	_, err := Load("")
@@ -65,7 +64,6 @@ func TestLoadDefaultsAndSecrets(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("MEDIA_ROOT", "/media")
-	t.Setenv("LOG_ROOT", "/logs")
 	t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
 	t.Setenv("ICECAST_SOURCE_PASSWORD", "s3cret")
 
@@ -93,7 +91,6 @@ func TestLoadLiveNetwork(t *testing.T) {
 			clearEnv(t)
 			t.Setenv("DATABASE_URL", "postgres://x")
 			t.Setenv("MEDIA_ROOT", "/media")
-			t.Setenv("LOG_ROOT", "/logs")
 			t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
 			t.Setenv("LIVE_UDP_ADDR", tc.addr)
 			t.Setenv("LIVE_PUBLIC_IPS", tc.ips)
@@ -114,7 +111,7 @@ func TestLoadDotenvDoesNotOverrideEnvironment(t *testing.T) {
 	t.Setenv("MEDIA_ROOT", "/from-env")
 	dotenv := filepath.Join(t.TempDir(), ".env")
 	require.NoError(t, os.WriteFile(dotenv, []byte(
-		"DATABASE_URL=postgres://dotenv\nMEDIA_ROOT=/from-file\nLOG_ROOT=/logs\nPLAYOUT_JOURNAL_ROOT=/journal\n"), 0o600))
+		"DATABASE_URL=postgres://dotenv\nMEDIA_ROOT=/from-file\nPLAYOUT_JOURNAL_ROOT=/journal\n"), 0o600))
 
 	cfg, err := Load(dotenv)
 
@@ -127,7 +124,6 @@ func TestLoadMissingDotenvIsNotAnError(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://x")
 	t.Setenv("MEDIA_ROOT", "/media")
-	t.Setenv("LOG_ROOT", "/logs")
 	t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
 
 	_, err := Load(filepath.Join(t.TempDir(), "absent.env"))
@@ -158,4 +154,34 @@ func TestSecretsIsSetCoversEveryField(t *testing.T) {
 	set := Secrets{LiquidsoapControlUser: "source"}.IsSet()
 	require.True(t, set["LIQUIDSOAP_CONTROL_USER"])
 	require.False(t, set["ICECAST_SOURCE_PASSWORD"])
+}
+
+func TestLoadLokiURL(t *testing.T) {
+	for _, tc := range []struct {
+		name, url string
+		err       string
+	}{
+		{name: "empty turns the push off", url: ""},
+		{name: "dev stack", url: "http://127.0.0.1:3100"},
+		{name: "https", url: "https://loki.internal:3100"},
+		{name: "no scheme", url: "127.0.0.1:3100", err: "LOKI_URL"},
+		{name: "wrong scheme", url: "ftp://loki:3100", err: "LOKI_URL"},
+		{name: "no host", url: "http://", err: "LOKI_URL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("DATABASE_URL", "postgres://x")
+			t.Setenv("MEDIA_ROOT", "/media")
+			t.Setenv("PLAYOUT_JOURNAL_ROOT", "/journal")
+			t.Setenv("LOKI_URL", tc.url)
+
+			cfg, err := Load("")
+			if tc.err != "" {
+				require.ErrorContains(t, err, tc.err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.url, cfg.LokiURL)
+		})
+	}
 }

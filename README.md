@@ -58,7 +58,7 @@ Only these come from the environment (or `.env`, which never overrides variables
 |----------|----------|---------|
 | `DATABASE_URL` | yes | PostgreSQL connection string |
 | `MEDIA_ROOT` | yes | Directory with the audio files |
-| `LOG_ROOT` | yes | Directory for daily logs `app-YYYY-MM-DD.log` (UTC; kept for the `retention.log_days` setting, default 10) |
+| `LOKI_URL` | no | Base URL of Loki (`http://127.0.0.1:3100` on the dev stack); the backend pushes its log lines there. Empty turns the push off |
 | `HTTP_ADDR` | no | Listen address, default `127.0.0.1:8090` |
 | `ICECAST_SOURCE_PASSWORD`, `LIQUIDSOAP_CONTROL_USER`, `LIQUIDSOAP_CONTROL_PASSWORD` | later phases | Secrets; never logged or returned by the API (`GET /api/settings/secrets` reports only whether each is set) |
 

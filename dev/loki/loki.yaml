@@ -33,7 +33,8 @@ schema_config:
         period: 24h
 
 limits_config:
-  # 10 days, like the log and journal files on the host (§10.1, §7.1).
+  # 10 days for every stream: the backend's log lines and the playout journal
+  # (§7.1, docs/logs-loki-plan.md §3.5).
   # Applied by the compactor (retention_enabled below). Default: keep forever.
   retention_period: 240h
   # Accept lines up to 10 days old (default 1 week), so a first start or a
