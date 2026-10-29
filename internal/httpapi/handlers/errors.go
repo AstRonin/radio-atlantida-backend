@@ -152,6 +152,7 @@ var refusals = []refusal{
 	{grid.ErrConflict, http.StatusConflict, errcodes.GridConflict},
 	{rotation.ErrInsertNotFound, http.StatusNotFound, errcodes.HourInsertNotFound},
 	{rotation.ErrHourStarted, http.StatusConflict, errcodes.HourStarted},
+	{rotation.ErrFullPassRunning, http.StatusConflict, errcodes.TrackPlanFullRunning},
 	{playout.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiquidsoapUnavailable},
 	{outage.ErrMissedNotFound, http.StatusNotFound, errcodes.MissedItemNotFound},
 	{outage.ErrMissedResolved, http.StatusConflict, errcodes.MissedItemResolved},

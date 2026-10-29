@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/dbtest"
 	rotationrepo "github.com/AstRonin/radio-atlantida-backend/internal/repository/rotation"
@@ -88,17 +89,15 @@ func (f *fixture) planHour(start time.Time) rotation.PlanHour {
 
 func TestLibrary(t *testing.T) {
 	f := newFixture(t)
-	lib, err := f.store.Library(t.Context())
+	lib, err := f.store.Library(t.Context(), rotation.LibraryScope{All: true})
 	require.NoError(t, err)
 	require.Len(t, lib.Tracks, 3, "a track without a duration cannot be planned")
 	require.Equal(t, f.tracks[0], lib.Tracks[0].ID)
 	require.Equal(t, []uint64{f.playlist}, lib.Tracks[0].PlaylistIDs)
 	require.Equal(t, []uint64{f.rule}, lib.Tracks[0].RuleIDs, "the rules of its playlists")
 	require.Equal(t, f.artist, *lib.Tracks[0].ArtistID)
-	require.Equal(t, "T0", lib.Tracks[0].Title)
-	require.Equal(t, "A", *lib.Tracks[0].ArtistName)
+	require.Empty(t, lib.Tracks[0].Title, "the snapshot does not read titles")
 	require.Nil(t, lib.Tracks[2].ArtistID)
-	require.Nil(t, lib.Tracks[2].ArtistName)
 	require.Empty(t, lib.Tracks[2].PlaylistIDs)
 	r := lib.Rules[f.rule]
 	require.Equal(t, "06:00", r.WindowFrom.String())
@@ -108,6 +107,34 @@ func TestLibrary(t *testing.T) {
 	require.Nil(t, r.MinIntervalMinutes)
 	// "Music rotation", created by migration 0013 from the separation rules.
 	require.Len(t, lib.Rules, 2)
+
+	titles, err := f.store.TracksOf(t.Context(), []uint64{f.tracks[0]})
+	require.NoError(t, err)
+	require.Len(t, titles, 1)
+	require.Equal(t, "T0", titles[0].Title)
+	require.Equal(t, "A", *titles[0].ArtistName)
+}
+
+// A scoped snapshot holds the tracks of its playlists and the tracks it names,
+// and nothing else; a track in no playlist is left out unless it is named.
+func TestLibraryScope(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	all, err := f.store.Library(ctx, rotation.LibraryScope{All: true})
+	require.NoError(t, err)
+
+	byPlaylist, err := f.store.Library(ctx, rotation.LibraryScope{Playlists: []uint64{f.playlist}})
+	require.NoError(t, err)
+	for _, tr := range byPlaylist.Tracks {
+		require.Contains(t, tr.PlaylistIDs, f.playlist)
+	}
+	require.Len(t, byPlaylist.Tracks, 2, "the tracks of the playlist; the one without a playlist is left out")
+	require.Len(t, byPlaylist.Rules, len(all.Rules), "every play rule is read")
+
+	named, err := f.store.Library(ctx, rotation.LibraryScope{Playlists: []uint64{f.playlist}, Tracks: []uint64{all.Tracks[2].ID}})
+	require.NoError(t, err)
+	require.Len(t, named.Tracks, len(all.Tracks), "a named track joins the playlists")
+	require.Equal(t, all.Tracks, named.Tracks, "the same rows as the whole library")
 }
 
 // The snapshot carries the length on air and the cue in point
@@ -118,7 +145,7 @@ func TestLibraryUsesTheCut(t *testing.T) {
 	f.exec(`UPDATE tracks SET cue_in_ms = 10000, cue_out_ms = 40000 WHERE id = $1`, f.tracks[0])
 	f.exec(`UPDATE tracks SET cue_in_ms = 2000 WHERE id = $1`, f.tracks[1])
 	f.exec(`UPDATE tracks SET cue_out_ms = duration_ms + 1000 WHERE id = $1`, f.tracks[2])
-	lib, err := f.store.Library(t.Context())
+	lib, err := f.store.Library(t.Context(), rotation.LibraryScope{All: true})
 	require.NoError(t, err)
 	require.Len(t, lib.Tracks, 2)
 	require.Equal(t, []int{30000, 10000}, []int{lib.Tracks[0].DurationMS, lib.Tracks[0].CueInMS})
@@ -155,7 +182,7 @@ VALUES ($1, 'missed', $2, 180000, $3, $4, 'open')`, f.tracks[1], hour.Add(-2*tim
 	require.NoError(t, err)
 	require.ElementsMatch(t, []rotation.Play{
 		{TrackID: f.tracks[0], ArtistID: &f.artist, Start: hour.Add(-time.Hour)},
-		{TrackID: f.tracks[2], Start: hour.Add(time.Hour)},
+		{TrackID: f.tracks[2], Start: hour.Add(time.Hour), Planned: true},
 	}, hist)
 
 	plan, err := f.store.Plan(ctx, hour, hour.Add(2*time.Hour))
@@ -226,4 +253,43 @@ WHERE si.status IN ('planned', 'queued')
 		t.Log(line)
 	}
 	require.NoError(t, rows.Err())
+}
+
+// A build reads the same tracks from the scoped snapshot as from the whole
+// library: the items of 24 hours are equal, with a one-time insert of a track
+// that no clock playlist holds (it is named in the scope).
+func TestFilteredSnapshotBuildsTheSameItems(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	whole, err := f.store.Library(ctx, rotation.LibraryScope{All: true})
+	require.NoError(t, err)
+	scope := rotation.LibraryScope{Playlists: []uint64{f.playlist}, Tracks: []uint64{f.tracks[2]}}
+	scoped, err := f.store.Library(ctx, scope)
+	require.NoError(t, err)
+
+	clk := clocks.Clock{ID: f.clock, Name: "C", Playlists: []clocks.ClockPlaylist{
+		{PlaylistID: f.playlist, Own: clocks.PlaylistRule{Rule: clocks.RuleFill}},
+	}}
+	start := hour.Truncate(time.Hour)
+	for h := range 24 {
+		at := start.Add(time.Duration(h) * time.Hour)
+		var inserts []rotation.Insert
+		if h == 0 {
+			inserts = []rotation.Insert{{
+				ID: 1, HourStart: at, TrackID: f.tracks[2], Placement: rotation.PlacementFixed,
+				OffsetMS: new(600000), ToleranceMS: 60000,
+			}}
+		}
+		in := func(lib *rotation.Library) rotation.HourInput {
+			return rotation.HourInput{
+				Start: at, Location: time.UTC, Clock: clk, HourInserts: inserts, Library: lib,
+				Settings: rotation.Settings{MinGapMS: 10000},
+				Seed:     uint64(at.Unix()), //nolint:gosec // G115: hour starts are after 1970
+			}
+		}
+		a := rotation.Build(in(&whole))
+		b := rotation.Build(in(&scoped))
+		require.Equal(t, a.Items, b.Items, "hour %d", h)
+		require.NotEmpty(t, a.Items, "hour %d", h)
+	}
 }

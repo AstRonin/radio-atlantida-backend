@@ -121,6 +121,7 @@ func registerEventSchemas(reg huma.Registry) {
 		{reflect.TypeFor[ws.OperationProgressEvent](), progress},
 		{reflect.TypeFor[ws.TrackAnalysedEvent](), []string{ws.EventTrackAnalysed}},
 		{reflect.TypeFor[ws.TrackPlanWarningEvent](), []string{ws.EventTrackPlanWarning}},
+		{reflect.TypeFor[ws.TrackPlanFullEvent](), []string{ws.EventTrackPlanFull}},
 		{reflect.TypeFor[ws.NowPlayingEvent](), []string{ws.EventNowPlaying}},
 		{reflect.TypeFor[ws.TrackEndedEvent](), []string{ws.EventTrackEnded}},
 		{reflect.TypeFor[ws.LiquidsoapStateEvent](), []string{ws.EventLiquidsoapState}},

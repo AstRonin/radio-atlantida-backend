@@ -85,5 +85,6 @@ func operationDTO(op operations.Operation) dto.Operation {
 	if op.ResultSummary != nil {
 		d.ResultSummary = *op.ResultSummary
 	}
+	d.ProgressDone, d.ProgressTotal = op.ProgressDone, op.ProgressTotal
 	return d
 }

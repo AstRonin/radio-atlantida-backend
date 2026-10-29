@@ -20,8 +20,10 @@ import (
 type Rotation interface {
 	Rebuild(ctx context.Context) (uint64, error)
 	RebuildRange(ctx context.Context, r rotation.Range) (uint64, error)
+	RebuildFull(ctx context.Context) (uint64, error)
 	Plan(ctx context.Context, r rotation.Range) ([]rotation.PlannedHour, error)
 	Sample(ctx context.Context, c clocks.Clock) (rotation.Sample, error)
+	Simulate(ctx context.Context, from, to time.Time, withItems bool) (rotation.Simulation, error)
 	AddInsert(ctx context.Context, r rotation.AddInsertRequest) (uint64, error)
 	RemoveInsert(ctx context.Context, id uint64) (uint64, error)
 	Rescheduler
@@ -29,7 +31,17 @@ type Rotation interface {
 
 type trackPlanInput struct {
 	From time.Time `query:"from" required:"true" doc:"Hours that start at or after this instant (UTC)."`
-	To   time.Time `query:"to" required:"true" doc:"... and before this one; at most 7 days after from."`
+	To   time.Time `query:"to" required:"true" doc:"... and before this one; at most 31 days after from."`
+}
+
+type trackSimulateInput struct {
+	From  string `query:"from" required:"true" format:"date" doc:"First station local date."`
+	To    string `query:"to" required:"true" format:"date" doc:"Last station local date, inclusive; at most 31 days in all."`
+	Items bool   `query:"items" doc:"Include the items of every built hour."`
+}
+
+type trackSimulateOutput struct {
+	Body dto.TrackSimulation
 }
 
 type trackPlanOutput struct {
@@ -56,7 +68,7 @@ func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
 		Method:      http.MethodGet,
 		Path:        "/api/track-plan",
 		Summary:     "Get the track plan",
-		Description: "The built hours that start in the range, with their tracks in time order (§7). The plan covers the next rotation.plan_horizon_hours.",
+		Description: "The built hours that start in the range, with their tracks in time order (§7). The 5-minute pass keeps the plan for the next rotation.plan_horizon_days.",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *trackPlanInput) (*trackPlanOutput, error) {
@@ -72,6 +84,30 @@ func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
 	})
 
 	register(api, log, huma.Operation{
+		OperationID: "simulate-track-plan",
+		Method:      http.MethodGet,
+		Path:        "/api/rotation/simulate",
+		Summary:     "Simulate the track plan for a date range",
+		Description: "Builds every grid hour of the station local dates, inclusive, in time order, as the planner would, and returns the result. Nothing is stored: the plan, the scheduled items and the one-time inserts are not changed. Each built hour adds its items to the history of the later hours, so the play rules hold across the simulated hours. Hours whose clock no longer exists are skipped and counted.",
+		Tags:        tags,
+		Errors:      errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *trackSimulateInput) (*trackSimulateOutput, error) {
+		from, err := parseDate("query.from", in.From)
+		if err != nil {
+			return nil, err
+		}
+		to, err := parseDate("query.to", in.To)
+		if err != nil {
+			return nil, err
+		}
+		sim, err := svc.Simulate(ctx, from, to, in.Items)
+		if err != nil {
+			return nil, err
+		}
+		return &trackSimulateOutput{Body: simulationDTO(sim)}, nil
+	})
+
+	register(api, log, huma.Operation{
 		OperationID:   "rebuild-track-plan",
 		Method:        http.MethodPost,
 		Path:          "/api/track-plan/rebuild",
@@ -82,6 +118,23 @@ func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
 		Errors:        errorsWith(http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *trackPlanRebuildInput) (*operationAcceptedOutput, error) {
 		id, err := svc.RebuildRange(ctx, rotation.Range{From: in.Body.From.UTC(), To: in.Body.To.UTC()})
+		if err != nil {
+			return nil, err
+		}
+		return &operationAcceptedOutput{Body: dto.OperationAccepted{OperationID: id}}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID:   "rebuild-track-plan-full",
+		Method:        http.MethodPost,
+		Path:          "/api/track-plan/rebuild-full",
+		Summary:       "Rebuild the whole track plan",
+		Description:   "Starts the full pass of the track plan: the hours from now to the grid horizon are rebuilt in batches, as a track_plan_full operation. Hours that have started, hours with an item in Liquidsoap's queue, and hours whose inputs did not change are skipped. Progress is stored on the operation; rotation.plan_full is sent at the start and at the end. Refused (track_plan_full_running) while another full pass runs.",
+		Tags:          tags,
+		DefaultStatus: http.StatusAccepted,
+		Errors:        errorsWith(http.StatusConflict),
+	}, func(ctx context.Context, _ *struct{}) (*operationAcceptedOutput, error) {
+		id, err := svc.RebuildFull(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -169,6 +222,39 @@ func planHourDTO(h rotation.PlannedHour) dto.TrackPlanHour {
 			ID: ins.ID, Placement: string(ins.Placement), OffsetMS: ins.OffsetMS, ToleranceMS: ins.ToleranceMS,
 			TrackID: ins.TrackID, MissedID: ins.MissedID,
 		}
+	}
+	return out
+}
+
+// simulationDTO maps a simulation to its response.
+func simulationDTO(s rotation.Simulation) dto.TrackSimulation {
+	out := dto.TrackSimulation{
+		From: s.From.Format(time.DateOnly), To: s.To.Format(time.DateOnly),
+		Hours: make([]dto.TrackSimulationHour, len(s.Hours)), HoursBuilt: len(s.Hours), HoursSkipped: s.Skipped,
+		Items: s.Items, WarningsByCode: make(map[string]int, len(s.Warnings)),
+		ElapsedMS: s.Elapsed.Milliseconds(), Queries: s.Queries, LibraryTracks: s.LibraryTracks, HistoryPlays: s.HistoryPlays,
+	}
+	for code, n := range s.Warnings {
+		out.WarningsByCode[string(code)] = n
+	}
+	for i, h := range s.Hours {
+		dh := dto.TrackSimulationHour{
+			HourStartUTC: h.Start.UTC(), Clock: dto.TrackPlanClock{ID: h.ClockID, Name: h.ClockName}, ItemCount: h.ItemCount,
+			Warnings: make([]dto.TrackSimulationWarning, len(h.Warnings)),
+		}
+		for j, w := range h.Warnings {
+			dh.Warnings[j] = dto.TrackSimulationWarning{Code: string(w.Code), Message: w.Message}
+		}
+		if h.Items != nil {
+			dh.Items = make([]dto.TrackSimulationItem, len(h.Items))
+			for j, it := range h.Items {
+				dh.Items[j] = dto.TrackSimulationItem{
+					StartUTC: it.Start.UTC(), TrackID: it.TrackID, Title: it.Title, ArtistName: it.ArtistName,
+					PlannedInMS: it.InMS, PlannedOutMS: it.OutMS, Truncated: it.Truncated, Source: string(it.Source),
+				}
+			}
+		}
+		out.Hours[i] = dh
 	}
 	return out
 }

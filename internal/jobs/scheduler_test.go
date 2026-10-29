@@ -64,3 +64,30 @@ func TestLockKeyIsStable(t *testing.T) {
 	require.Equal(t, int64(-8726217943897523684), lockKey(operations.KindRetention))
 	require.NotEqual(t, lockKey(operations.KindRetention), lockKey("other"))
 }
+
+// A job with a due check runs only when it is due, and creates no operation
+// when it is not.
+func TestRunOnceSkipsAJobThatIsNotDue(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		due      bool
+		err      error
+		wantRuns int
+	}{
+		{"due: the job runs", true, nil, 1},
+		{"not due: no operation", false, nil, 0},
+		{"check failed: no operation", true, context.DeadlineExceeded, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			job := TrackPlanFull(func(context.Context) (string, error) { return "", nil },
+				func(context.Context) (bool, error) { return tt.due, tt.err }, time.Minute)
+			locks, ops := &fakeLocker{}, &countingOps{}
+
+			NewScheduler(locks, ops, slog.New(slog.DiscardHandler), job).runOnce(t.Context(), job)
+
+			require.Equal(t, tt.wantRuns, ops.runs)
+		})
+	}
+}

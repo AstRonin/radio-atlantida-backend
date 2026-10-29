@@ -32,7 +32,11 @@ type Job struct {
 	Interval time.Duration
 	// Timeout bounds one run.
 	Timeout time.Duration
-	Run     operations.Func
+	// Due, if set, is asked before each run: a run that is not due is
+	// skipped without an operation. A job that runs once a day checks its
+	// time here, not with a long interval.
+	Due func(ctx context.Context) (bool, error)
+	Run operations.Func
 }
 
 // Operations runs a function as an operation in the calling goroutine.
@@ -98,6 +102,16 @@ func (s *Scheduler) loop(ctx context.Context, j Job) {
 // shutdown stops it.
 func (s *Scheduler) runOnce(ctx context.Context, j Job) {
 	log := logging.For(s.log, j.Component)
+	if j.Due != nil {
+		due, err := j.Due(ctx)
+		if err != nil {
+			log.Error("job due check failed", "kind", string(j.Kind), logging.KeyError, err)
+			return
+		}
+		if !due {
+			return
+		}
+	}
 	rctx, cancel := context.WithTimeout(ctx, j.Timeout)
 	defer cancel()
 

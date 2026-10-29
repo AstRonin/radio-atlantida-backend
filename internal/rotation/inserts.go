@@ -78,9 +78,9 @@ func (s *Service) Reschedule(ctx context.Context, r RescheduleRequest) (uint64, 
 	if _, _, err = s.gridHour(rctx, hourField, r.HourStart); err != nil {
 		return 0, err
 	}
-	lib, err := s.store.Library(rctx)
+	lib, err := libraryFor(rctx, s.store, LibraryScope{Tracks: []uint64{m.TrackID}})
 	if err != nil {
-		return 0, fmt.Errorf("read library: %w", err)
+		return 0, err
 	}
 	t, ok := lib.track(m.TrackID)
 	if !ok {
@@ -122,9 +122,9 @@ func (s *Service) AddInsert(ctx context.Context, r AddInsertRequest) (uint64, er
 	if _, _, err = s.gridHour(rctx, hourField, r.HourStart); err != nil {
 		return 0, err
 	}
-	lib, err := s.store.Library(rctx)
+	lib, err := libraryFor(rctx, s.store, LibraryScope{Tracks: []uint64{r.TrackID}})
 	if err != nil {
-		return 0, fmt.Errorf("read library: %w", err)
+		return 0, err
 	}
 	t, ok := lib.track(r.TrackID)
 	if !ok {
@@ -217,8 +217,8 @@ func (s *Service) checkTarget(ctx context.Context, field string, start time.Time
 	case set.frozen(start, now):
 		return validation.Field(field, validation.Range,
 			"the hour is on air, over, or starts within %d minutes; choose a later hour", int(set.Freeze.Minutes()))
-	case start.After(now.Add(time.Duration(set.PlanHorizonHours) * time.Hour)):
-		return validation.Field(field, validation.Range, "the track plan covers the next %d hours", set.PlanHorizonHours)
+	case start.After(planHorizon(now, set)):
+		return validation.Field(field, validation.Range, "the track plan covers the next %d days", set.PlanHorizonDays)
 	}
 	return ctx.Err()
 }
@@ -280,9 +280,9 @@ func (s *Service) runInsert(ctx context.Context, op insertOp) (string, error) {
 	case err != nil:
 		return "", err
 	}
-	lib, err := s.store.Library(rctx)
+	lib, err := libraryFor(rctx, s.store, scopeOf([]clocks.Clock{c}, []Insert{*ins}))
 	if err != nil {
-		return "", fmt.Errorf("read library: %w", err)
+		return "", err
 	}
 	j := hourJob{start: ins.HourStart, slotID: new(h.SlotID), clock: c, force: true, add: op.add, remove: op.remove}
 	out, err := s.build(ctx, j, &lib, set)

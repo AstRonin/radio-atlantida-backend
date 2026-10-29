@@ -102,6 +102,10 @@ const (
 	// HourStarted: the hour is on air, over, or about to start (its items
 	// may be in Liquidsoap's queue); its plan is not changed.
 	HourStarted Problem = "hour_started"
+	// TrackPlanFullRunning: a full pass of the track plan is running; one runs
+	// at a time. Wait for its terminal event (track_plan_full.completed or
+	// .failed).
+	TrackPlanFullRunning Problem = "track_plan_full_running"
 	// LiquidsoapUnavailable: the backend cannot reach Liquidsoap's control
 	// interface; the command was not applied.
 	LiquidsoapUnavailable Problem = "liquidsoap_unavailable"
@@ -154,7 +158,7 @@ func Problems() []Problem {
 		PlayRuleNotFound, PlayRuleInUse,
 		ClockNotFound, ClockInUse, ClockHasHistory,
 		GridSlotNotFound, GridConflict,
-		HourInsertNotFound, HourStarted,
+		HourInsertNotFound, HourStarted, TrackPlanFullRunning,
 		LiquidsoapUnavailable,
 		MissedItemNotFound, MissedItemResolved,
 		MediaOperationRunning, MediaToolsUnavailable,

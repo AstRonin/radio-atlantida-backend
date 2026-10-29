@@ -273,7 +273,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 14)
+	require.Len(t, schemas["Event"].OneOf, 15)
 	require.Equal(t, []string{ws.EventLiveState}, schemas["LiveStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackAnalysed}, schemas["TrackAnalysedEvent"].Properties["type"].Enum)
@@ -281,6 +281,8 @@ func TestOpenAPIDocument(t *testing.T) {
 		require.Contains(t, schemas["TrackAnalysedData"].Properties, p)
 	}
 	require.Equal(t, []string{ws.EventTrackPlanWarning}, schemas["TrackPlanWarningEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{ws.EventTrackPlanFull}, schemas["TrackPlanFullEvent"].Properties["type"].Enum)
+	require.Equal(t, []string{"started", "completed", "failed"}, schemas["TrackPlanFullData"].Properties["status"].Enum)
 	require.Equal(t, []string{ws.EventNowPlaying}, schemas["NowPlayingEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackEnded}, schemas["TrackEndedEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventLiquidsoapState}, schemas["LiquidsoapStateEvent"].Properties["type"].Enum)

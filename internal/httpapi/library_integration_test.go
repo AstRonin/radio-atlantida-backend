@@ -134,7 +134,7 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	rotationSvc := rotation.NewService(d, rotationrepo.New(d.Pool), clocksSvc, gridSvc,
 		func(context.Context) (rotation.PlanSettings, error) {
 			return rotation.PlanSettings{ // setting defaults
-				Location: stationTZ(t), PlanHorizonHours: 48,
+				Location: stationTZ(t), PlanHorizonDays: 31, GridHorizonDays: 30,
 				Build:                   rotation.Settings{MinGapMS: 10000},
 				Freeze:                  5 * time.Minute,
 				DefaultFixedToleranceMS: 60000,

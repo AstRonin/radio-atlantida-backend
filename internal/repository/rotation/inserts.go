@@ -69,6 +69,22 @@ func (r insertRow) domain() rotation.Insert {
 
 const insertColumns = `id, hour_start_utc, track_id, missed_id, placement, offset_ms, tolerance_ms`
 
+// InsertsRange returns the inserts of the hours that start in [from, to), in
+// hour and ID order (ix_hour_inserts_hour_start_utc). A full pass reads its
+// batch with one query instead of one per hour.
+func (s *Store) InsertsRange(ctx context.Context, from, to time.Time) ([]rotation.Insert, error) {
+	rows, err := s.q.Query(ctx, `SELECT `+insertColumns+`
+FROM hour_inserts WHERE hour_start_utc >= $1 AND hour_start_utc < $2 ORDER BY hour_start_utc, id`, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("select hour inserts: %w", err)
+	}
+	out, err := db.CollectAll(rows, insertRow.domain)
+	if err != nil {
+		return nil, fmt.Errorf("scan hour inserts: %w", err)
+	}
+	return out, nil
+}
+
 // Inserts returns the inserts of the hour, in ID order
 // (ix_hour_inserts_hour_start_utc).
 func (s *Store) Inserts(ctx context.Context, hourStart time.Time) ([]rotation.Insert, error) {

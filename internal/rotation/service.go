@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/clocks"
@@ -48,6 +49,9 @@ type PlanHour struct {
 	GridSlotID     *uint64
 	Seed           int64
 	BuiltAt        time.Time
+	// InputsHash fingerprints what the hour was built from (inputsHash); empty
+	// for an hour built before migration 0016.
+	InputsHash string
 }
 
 // current reports whether the hour was built from this version of c.
@@ -91,12 +95,29 @@ type Store interface {
 	// LockPlan takes the transaction-level advisory lock that serializes
 	// writes of the plan.
 	LockPlan(ctx context.Context) error
-	// Library returns the tracks with a duration and every play rule.
-	Library(ctx context.Context) (Library, error)
+	// Library returns the tracks with a duration that the scope selects, in
+	// ID order, without titles, and every play rule.
+	Library(ctx context.Context, scope LibraryScope) (Library, error)
+	// TracksOf returns the tracks with a duration among ids, with their titles
+	// and artists (for output).
+	TracksOf(ctx context.Context, ids []uint64) ([]Track, error)
 	// History returns the plays in [from, to): aired and truncated in the
 	// play log, planned and queued in the plan, except the planned items
 	// of the hour that starts at hourStart.
 	History(ctx context.Context, from, to, hourStart time.Time) ([]Play, error)
+	// Window returns the plays in [from, to) like History, but keeps the
+	// planned items of every hour (flagged Planned); the runs of builds
+	// exclude the hours they build (window).
+	Window(ctx context.Context, from, to time.Time) ([]Play, error)
+	// ClaimNightly takes the nightly claim of a station local date
+	// (YYYY-MM-DD); true once per date, even across processes and restarts.
+	ClaimNightly(ctx context.Context, day string) (bool, error)
+	// InsertsRange returns the one-time inserts of the hours that start in
+	// [from, to), in hour and ID order.
+	InsertsRange(ctx context.Context, from, to time.Time) ([]Insert, error)
+	// QueuedHours returns the starts of the built hours in [from, to) that
+	// have a queued item: their items are in Liquidsoap's queue.
+	QueuedHours(ctx context.Context, from, to time.Time) ([]time.Time, error)
 	// PlanHours returns the built hours that start in [from, to).
 	PlanHours(ctx context.Context, from, to time.Time) ([]PlanHour, error)
 	// PlanHour returns one built hour; false if there is none.
@@ -144,6 +165,8 @@ type GridSource interface {
 type Operations interface {
 	Start(ctx context.Context, kind operations.Kind) (uint64, error)
 	Execute(ctx context.Context, id uint64, component logging.Component, fn operations.Func) error
+	// Checkpoint stores the progress of the operation that runs ctx.
+	Checkpoint(ctx context.Context, kind operations.Kind, done, total int) error
 }
 
 // Publisher sends an event to the panels without blocking.
@@ -153,8 +176,21 @@ type Publisher interface {
 
 // PlanSettings are the settings the service reads before each sync.
 type PlanSettings struct {
-	Location         *time.Location
-	PlanHorizonHours int
+	Location *time.Location
+	// PlanHorizonDays is how far ahead the 5-minute pass keeps the plan
+	// (rotation.plan_horizon_days).
+	PlanHorizonDays int
+	// GridHorizonDays is how far ahead the grid is planned; the full pass
+	// rebuilds up to it (rotation.grid_horizon_days).
+	GridHorizonDays int
+	// FullPassEnabled, FullPassTime (HH:MM station local), FullBatchHours,
+	// FullSlowMS and FullHeapWarnMB configure the full pass and its logs
+	// (rotation.full_pass_*).
+	FullPassEnabled bool
+	FullPassTime    string
+	FullBatchHours  int
+	FullSlowMS      int
+	FullHeapWarnMB  int
 	// Freeze is how long before its start an hour is frozen: playout may
 	// have pushed its first items to Liquidsoap (playout.prepush_minutes),
 	// so a built hour is no longer rebuilt or cleared, and its one-time
@@ -186,8 +222,9 @@ const (
 	// hourTimeout bounds the transaction of one hour: reads, the build (CPU
 	// only), and the writes.
 	hourTimeout = 15 * time.Second
-	// MaxPlanDays bounds one plan request.
-	MaxPlanDays = 7
+	// MaxPlanDays bounds one request of a range rebuild, and the range the
+	// rebuild checks (checkRange): at most this many days.
+	MaxPlanDays = 31
 )
 
 // Service keeps the track plan.
@@ -204,6 +241,9 @@ type Service struct {
 	// queue holds the operations waiting for the planner goroutine (Run);
 	// see planner.go.
 	queue chan rebuild
+	// full is set while a full pass runs: only one runs at a time, whether
+	// the nightly job or the planner starts it.
+	full atomic.Bool
 }
 
 // NewService returns the service. log is the root logger.
@@ -223,23 +263,37 @@ type Range struct {
 
 func (r Range) contains(t time.Time) bool { return !t.Before(r.From) && t.Before(r.To) }
 
-// SyncResult counts what a sync did.
-type SyncResult struct {
-	Built, Cleared, Warnings int
-}
-
 func (r SyncResult) String() string {
 	return fmt.Sprintf("built %d hours, cleared %d, %d warnings", r.Built, r.Cleared, r.Warnings)
 }
 
-// Sync brings the plan in step with the grid for the hours that start after
+// planHorizon returns the end of the 5-minute pass's horizon: the plan
+// covers the hours that start up to rotation.plan_horizon_days after now.
+func planHorizon(now time.Time, set PlanSettings) time.Time {
+	return now.Add(time.Duration(set.PlanHorizonDays) * 24 * time.Hour)
+}
+
+// SyncResult counts what a sync did.
+type SyncResult struct {
+	Built, Cleared, Warnings int
+	// Skipped counts the grid hours that were current or whose clock no
+	// longer exists; Items is the number of items of the built hours.
+	Skipped, Items int
+	// ByCode counts the warnings of the built hours by code.
+	ByCode map[WarningCode]int
+}
+
+// sync brings the plan in step with the grid for the hours that start after
 // now and within the plan horizon: it builds missing and stale hours and
 // those in force, and clears built hours the grid no longer assigns. A
 // built hour that is frozen (PlanSettings.Freeze) is never rebuilt or
 // cleared; a missing one is still built. A failed hour does not stop the
-// others; the errors are returned together.
-func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
-	var res SyncResult
+// others; the errors are returned together. A pass that builds at least one
+// hour is logged (its start and its end, see passlog.go).
+func (s *Service) sync(ctx context.Context, trigger Trigger, force []Range) (SyncResult, error) {
+	res := SyncResult{ByCode: map[WarningCode]int{}}
+	began := s.now()
+	count := &queryCount{}
 	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	set, err := s.settings(rctx)
@@ -248,18 +302,17 @@ func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
 	}
 	now := s.now().UTC()
 	after := now.Add(time.Nanosecond)
-	horizon := now.Add(time.Duration(set.PlanHorizonHours) * time.Hour)
+	horizon := planHorizon(now, set)
+	st := countingStore{Store: s.store, n: count}
+	count.add(1) // settings
 	hours, err := s.grid.Hours(rctx, after, horizon)
 	if err != nil {
 		return res, fmt.Errorf("read grid hours: %w", err)
 	}
-	built, err := s.store.PlanHours(rctx, after, horizon)
+	count.add(1)
+	built, err := st.PlanHours(rctx, after, horizon)
 	if err != nil {
 		return res, fmt.Errorf("read plan hours: %w", err)
-	}
-	lib, err := s.store.Library(rctx)
-	if err != nil {
-		return res, fmt.Errorf("read library: %w", err)
 	}
 	// Keyed by Unix seconds: hour starts are whole seconds, and time.Time
 	// keys would also compare locations.
@@ -270,40 +323,84 @@ func (s *Service) Sync(ctx context.Context, force []Range) (SyncResult, error) {
 
 	cache := map[uint64]*clocks.Clock{}
 	assigned := map[int64]bool{}
+	var todo []hourJob
 	var errs []error
 	for _, h := range hours {
 		assigned[h.StartUTC.Unix()] = true
-		c, err := s.clock(ctx, cache, h.Clock.ID)
-		if err != nil {
-			errs = append(errs, err)
+		c, cerr := s.clock(ctx, cache, h.Clock.ID)
+		if cerr != nil {
+			errs = append(errs, cerr)
 			continue
 		}
 		if c == nil {
-			continue // deleted since the grid was read
+			res.Skipped++ // deleted since the grid was read
+			continue
 		}
 		forced := slices.ContainsFunc(force, func(r Range) bool { return r.contains(h.StartUTC) })
 		if ph, ok := planned[h.StartUTC.Unix()]; ok && !forced && ph.current(*c) {
+			res.Skipped++
 			continue
 		}
-		out, err := s.build(ctx, hourJob{start: h.StartUTC, slotID: new(h.SlotID), clock: *c, force: forced}, &lib, set)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("build hour %s: %w", h.StartUTC.Format(time.RFC3339), err))
-			continue
-		}
-		if !out.skipped {
-			res.Built++
-			res.Warnings += len(out.plan.Warnings)
-		}
+		todo = append(todo, hourJob{start: h.StartUTC, slotID: new(h.SlotID), clock: *c, force: forced, count: count})
 	}
+	count.add(len(cache)) // one clock read per distinct clock
+	var clears []time.Time
 	for _, h := range built {
 		if assigned[h.Start.Unix()] || set.frozen(h.Start, now) {
 			continue
 		}
-		if err := s.clear(ctx, h.Start); err != nil {
-			errs = append(errs, fmt.Errorf("clear hour %s: %w", h.Start.Format(time.RFC3339), err))
+		clears = append(clears, h.Start)
+	}
+
+	// The snapshot holds the playlists of the clocks this pass builds; it is
+	// read only when there is something to build.
+	var lib Library
+	if len(todo) > 0 {
+		cs := make([]clocks.Clock, len(todo))
+		for i, j := range todo {
+			cs[i] = j.clock
+		}
+		lib, err = libraryFor(rctx, st, scopeOf(cs, nil))
+		if err != nil {
+			return res, err
+		}
+	}
+	active := len(todo) > 0
+	var runStart memStats
+	if active {
+		runStart = readMem()
+		s.logPassStart(passShort, trigger, after, horizon, len(todo), len(hours)-len(todo), runStart)
+	}
+	for _, j := range todo {
+		out, err := s.build(ctx, j, &lib, set)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("build hour %s: %w", j.start.Format(time.RFC3339), err))
+			continue
+		}
+		if out.skipped {
+			res.Skipped++
+			continue
+		}
+		res.Built++
+		res.Items += len(out.plan.Items)
+		res.Warnings += len(out.plan.Warnings)
+		for _, w := range out.plan.Warnings {
+			res.ByCode[w.Code]++
+		}
+	}
+	for _, start := range clears {
+		if err := s.clear(ctx, start, count); err != nil {
+			errs = append(errs, fmt.Errorf("clear hour %s: %w", start.Format(time.RFC3339), err))
 			continue
 		}
 		res.Cleared++
+	}
+	if active {
+		s.logPassEnd(runTotals{
+			pass: passShort, trigger: trigger, elapsed: s.now().Sub(began), built: res.Built, skipped: res.Skipped,
+			items: res.Items, byCode: res.ByCode, queries: count.n, batches: res.Built + res.Cleared,
+			mem: readMem(), base: runStart, slowMS: set.FullSlowMS, heapWarn: set.FullHeapWarnMB,
+		})
 	}
 	return res, errors.Join(errs...)
 }
@@ -337,6 +434,8 @@ type hourJob struct {
 	add *Insert
 	// remove deletes this one-time insert before the build.
 	remove *Insert
+	// count counts the store calls of the build; nil counts nothing.
+	count *queryCount
 }
 
 // hourOutcome is what a build wrote.
@@ -353,7 +452,7 @@ func (s *Service) build(ctx context.Context, j hourJob, lib *Library, set PlanSe
 	defer cancel()
 	var out hourOutcome
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) (err error) {
-		out, err = s.buildTx(ctx, s.store.WithTx(tx), j, lib, set)
+		out, err = s.buildTx(ctx, countingStore{Store: s.store.WithTx(tx), n: j.count}, j, lib, set)
 		return err
 	})
 	if err != nil {
@@ -402,6 +501,9 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	if err != nil {
 		return hourOutcome{}, err
 	}
+	if err = ensureLibrary(ctx, st, lib, scopeOf([]clocks.Clock{c}, inserts)); err != nil {
+		return hourOutcome{}, err
+	}
 	span := lib.maxRuleInterval()
 	history, err := st.History(ctx, j.start.Add(-span), j.start.Add(time.Hour+span), j.start)
 	if err != nil {
@@ -425,9 +527,13 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	if err := settleInserts(ctx, st, inserts, &out.plan); err != nil {
 		return hourOutcome{}, err
 	}
+	// The one-time inserts that refused are gone now; the fingerprint is of
+	// the inserts that stay, so the next full pass finds the hour unchanged.
+	kept := slices.DeleteFunc(slices.Clone(inserts), func(ins Insert) bool { _, refused := plan.Refused[ins.ID]; return refused })
 	next := PlanHour{
 		Start: j.start, ClockID: c.ID, ClockUpdatedAt: c.UpdatedAt, GridSlotID: j.slotID, BuiltAt: now,
-		Seed: int64(in.Seed), //nolint:gosec // G115: the seed is an hour start in seconds
+		Seed:       int64(in.Seed), //nolint:gosec // G115: the seed is an hour start in seconds
+		InputsHash: inputsHash(c, kept, set.Build, locationName(set.Location), lib),
 	}
 	if err := st.ReplaceHour(ctx, next, plan.Items); err != nil {
 		return hourOutcome{}, err
@@ -483,11 +589,11 @@ func (s *Service) report(start time.Time, c clocks.Clock, out hourOutcome) {
 // clear removes a built hour that the grid no longer assigns. Its one-time
 // inserts no longer play: they are removed and their missed items open
 // again.
-func (s *Service) clear(ctx context.Context, start time.Time) error {
+func (s *Service) clear(ctx context.Context, start time.Time, count *queryCount) error {
 	ctx, cancel := context.WithTimeout(ctx, hourTimeout)
 	defer cancel()
 	return s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		st := s.store.WithTx(tx)
+		st := countingStore{Store: s.store.WithTx(tx), n: count}
 		if err := st.LockPlan(ctx); err != nil {
 			return err
 		}
@@ -506,10 +612,18 @@ func (s *Service) clear(ctx context.Context, start time.Time) error {
 	})
 }
 
-// RunJob is the plan job (§7): the plan is synced to its horizon.
+// RunJob is the 5-minute plan job (§7): the plan is synced to its horizon.
 func (s *Service) RunJob(ctx context.Context) (string, error) {
-	res, err := s.Sync(ctx, nil)
+	res, err := s.sync(ctx, TriggerJob, nil)
 	return res.String(), err
+}
+
+// locationName is the name of the station timezone in a fingerprint.
+func locationName(loc *time.Location) string {
+	if loc == nil {
+		return "UTC"
+	}
+	return loc.String()
 }
 
 // checkRange refuses a range that is empty or longer than MaxPlanDays.

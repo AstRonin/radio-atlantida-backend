@@ -19,16 +19,21 @@ type planHourRow struct {
 	GridSlotID     *uint64   `db:"grid_slot_id"`
 	Seed           int64     `db:"seed"`
 	BuiltAt        time.Time `db:"built_at"`
+	InputsHash     *string   `db:"inputs_hash"`
 }
 
 func (r planHourRow) domain() rotation.PlanHour {
-	return rotation.PlanHour{
+	out := rotation.PlanHour{
 		Start: r.Start.UTC(), ClockID: r.ClockID, ClockUpdatedAt: r.ClockUpdatedAt.UTC(), GridSlotID: r.GridSlotID,
 		Seed: r.Seed, BuiltAt: r.BuiltAt.UTC(),
 	}
+	if r.InputsHash != nil {
+		out.InputsHash = *r.InputsHash
+	}
+	return out
 }
 
-const planHourColumns = `hour_start_utc, clock_id, clock_updated_at, grid_slot_id, seed, built_at`
+const planHourColumns = `hour_start_utc, clock_id, clock_updated_at, grid_slot_id, seed, built_at, inputs_hash`
 
 // PlanHours returns the built hours that start in [from, to) (pk_plan_hours).
 func (s *Store) PlanHours(ctx context.Context, from, to time.Time) ([]rotation.PlanHour, error) {
@@ -92,13 +97,18 @@ func (s *Store) ReplaceHour(ctx context.Context, h rotation.PlanHour, items []ro
 			return fmt.Errorf("insert planned items: %w", err)
 		}
 	}
+	var inputsHash *string
+	if h.InputsHash != "" {
+		inputsHash = &h.InputsHash
+	}
 	_, err := s.q.Exec(ctx, `
 INSERT INTO plan_hours (`+planHourColumns+`)
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (hour_start_utc) DO UPDATE SET
     clock_id = EXCLUDED.clock_id, clock_updated_at = EXCLUDED.clock_updated_at,
-    grid_slot_id = EXCLUDED.grid_slot_id, seed = EXCLUDED.seed, built_at = EXCLUDED.built_at`,
-		h.Start, h.ClockID, h.ClockUpdatedAt, h.GridSlotID, h.Seed, h.BuiltAt)
+    grid_slot_id = EXCLUDED.grid_slot_id, seed = EXCLUDED.seed, built_at = EXCLUDED.built_at,
+    inputs_hash = EXCLUDED.inputs_hash`,
+		h.Start, h.ClockID, h.ClockUpdatedAt, h.GridSlotID, h.Seed, h.BuiltAt, inputsHash)
 	if err != nil {
 		return fmt.Errorf("store plan hour: %w", err)
 	}
@@ -154,7 +164,7 @@ func (r plannedItemRow) domain() rotation.PlannedItem {
 // that starts at or before it.
 func (s *Store) Plan(ctx context.Context, from, to time.Time) ([]rotation.PlannedHour, error) {
 	rows, err := s.q.Query(ctx, `
-SELECT h.hour_start_utc, h.clock_id, h.clock_updated_at, h.grid_slot_id, h.seed, h.built_at,
+SELECT h.hour_start_utc, h.clock_id, h.clock_updated_at, h.grid_slot_id, h.seed, h.built_at, h.inputs_hash,
        c.name AS clock_name
 FROM plan_hours h
 JOIN clocks c ON c.id = h.clock_id
@@ -217,4 +227,44 @@ WHERE hour_start_utc >= $1 AND hour_start_utc < $2 ORDER BY hour_start_utc, id`,
 		}
 	}
 	return hours, nil
+}
+
+// QueuedHours returns the starts of the built hours in [from, to) that have a
+// queued item: their items are in Liquidsoap's queue (scheduled_items status
+// queued, inside the hour).
+func (s *Store) QueuedHours(ctx context.Context, from, to time.Time) ([]time.Time, error) {
+	rows, err := s.q.Query(ctx, `
+SELECT DISTINCT h.hour_start_utc
+FROM plan_hours h
+JOIN scheduled_items si ON si.planned_start_utc >= h.hour_start_utc
+  AND si.planned_start_utc < h.hour_start_utc + INTERVAL '1 hour'
+WHERE si.status = 'queued' AND h.hour_start_utc >= $1 AND h.hour_start_utc < $2
+ORDER BY h.hour_start_utc`, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("select queued hours: %w", err)
+	}
+	starts, err := db.CollectAll(rows, queuedHourRow.start)
+	if err != nil {
+		return nil, fmt.Errorf("scan queued hours: %w", err)
+	}
+	return starts, nil
+}
+
+type queuedHourRow struct {
+	Start time.Time `db:"hour_start_utc"`
+}
+
+func (r queuedHourRow) start() time.Time { return r.Start.UTC() }
+
+// ClaimNightly takes the nightly claim of a station local date (YYYY-MM-DD):
+// it inserts the date unless a claim has it already. The insert is atomic, so
+// of two callers, or a restart, exactly one gets true.
+func (s *Store) ClaimNightly(ctx context.Context, day string) (bool, error) {
+	tag, err := s.q.Exec(ctx, `
+INSERT INTO rotation_nightly_passes (station_date) VALUES ($1::date)
+ON CONFLICT (station_date) DO NOTHING`, day)
+	if err != nil {
+		return false, fmt.Errorf("claim nightly pass %s: %w", day, err)
+	}
+	return tag.RowsAffected() == 1, nil
 }

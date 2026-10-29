@@ -11,6 +11,8 @@ type Operation struct {
 	FinishedAt    *time.Time `json:"finished_at,omitempty" doc:"Set when the operation is no longer running."`
 	ErrorMessage  string     `json:"error_message,omitempty" doc:"Set for failed operations."`
 	ResultSummary string     `json:"result_summary,omitempty" doc:"Set for completed operations."`
+	ProgressDone  *int       `json:"progress_done,omitempty" doc:"Units done so far, as last stored by the operation; absent when it reports no progress."`
+	ProgressTotal *int       `json:"progress_total,omitempty" doc:"Units the operation expects in all, with progress_done."`
 }
 
 // OperationList is a page of operations in ID order.

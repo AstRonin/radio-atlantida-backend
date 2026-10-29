@@ -55,13 +55,16 @@ const (
 	KindAnalyse Kind = "analyse"
 	// KindTranscode fixes track files: loudness, or the whole standard.
 	KindTranscode Kind = "transcode"
+	// KindTrackPlanFull rebuilds the track plan of the whole range, in
+	// batches, nightly or on demand (docs/rotation-long-horizon-plan.md).
+	KindTrackPlanFull Kind = "track_plan_full"
 )
 
 // Kinds lists every operation kind (for the OpenAPI event type enums).
 func Kinds() []Kind {
 	return []Kind{
 		KindRetention, KindTrackPlan, KindClockBuild, KindMissedItems, KindPlayoutReconcile, KindReschedule,
-		KindHourInsert, KindImport, KindAnalyse, KindTranscode,
+		KindHourInsert, KindImport, KindAnalyse, KindTranscode, KindTrackPlanFull,
 	}
 }
 
@@ -93,6 +96,9 @@ type Operation struct {
 	FinishedAt    *time.Time
 	ErrorMessage  *string
 	ResultSummary *string
+	// ProgressDone and ProgressTotal are the last progress stored by the
+	// operation (Tracker.Checkpoint); nil when it reports none.
+	ProgressDone, ProgressTotal *int
 }
 
 // Errors returned by the tracker.
@@ -119,6 +125,9 @@ type Store interface {
 	// FailRunning fails every running operation with message and returns
 	// the number of rows changed.
 	FailRunning(ctx context.Context, at time.Time, message string) (int64, error)
+	// Progress stores the progress of a running operation; it changes
+	// nothing once the operation is finished.
+	Progress(ctx context.Context, id uint64, done, total int) error
 	// Get returns one operation or ErrNotFound.
 	Get(ctx context.Context, id uint64) (Operation, error)
 	// List returns operations in ID order.
@@ -229,6 +238,43 @@ func (t *Tracker) Progress(id uint64, kind Kind, done, total int, message string
 	})
 }
 
+// Checkpoint stores the progress of the running operation whose ID is in
+// ctx (see IDFrom) and sends <kind>.progress. The caller reports its progress
+// per batch, not per item.
+func (t *Tracker) Checkpoint(ctx context.Context, kind Kind, done, total int) error {
+	id, ok := IDFrom(ctx)
+	if !ok {
+		return errors.New("checkpoint outside an operation")
+	}
+	sctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	if err := t.store.Progress(sctx, id, done, total); err != nil {
+		return fmt.Errorf("store progress of operation %d: %w", id, err)
+	}
+	t.pub.Publish(ws.OperationProgressEvent{
+		Type:        kind.ProgressEvent(),
+		Time:        t.now().UTC(),
+		OperationID: id,
+		Data:        ws.OperationProgressData{Kind: string(kind), Done: done, Total: total},
+	})
+	return nil
+}
+
+type idKey struct{}
+
+// withID returns ctx carrying the ID of the running operation fn belongs
+// to. Work of an operation reads it with IDFrom.
+func withID(ctx context.Context, id uint64) context.Context {
+	return context.WithValue(ctx, idKey{}, id)
+}
+
+// IDFrom returns the ID of the operation the context was passed to by the
+// tracker, if any.
+func IDFrom(ctx context.Context) (uint64, bool) {
+	id, ok := ctx.Value(idKey{}).(uint64)
+	return id, ok
+}
+
 // Publish sends an event that is not an operation event, such as
 // track.analysed. It is not stored.
 func (t *Tracker) Publish(event any) {
@@ -300,7 +346,7 @@ func (t *Tracker) Execute(ctx context.Context, id uint64, component logging.Comp
 }
 
 func (t *Tracker) execute(ctx context.Context, id uint64, component logging.Component, fn Func) error {
-	summary, err := call(ctx, fn)
+	summary, err := call(withID(ctx, id), fn)
 
 	// The final write must happen even when ctx is cancelled (shutdown), so
 	// the row does not stay running.

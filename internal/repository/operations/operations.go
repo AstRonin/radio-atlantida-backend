@@ -34,6 +34,8 @@ type row struct {
 	FinishedAt    *time.Time `db:"finished_at"`
 	ErrorMessage  *string    `db:"error_message"`
 	ResultSummary *string    `db:"result_summary"`
+	ProgressDone  *int32     `db:"progress_done"`
+	ProgressTotal *int32     `db:"progress_total"`
 }
 
 func (r row) operation() operations.Operation {
@@ -45,10 +47,32 @@ func (r row) operation() operations.Operation {
 		FinishedAt:    r.FinishedAt,
 		ErrorMessage:  r.ErrorMessage,
 		ResultSummary: r.ResultSummary,
+		ProgressDone:  intPtr(r.ProgressDone),
+		ProgressTotal: intPtr(r.ProgressTotal),
 	}
 }
 
-const selectColumns = `SELECT id, kind, status, started_at, finished_at, error_message, result_summary FROM operations`
+func intPtr(v *int32) *int {
+	if v == nil {
+		return nil
+	}
+	return new(int(*v))
+}
+
+const selectColumns = `SELECT id, kind, status, started_at, finished_at, error_message, result_summary,
+       progress_done, progress_total FROM operations`
+
+// Progress stores the progress of a running operation.
+func (s *Store) Progress(ctx context.Context, id uint64, done, total int) error {
+	if _, err := s.q.Exec(ctx, `
+		UPDATE operations SET progress_done = $2, progress_total = $3
+		WHERE id = $1 AND status = 'running'`,
+		id, done, total,
+	); err != nil {
+		return fmt.Errorf("update progress of operation %d: %w", id, err)
+	}
+	return nil
+}
 
 // Insert stores a running operation and returns its ID.
 func (s *Store) Insert(ctx context.Context, kind operations.Kind, startedAt time.Time) (uint64, error) {

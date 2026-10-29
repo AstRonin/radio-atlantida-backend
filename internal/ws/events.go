@@ -314,3 +314,35 @@ type LiveStateData struct {
 	OnAirSince *time.Time `json:"on_air_since,omitempty" doc:"When audio first reached Liquidsoap in this session."`
 	Reason     *string    `json:"reason,omitempty" enum:"stopped,replaced,no_audio,dropout,shutdown" doc:"Why the session ended; only with state off."`
 }
+
+// EventTrackPlanFull is the type of [TrackPlanFullEvent].
+const EventTrackPlanFull = "rotation.plan_full"
+
+// Statuses of a full pass in [TrackPlanFullData].
+const (
+	// TrackPlanFullStarted: the pass has started; its counts are zero.
+	TrackPlanFullStarted = "started"
+	// TrackPlanFullCompleted: the pass finished; its counts are final.
+	TrackPlanFullCompleted = "completed"
+	// TrackPlanFullFailed: the pass stopped with an error; the counts are those
+	// of the batches it committed.
+	TrackPlanFullFailed = "failed"
+)
+
+// TrackPlanFullEvent reports a full pass of the track plan (rotation.plan_full):
+// it is sent when the pass starts and when it ends, so a panel can show that
+// it is running and what it did.
+type TrackPlanFullEvent struct {
+	Type string            `json:"type" doc:"Always rotation.plan_full."`
+	Time time.Time         `json:"time" doc:"UTC time of the event."`
+	Data TrackPlanFullData `json:"data"`
+}
+
+// TrackPlanFullData is the payload of [TrackPlanFullEvent].
+type TrackPlanFullData struct {
+	Status       string `json:"status" enum:"started,completed,failed" doc:"started, completed, or failed."`
+	HoursBuilt   int    `json:"hours_built" doc:"Hours built and committed so far."`
+	HoursSkipped int    `json:"hours_skipped" doc:"Hours not built: started, queued, unchanged, or without a clock."`
+	Items        int    `json:"items" doc:"Items of the built hours."`
+	ElapsedMS    int64  `json:"elapsed_ms" doc:"Milliseconds since the pass started."`
+}

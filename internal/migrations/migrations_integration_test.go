@@ -42,7 +42,7 @@ func TestUpCreatesSchemaAndSeeds(t *testing.T) {
 		"artists", "backend_heartbeat", "broadcast_outages", "broadcast_state", "clock_inserts", "clock_playlists",
 		"clocks", "grid_slots", "hour_inserts", "operations", "plan_hours",
 		"play_log", "play_rules", "playlist_play_rules", "playlist_types", "playlists",
-		"scheduled_items", "settings", "track_play_rules",
+		"rotation_nightly_passes", "scheduled_items", "settings", "track_play_rules",
 		"track_playlists", "track_waveforms", "tracks",
 	}, tables)
 

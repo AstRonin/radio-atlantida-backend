@@ -127,3 +127,45 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateWeekdaysFallInRange(t *testing.T) {
+	t.Parallel()
+	// Fixed clock: 2026-10-15 01:00 in Yerevan. 2026-10-19 is a Monday, so
+	// 2026-10-29 is a Thursday and 2026-10-20 to 2026-10-26 is a full week.
+	now := time.Date(2026, 10, 14, 21, 0, 0, 0, time.UTC)
+	yerevan, err := time.LoadLocation("Asia/Yerevan")
+	require.NoError(t, err)
+	s := &Service{now: func() time.Time { return now }}
+	set := Settings{Location: yerevan, HorizonDays: 30}
+
+	tests := []struct {
+		name     string
+		weekdays []int
+		from     string
+		to       *time.Time
+		refused  bool
+	}{
+		{name: "one day on a non-matching weekday is refused", weekdays: []int{1}, from: "2026-10-29", to: dayPtr("2026-10-29"), refused: true},
+		{name: "one day on the matching weekday is accepted", weekdays: []int{4}, from: "2026-10-29", to: dayPtr("2026-10-29")},
+		{name: "a week covers every weekday", weekdays: []int{1}, from: "2026-10-20", to: dayPtr("2026-10-26")},
+		{name: "open-ended range is accepted", weekdays: []int{1}, from: "2026-10-29"},
+		{name: "partial match is accepted", weekdays: []int{1, 4}, from: "2026-10-29", to: dayPtr("2026-10-29")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			in := AssignInput{Weekdays: tt.weekdays, Hours: []int{8}, ValidFrom: day(tt.from), ValidTo: tt.to}
+			_, err := s.validate(in, set)
+			if !tt.refused {
+				require.NoError(t, err)
+				return
+			}
+			var verr *validation.Error
+			require.True(t, errors.As(err, &verr), "%v", err)
+			require.Len(t, verr.Fields, 1)
+			require.Equal(t, "weekdays", verr.Fields[0].Field)
+			require.Equal(t, validation.Invalid, verr.Fields[0].Rule)
+			require.Equal(t, "none of the chosen weekdays falls between valid_from and valid_to", verr.Fields[0].Message)
+		})
+	}
+}

@@ -261,7 +261,14 @@ func TestSetRefusals(t *testing.T) {
 		{"stream.icecast_port", `65536`, settings.RuleRange},
 		{"stream.hls_enabled", `"yes"`, settings.RuleType},
 		{"rotation.lookahead_items", `4`, settings.RuleRange},
-		{"rotation.plan_horizon_hours", `12`, settings.RuleRange},
+		{"rotation.plan_horizon_days", `0`, settings.RuleRange},
+		{"rotation.plan_horizon_days", `184`, settings.RuleRange},
+		{"rotation.grid_horizon_days", `184`, settings.RuleRange},
+		{"rotation.full_pass_time", `"24:00"`, settings.RuleFormat},
+		{"rotation.full_pass_time", `"3:00"`, settings.RuleLength},
+		{"rotation.full_pass_batch_hours", `23`, settings.RuleRange},
+		{"rotation.full_pass_batch_hours", `745`, settings.RuleRange},
+		{"rotation.full_pass_enabled", `"yes"`, settings.RuleType},
 		{"retention.play_log_days", `2`, settings.RuleRange},
 		{"playout.emergency_playlist_id", `0`, settings.RuleRange},
 		{"playout.emergency_playlist_id", `"3"`, settings.RuleType},
@@ -424,4 +431,40 @@ func TestGuardRefusesBeforeSave(t *testing.T) {
 	s, err := svc.Set(t.Context(), "retention.play_log_days", json.RawMessage(`5`))
 	require.NoError(t, err)
 	require.Equal(t, 5, s.Value)
+}
+
+// The full pass settings have their code defaults, and the plan horizon is
+// kept in days: rotation.plan_horizon_hours is no longer defined.
+func TestRotationFullPassSettingsDefaults(t *testing.T) {
+	t.Parallel()
+	reg := settings.NewRegistry()
+	defaults := map[string]any{
+		"rotation.grid_horizon_days":      183,
+		"rotation.plan_horizon_days":      31,
+		"rotation.full_pass_time":         "03:00",
+		"rotation.full_pass_batch_hours":  168,
+		"rotation.full_pass_enabled":      true,
+		"rotation.full_pass_slow_ms":      60000,
+		"rotation.full_pass_heap_warn_mb": 512,
+	}
+	for key, want := range defaults {
+		d, ok := reg.Lookup(key)
+		require.True(t, ok, key)
+		require.Equal(t, want, d.Default, key)
+	}
+	_, ok := reg.Lookup("rotation.plan_horizon_hours")
+	require.False(t, ok, "the hours key is replaced by plan_horizon_days")
+
+	bounds := map[string][2]float64{
+		"rotation.grid_horizon_days":      {1, 183},
+		"rotation.plan_horizon_days":      {1, 183},
+		"rotation.full_pass_batch_hours":  {24, 744},
+		"rotation.full_pass_slow_ms":      {1000, 3600000},
+		"rotation.full_pass_heap_warn_mb": {64, 16384},
+	}
+	for key, b := range bounds {
+		d, _ := reg.Lookup(key)
+		require.Equal(t, b[0], *d.Minimum, key)
+		require.Equal(t, b[1], *d.Maximum, key)
+	}
 }

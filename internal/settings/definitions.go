@@ -123,11 +123,16 @@ var (
 	LiquidsoapControlPort  = Key[int]{"liquidsoap.control_port"}
 	LiquidsoapMediaRoot    = Key[string]{"liquidsoap.media_root"}
 
-	RotationGridHorizonDays  = Key[int]{"rotation.grid_horizon_days"}
-	RotationPlanHorizonHours = Key[int]{"rotation.plan_horizon_hours"}
-	RotationLookaheadItems   = Key[int]{"rotation.lookahead_items"}
-	RotationFixedToleranceMS = Key[int]{"rotation.default_fixed_tolerance_ms"}
-	RotationMinGapMS         = Key[int]{"rotation.min_gap_ms"}
+	RotationGridHorizonDays    = Key[int]{"rotation.grid_horizon_days"}
+	RotationPlanHorizonDays    = Key[int]{"rotation.plan_horizon_days"}
+	RotationLookaheadItems     = Key[int]{"rotation.lookahead_items"}
+	RotationFixedToleranceMS   = Key[int]{"rotation.default_fixed_tolerance_ms"}
+	RotationMinGapMS           = Key[int]{"rotation.min_gap_ms"}
+	RotationFullPassTime       = Key[string]{"rotation.full_pass_time"}
+	RotationFullPassBatchHours = Key[int]{"rotation.full_pass_batch_hours"}
+	RotationFullPassEnabled    = Key[bool]{"rotation.full_pass_enabled"}
+	RotationFullPassSlowMS     = Key[int]{"rotation.full_pass_slow_ms"}
+	RotationFullPassHeapWarnMB = Key[int]{"rotation.full_pass_heap_warn_mb"}
 
 	OutageHeartbeatTimeoutSeconds = Key[int]{"outage.heartbeat_timeout_seconds"}
 	OutageIcecastCheckSeconds     = Key[int]{"outage.icecast_check_interval_seconds"}
@@ -214,11 +219,22 @@ func NewRegistry() *Registry {
 	r.addSecret(SecretLiquidsoapControlPassword, GroupLiquidsoap, "LIQUIDSOAP_CONTROL_PASSWORD", "Liquidsoap control password.")
 
 	// Rotation (§7).
-	r.add(intDef(RotationGridHorizonDays, "How far ahead the grid can be planned.", "days", 30, 1, 30), ApplyImmediate, true)
-	r.add(intDef(RotationPlanHorizonHours, "How far ahead the track plan is kept.", "hours", 48, 24, 48), ApplyImmediate, true)
+	// rotation.plan_horizon_hours is no longer defined: its saved value was
+	// copied to rotation.plan_horizon_days once by migration 0015, and a
+	// saved value of an undefined key is ignored.
+	r.add(intDef(RotationGridHorizonDays, "How far ahead the grid can be planned.", "days", 183, 1, 183), ApplyImmediate, true)
+	r.add(intDef(RotationPlanHorizonDays, "How far ahead the 5-minute track plan pass keeps the plan.", "days", 31, 1, 183), ApplyImmediate, true)
 	r.add(intDef(RotationLookaheadItems, "Items pushed to Liquidsoap ahead of the current one.", "", 3, 2, 3), ApplyImmediate, true)
 	r.add(intDef(RotationFixedToleranceMS, "Default start tolerance of a new timed insert.", "ms", 60000, 0, 600000), ApplyImmediate, false)
 	r.add(intDef(RotationMinGapMS, "Shortest gap between inserts that gets music; a smaller gap is left.", "ms", 10000, 0, 120000), ApplyImmediate, true)
+	r.add(stringDef(RotationFullPassTime, "Station local time (HH:MM) of the nightly full pass of the track plan; a change applies from the next day.",
+		"03:00", 5, 5, validClockTime), ApplyImmediate, false)
+	r.add(intDef(RotationFullPassBatchHours, "Hours per transaction in the full pass of the track plan: a tuning knob for memory and lock time.",
+		"hours", 168, 24, 744), ApplyImmediate, false)
+	r.add(boolDef(RotationFullPassEnabled, "Nightly full pass of the track plan on or off; the button on the track plan page always works.", true),
+		ApplyImmediate, false)
+	r.add(intDef(RotationFullPassSlowMS, "A full pass that runs longer than this is logged as a warning.", "ms", 60000, 1000, 3600000), ApplyImmediate, false)
+	r.add(intDef(RotationFullPassHeapWarnMB, "A full pass that finds more heap in use than this is logged as a warning.", "MB", 512, 64, 16384), ApplyImmediate, false)
 
 	// Outage detection (§7.1).
 	r.add(intDef(OutageHeartbeatTimeoutSeconds, "Liquidsoap callback and control link heartbeat timeout.", "seconds", 10, 2, 300), ApplyImmediate, false)
@@ -497,6 +513,16 @@ func invalid(key string, rule Rule, msg string) *InvalidValueError {
 }
 
 // Format checks.
+
+// validClockTime checks an HH:MM time of day (00:00 to 23:59).
+func validClockTime(s string) error {
+	if !clockTimePattern.MatchString(s) {
+		return errors.New("must be a time of day as HH:MM")
+	}
+	return nil
+}
+
+var clockTimePattern = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
 
 func validTimezone(s string) error {
 	// LoadLocation accepts "" and "Local" too, which are not IANA names

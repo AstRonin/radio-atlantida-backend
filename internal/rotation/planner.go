@@ -20,14 +20,18 @@ const (
 	rebuildTimeout = 5 * time.Minute
 )
 
-// rebuild is a queued operation of the planner: a clock_build, or an
-// insert operation (reschedule, hour_insert) when insert is set.
+// rebuild is a queued operation of the planner: a clock_build, an insert
+// operation (reschedule, hour_insert) when insert is set, or a full pass
+// (track_plan_full) when full is set.
 type rebuild struct {
 	opID uint64
 	// force rebuilds the hours in the range even when they are current.
 	force *Range
 	// insert adds or removes a one-time insert of one hour.
 	insert *insertOp
+	// full runs a full pass, started by trigger.
+	full    bool
+	trigger Trigger
 }
 
 // Rebuild starts a clock_build operation that syncs the plan after a clock
@@ -46,6 +50,23 @@ func (s *Service) RebuildRange(ctx context.Context, r Range) (uint64, error) {
 		return 0, err
 	}
 	return s.enqueue(ctx, &r)
+}
+
+// RebuildFull starts a track_plan_full operation: the full pass of the
+// track plan, from now to the grid horizon, in batches (fullpass.go). It
+// returns its ID at once; ErrFullPassRunning while a pass runs. The planner
+// runs it, so it never overlaps a nightly pass that started earlier (the
+// nightly pass holds the same flag).
+func (s *Service) RebuildFull(ctx context.Context) (uint64, error) {
+	if s.full.Load() {
+		return 0, ErrFullPassRunning
+	}
+	id, err := s.ops.Start(ctx, operations.KindTrackPlanFull)
+	if err != nil {
+		return 0, err
+	}
+	s.enqueueOp(ctx, rebuild{opID: id, full: true, trigger: TriggerButton})
+	return id, nil
 }
 
 func (s *Service) enqueue(ctx context.Context, force *Range) (uint64, error) {
@@ -105,6 +126,14 @@ func (s *Service) runBatch(ctx context.Context, batch []rebuild) {
 	var force []Range
 	var builds []rebuild
 	for _, r := range batch {
+		if r.full {
+			// A full pass takes its own timeout; it runs alone, in this
+			// goroutine, so the builds of the batch wait for it.
+			_ = s.ops.Execute(ctx, r.opID, logging.ComponentRotation, func(ctx context.Context) (string, error) {
+				return s.FullPass(ctx, r.trigger)
+			})
+			continue
+		}
 		if r.insert != nil {
 			rctx, cancel := context.WithTimeout(ctx, hourTimeout+dbTimeout)
 			// Execute stores, logs, and publishes the outcome; an error
@@ -128,7 +157,7 @@ func (s *Service) runBatch(ctx context.Context, batch []rebuild) {
 	for i, r := range builds {
 		fn := func(ctx context.Context) (string, error) {
 			if i == 0 {
-				res, err := s.Sync(ctx, force)
+				res, err := s.sync(ctx, TriggerClockBuild, force)
 				summary, syncErr = res.String(), err
 			}
 			return summary, syncErr

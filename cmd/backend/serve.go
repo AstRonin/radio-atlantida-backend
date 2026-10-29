@@ -152,7 +152,8 @@ func serve(ctx context.Context) error {
 
 	cleanup := retention.New(retentionrepo.New(database.Pool), retentionPeriods(settingsSvc), time.Now)
 	scheduler := jobs.NewScheduler(jobsrepo.NewLocks(database.Pool), tracker, log,
-		jobs.Retention(cleanup.Run), jobs.TrackPlan(rotationSvc.RunJob))
+		jobs.Retention(cleanup.Run), jobs.TrackPlan(rotationSvc.RunJob),
+		jobs.TrackPlanFull(rotationSvc.RunNightly, rotationSvc.NightlyDue, rotation.FullPassTimeout))
 
 	// Request contexts are not cancelled by the shutdown signal itself:
 	// in-flight requests may finish during the drain. They are cancelled when
@@ -461,7 +462,31 @@ func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
 		if err != nil {
 			return rotation.PlanSettings{}, fmt.Errorf("station timezone %q: %w", tz, err)
 		}
-		horizon, err := settings.Value(ctx, svc, settings.RotationPlanHorizonHours)
+		planDays, err := settings.Value(ctx, svc, settings.RotationPlanHorizonDays)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		gridDays, err := settings.Value(ctx, svc, settings.RotationGridHorizonDays)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		fullEnabled, err := settings.Value(ctx, svc, settings.RotationFullPassEnabled)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		fullTime, err := settings.Value(ctx, svc, settings.RotationFullPassTime)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		fullBatch, err := settings.Value(ctx, svc, settings.RotationFullPassBatchHours)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		fullSlow, err := settings.Value(ctx, svc, settings.RotationFullPassSlowMS)
+		if err != nil {
+			return rotation.PlanSettings{}, err
+		}
+		fullHeap, err := settings.Value(ctx, svc, settings.RotationFullPassHeapWarnMB)
 		if err != nil {
 			return rotation.PlanSettings{}, err
 		}
@@ -479,7 +504,13 @@ func rotationSettings(svc *settings.Service) rotation.SettingsFunc {
 		}
 		return rotation.PlanSettings{
 			Location:                loc,
-			PlanHorizonHours:        horizon,
+			PlanHorizonDays:         planDays,
+			GridHorizonDays:         gridDays,
+			FullPassEnabled:         fullEnabled,
+			FullPassTime:            fullTime,
+			FullBatchHours:          fullBatch,
+			FullSlowMS:              fullSlow,
+			FullHeapWarnMB:          fullHeap,
 			Freeze:                  time.Duration(prepush) * time.Minute,
 			DefaultFixedToleranceMS: fixedTol,
 			Build:                   rotation.Settings{MinGapMS: minGap},

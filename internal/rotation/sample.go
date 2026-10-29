@@ -37,7 +37,7 @@ func (s *Service) Sample(ctx context.Context, c clocks.Clock) (Sample, error) {
 		return Sample{}, fmt.Errorf("read rotation settings: %w", err)
 	}
 	now := s.now().UTC()
-	hours, err := s.grid.Hours(ctx, now.Add(time.Nanosecond), now.Add(time.Duration(set.PlanHorizonHours)*time.Hour))
+	hours, err := s.grid.Hours(ctx, now.Add(time.Nanosecond), planHorizon(now, set))
 	if err != nil {
 		return Sample{}, fmt.Errorf("read grid hours: %w", err)
 	}
@@ -48,28 +48,36 @@ func (s *Service) Sample(ctx context.Context, c clocks.Clock) (Sample, error) {
 			break
 		}
 	}
-	lib, err := s.store.Library(ctx)
-	if err != nil {
-		return Sample{}, fmt.Errorf("read library: %w", err)
-	}
-	span := lib.maxRuleInterval()
-	history, err := s.store.History(ctx, start.Add(-span), start.Add(time.Hour+span), start)
-	if err != nil {
-		return Sample{}, fmt.Errorf("read history: %w", err)
-	}
 	var inserts []Insert
 	if planned {
 		if inserts, err = s.store.Inserts(ctx, start); err != nil {
 			return Sample{}, fmt.Errorf("read hour inserts: %w", err)
 		}
 	}
+	lib, err := libraryFor(ctx, s.store, scopeOf([]clocks.Clock{c}, inserts))
+	if err != nil {
+		return Sample{}, err
+	}
+	span := lib.maxRuleInterval()
+	history, err := s.store.History(ctx, start.Add(-span), start.Add(time.Hour+span), start)
+	if err != nil {
+		return Sample{}, fmt.Errorf("read history: %w", err)
+	}
 	plan := Build(HourInput{
 		Start: start, Location: set.Location, Clock: c, HourInserts: inserts, Library: &lib, History: history,
 		Settings: set.Build, Seed: uint64(start.Unix()), //nolint:gosec // G115: hour starts are after 1970
 	})
+	ids := make([]uint64, len(plan.Items))
+	for i, it := range plan.Items {
+		ids[i] = it.TrackID
+	}
+	titles, err := titlesOf(ctx, s.store, ids)
+	if err != nil {
+		return Sample{}, err
+	}
 	out := Sample{HourStart: start, Warnings: plan.Warnings, Items: make([]SampleItem, len(plan.Items))}
 	for i, it := range plan.Items {
-		t, _ := lib.track(it.TrackID)
+		t := titles[it.TrackID]
 		out.Items[i] = SampleItem{Item: it, Title: t.Title, ArtistName: t.ArtistName, LengthMS: it.OutMS - it.InMS}
 	}
 	return out, nil

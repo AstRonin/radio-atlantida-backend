@@ -49,11 +49,27 @@ type Track struct {
 	ArtistName *string
 }
 
+// LibraryScope selects the tracks a snapshot holds: the tracks of Playlists
+// and the tracks named in Tracks (one-time inserts, a missed track). A build
+// reads only the tracks of the playlists its clocks and inserts use, so a
+// snapshot of those playlists gives the same plan as the whole library.
+type LibraryScope struct {
+	// All reads every track with a duration (the unfiltered library).
+	All       bool
+	Playlists []uint64
+	Tracks    []uint64
+}
+
 // Library is the snapshot of the library a build reads.
 type Library struct {
 	// Tracks in ID order.
 	Tracks []Track
 	Rules  map[uint64]playrules.RuleInput
+	// Scope is what the snapshot was read with; the service sets it.
+	Scope LibraryScope
+	// digests caches clockDigest by clock version; cleared when tracks are
+	// added to the snapshot.
+	digests map[digestKey]string
 }
 
 // track returns the track with the ID.
@@ -95,6 +111,10 @@ type Play struct {
 	TrackID  uint64
 	ArtistID *uint64
 	Start    time.Time
+	// Planned is true for a planned item of the plan (scheduled_items with
+	// status planned); a rebuild of its hour replaces it. Aired, truncated
+	// and queued plays are not.
+	Planned bool
 }
 
 // Source says why an item is in the plan (scheduled_items.source).

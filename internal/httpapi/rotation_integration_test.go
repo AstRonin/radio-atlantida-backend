@@ -213,3 +213,29 @@ func sourcesOf(h dto.TrackPlanHour) []string {
 	}
 	return out
 }
+
+// POST /api/track-plan/rebuild-full starts a track_plan_full operation and
+// answers accepted with its ID; a second start while one runs is refused
+// (track_plan_full_running), and the first one completes.
+func TestRebuildFullEndpoint(t *testing.T) {
+	f := newClockFixture(t)
+	var accepted dto.OperationAccepted
+	f.ok(http.StatusAccepted, http.MethodPost, "/api/track-plan/rebuild-full", nil, &accepted)
+	require.NotZero(t, accepted.OperationID)
+
+	var op dto.Operation
+	f.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/operations/%d", accepted.OperationID), nil, &op)
+	require.Equal(t, "track_plan_full", op.Kind)
+	waitFull := func(id uint64) dto.Operation {
+		var done dto.Operation
+		require.Eventually(t, func() bool {
+			f.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/operations/%d", id), nil, &done)
+			return done.Status != "running"
+		}, 30*time.Second, 20*time.Millisecond)
+		return done
+	}
+	done := waitFull(accepted.OperationID)
+	require.Equal(t, "completed", done.Status, "%+v", done)
+	require.Contains(t, done.ResultSummary, "built 0 hours", "the fixture has no grid")
+	require.NotNil(t, done.ProgressTotal, "the operation reports its progress")
+}

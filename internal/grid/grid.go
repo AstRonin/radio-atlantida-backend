@@ -374,7 +374,31 @@ func (s *Service) validate(in AssignInput, set Settings) (AssignInput, error) {
 	if in.ValidTo != nil && in.ValidTo.Before(in.ValidFrom) {
 		errs.Add("valid_to", validation.Range, "must not be before valid_from")
 	}
+	// A slot matches a date by its ISO weekday, so a range with no date on a
+	// chosen weekday would be stored and never play. Refused here, not
+	// silently stored. Skipped when the range or the weekdays are already
+	// invalid, to avoid a second error for the same cause.
+	if in.ValidTo != nil && !in.ValidTo.Before(in.ValidFrom) && len(in.Weekdays) > 0 &&
+		!weekdaysFall(in.Weekdays, in.ValidFrom, *in.ValidTo) {
+		errs.Add("weekdays", validation.Invalid, "none of the chosen weekdays falls between valid_from and valid_to")
+	}
 	return in, errs.Err()
+}
+
+// weekdaysFall reports whether a date from first to last (both inclusive)
+// falls on one of the ISO weekdays. Seven consecutive dates cover every
+// weekday, so the scan stops after a week however long the range is.
+func weekdaysFall(weekdays []int, first, last time.Time) bool {
+	for i := range 7 {
+		d := first.AddDate(0, 0, i)
+		if d.After(last) {
+			return false
+		}
+		if slices.Contains(weekdays, ISOWeekday(d)) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedSet(errs *validation.Error, field string, vs []int, lo, hi int, msg string) []int {
