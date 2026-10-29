@@ -40,11 +40,18 @@ limits_config:
   # Accept lines up to 10 days old (default 1 week), so a first start or a
   # long stop of Alloy loads every file still on disk.
   reject_old_samples_max_age: 240h
-  # Default: derive a service_name label from component/job. The labels are
-  # exactly those Alloy sets (decision 7).
-  discover_service_name: []
-  # Default: add detected_level metadata. level is already a label.
-  discover_log_levels: false
+  # service_name is what the Logs Drilldown app groups by. Only job is used: the
+  # default (component, then job) would make every component a separate service.
+  # job is "backend" for the backend's lines and "playout-journal" for the journal.
+  discover_service_name: [job]
+  # detected_level is what the Logs Drilldown app reads. level is also a label
+  # set by the backend, so the two agree.
+  discover_log_levels: true
+
+# Pattern ingester: the Logs Drilldown app's Patterns tab reads /loki/api/v1/patterns,
+# which Loki serves only when this is on. Off by default. It adds a little memory.
+pattern_ingester:
+  enabled: true
 
 ingester:
   # Default with -target=all: about 2.5 h (max_chunk_age + 30 min), and the

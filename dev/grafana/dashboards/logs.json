@@ -35,9 +35,10 @@
           "uid": "radio-logs"
         },
         "query": {
-          "qryType": 1,
-          "query": "label_values({job=\"backend\"}, level)",
-          "refId": "level-values"
+          "refId": "level-values",
+          "type": 1,
+          "label": "level",
+          "stream": "{job=\"backend\"}"
         },
         "definition": "label_values({job=\"backend\"}, level)",
         "multi": true,
@@ -64,9 +65,10 @@
           "uid": "radio-logs"
         },
         "query": {
-          "qryType": 1,
-          "query": "label_values({job=\"backend\"}, component)",
-          "refId": "component-values"
+          "refId": "component-values",
+          "type": 1,
+          "label": "component",
+          "stream": "{job=\"backend\"}"
         },
         "definition": "label_values({job=\"backend\"}, component)",
         "multi": true,
