@@ -99,8 +99,7 @@ func (p *Prober) Probe(ctx context.Context, rel string) (Info, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	abs := p.lib.abs(rel)
-	//nolint:gosec // G204: bin is ffprobe from PATH, and abs is a validated path inside MEDIA_ROOT passed as one argument (no shell).
-	cmd := exec.CommandContext(ctx, p.bin,
+	cmd := commandContext(ctx, p.bin,
 		"-v", "error",
 		"-show_entries", "format=format_name,duration,bit_rate:format_tags:stream=codec_type,codec_name,sample_rate,channels:stream_tags",
 		"-of", "json",

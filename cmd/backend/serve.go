@@ -218,22 +218,24 @@ func serve(ctx context.Context) error {
 		<-gctx.Done()
 		apiLog.Info("shutting down")
 		// The parent context is already cancelled; the drain gets its own.
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(gctx), shutdownTimeout)
-		defer cancel()
-		if err := srv.Shutdown(sctx); err != nil {
-			// Drain timed out: cancel the remaining requests, so their
-			// queries stop and release connections before the database closes.
-			cancelRequests()
-			_ = srv.Close()
-			return fmt.Errorf("http shutdown: %w", err)
-		}
-		return nil
+		return drainHTTP(context.WithoutCancel(gctx), srv, cancelRequests, shutdownTimeout)
 	})
 
-	waitErr := g.Wait()
 	// Operations started by requests (queued ones too) finish their final
-	// writes before the database closes.
-	opsPool.Close()
+	// writes before the database closes. The wait is bounded: a component that
+	// ignores its context must not keep the process alive (cmd/backend/shutdown.go).
+	waited := make(chan error, 1)
+	go func() {
+		err := g.Wait()
+		opsPool.Close()
+		waited <- err
+	}()
+	stuck, waitErr := awaitStop(waited, gctx.Done(), shutdownTimeout+componentGrace)
+	if stuck {
+		apiLog.Error("background components did not stop in time; exiting",
+			"grace", (shutdownTimeout + componentGrace).String())
+		return fmt.Errorf("components did not stop within %s", shutdownTimeout+componentGrace)
+	}
 	if waitErr != nil {
 		apiLog.Error("server stopped with error", logging.KeyError, waitErr)
 		return waitErr

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"time"
 )
@@ -36,8 +35,7 @@ func (f *FFmpeg) Peaks(ctx context.Context, rel string, bucketMS int) ([]int8, i
 	}
 	ctx, cancel := context.WithTimeout(ctx, peaksTimeout)
 	defer cancel()
-	//nolint:gosec // G204: bin is ffmpeg from PATH; the path is validated and inside MEDIA_ROOT, one argument (no shell).
-	cmd := exec.CommandContext(ctx, f.bin,
+	cmd := commandContext(ctx, f.bin,
 		"-hide_banner", "-nostdin", "-nostats", "-v", "error", "-threads", "1",
 		"-i", "file:"+f.lib.abs(rel), "-map", "0:a:0", "-ac", "1", "-ar", strconv.Itoa(peaksRate),
 		"-c:a", "pcm_s16le", "-f", "s16le", "-")

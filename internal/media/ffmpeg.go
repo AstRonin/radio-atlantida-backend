@@ -208,8 +208,7 @@ func (f *FFmpeg) check(rel string) error {
 
 // run runs ffmpeg with args and returns what it wrote to stderr.
 func (f *FFmpeg) run(ctx context.Context, args ...string) ([]byte, error) {
-	//nolint:gosec // G204: bin is ffmpeg from PATH; paths in args are validated and inside MEDIA_ROOT, each one argument (no shell).
-	cmd := exec.CommandContext(ctx, f.bin, args...)
+	cmd := commandContext(ctx, f.bin, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
