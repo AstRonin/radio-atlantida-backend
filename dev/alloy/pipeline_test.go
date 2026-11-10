@@ -65,6 +65,7 @@ func TestPipeline(t *testing.T) {
 			want:     now.Truncate(time.Millisecond),
 			wantLabels: map[string]string{
 				"job": "playout-journal", "event": "start", "source": "plan", "file": "journal-" + day(now) + ".jsonl",
+				"service_name": "playout-journal", "detected_level": "unknown",
 			},
 		},
 		{
@@ -75,6 +76,7 @@ func TestPipeline(t *testing.T) {
 			want:     now.Add(time.Second).Truncate(time.Millisecond),
 			wantLabels: map[string]string{
 				"job": "playout-journal", "event": "output", "file": "journal-" + day(now) + ".jsonl",
+				"service_name": "playout-journal", "detected_level": "unknown",
 			},
 		},
 		{
@@ -89,6 +91,7 @@ func TestPipeline(t *testing.T) {
 			want:     now.Add(2 * time.Second).Truncate(time.Millisecond),
 			wantLabels: map[string]string{
 				"job": "playout-journal", "event": "output", "file": "journal-" + day(tomorrow) + ".jsonl",
+				"service_name": "playout-journal", "detected_level": "unknown",
 			},
 		},
 	}
@@ -115,7 +118,7 @@ func TestPipeline(t *testing.T) {
 
 	t.Run("labels are small closed sets", func(t *testing.T) {
 		// item_id, track_id, uri and filename stay in the line.
-		require.Equal(t, []string{"event", "file", "job", "source"},
+		require.Equal(t, []string{"event", "file", "job", "service_name", "source"},
 			labelNames(t, s.loki, from, to))
 	})
 

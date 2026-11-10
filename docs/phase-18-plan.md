@@ -45,7 +45,7 @@ This replaces the inbox model of phase 11 (inbox folder, library folder, files m
    5. analysis fails: `unreadable`;
    6. otherwise the track is registered at this path, with the title and artist of 2.6a: `imported`.
 
-   The summary counts `imported`, `in_library`, `duplicates`, `unreadable`, `skipped`, `failed`, and starts with the folder (`folder jingles: ...`, `whole media folder: ...` for the root).
+   The summary counts `imported`, `in_library`, `duplicates`, `unreadable`, `skipped`, `failed`, and starts with the folder (`folder jingles: ...`, `whole media folder: ...` for the root). The counts are followed by `; analysis: ...`, the counts of the analysis of the new tracks that runs alongside the import.
 8. **Originals of transcoded copies.** A transcode with output `copy` writes `<stem>.optimal.<ext>` next to the original and points the track at the copy; the original stays on disk without a track. An import must not register it again. A file `<dir>/<stem>.<any ext>` is an original when a track's `file_path` is `<dir>/<stem>.optimal.<any ext>` (the copy may have another extension, for example a FLAC original and an MP3 copy).
 9. **Validation of the folder** (listing and import), a per-field refusal (`422`, field `folder`, rule `invalid`, no new code):
    - `media.ValidatePath` (no `..`, no absolute path, no backslash, clean form);

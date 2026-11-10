@@ -102,7 +102,7 @@ func TestImportFolder(t *testing.T) {
 	var accepted dto.OperationAccepted
 	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"folder": "jingles", "type_id": jingle}, &accepted)
 	op := a.waitOperation(&accepted.OperationID)
-	require.Equal(t, "folder jingles: imported 2", op.ResultSummary)
+	require.Equal(t, "folder jingles: imported 2; analysis: analysed 2", op.ResultSummary)
 	id1 := a.trackByTitle("id1")
 	require.Equal(t, "jingles/id1.mp3", id1.FilePath)
 	require.Equal(t, jingle, id1.Type.ID)
@@ -122,13 +122,13 @@ func TestImportFolder(t *testing.T) {
 	a.tone("jingles/id3.mp3", append(good, "-metadata", "comment=5")...)
 	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"folder": "jingles", "type_id": jingle}, &accepted)
 	op = a.waitOperation(&accepted.OperationID)
-	require.Equal(t, "folder jingles: imported 1, in_library 2", op.ResultSummary)
+	require.Equal(t, "folder jingles: imported 1, in_library 2; analysis: analysed 1", op.ResultSummary)
 
 	// The music: title and artist from the file name when there are no
 	// tags.
 	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"folder": "music", "type_id": music}, &accepted)
 	op = a.waitOperation(&accepted.OperationID)
-	require.Equal(t, "folder music: imported 3, skipped 1", op.ResultSummary)
+	require.Equal(t, "folder music: imported 3, skipped 1; analysis: analysed 3", op.ResultSummary)
 	morning := a.trackByTitle("Morning")
 	require.Equal(t, "music/DJ Ann - Morning.mp3", morning.FilePath)
 	require.Equal(t, "DJ Ann", morning.Artist.Name)
@@ -158,7 +158,7 @@ func TestImportFolder(t *testing.T) {
 	a.tone("promos/again.mp3", append(good, "-metadata", "comment=1")...)
 	a.ok(http.StatusAccepted, http.MethodPost, "/api/import", map[string]any{"type_id": music, "artist_id": band.ID}, &accepted)
 	op = a.waitOperation(&accepted.OperationID)
-	require.Equal(t, "whole media folder: imported 1, in_library 6, duplicates 1, skipped 1", op.ResultSummary)
+	require.Equal(t, "whole media folder: imported 1, in_library 6, duplicates 1, skipped 1; analysis: analysed 1", op.ResultSummary)
 	spot := a.trackByTitle("Spot")
 	require.Equal(t, "House Band", spot.Artist.Name)
 	_, err = os.Stat(filepath.Join(a.mediaRoot, "promos", "again.mp3"))

@@ -54,8 +54,10 @@ Phase 14 must be done first: this phase adds two services to its
    dropped). Loki refuses a line more than `max_chunk_age / 2` (1 h) older
    than the newest line of its stream ("too far behind"), so without it
    yesterday's file, read after today's on a first start, is lost;
-   `pipeline_test.go` shows this. Loki's `discover_service_name` and
-   `discover_log_levels` are off, so no other label or metadata is added.
+   `pipeline_test.go` shows this. For the Logs Drilldown app, Loki's
+   `discover_service_name` is `[job]`, so `service_name` is one-to-one with
+   `job` and adds no streams, and `discover_log_levels` is on, which adds
+   `detected_level` as structured metadata, not an index label.
 8. **Data source and dashboard.** Loki data source `uid: radio-logs`,
    provisioned next to `radio-db`. Dashboard "Logs" (§3), same provider
    (`allowUiUpdates: false`). Unlike the database dashboard, it uses

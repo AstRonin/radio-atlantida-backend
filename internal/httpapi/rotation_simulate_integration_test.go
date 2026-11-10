@@ -93,6 +93,10 @@ func TestRotationSimulate(t *testing.T) {
 	f.fieldError("query.to", errcodes.Range, http.MethodGet, path+"?from=2026-11-01&to=2026-12-02", nil)
 	f.fieldError("query.from", errcodes.Format, http.MethodGet, path+"?from=2026-13-01&to=2026-12-01", nil)
 	// Exactly 31 days is allowed.
-	f.ok(http.StatusOK, http.MethodGet, path+"?from=2026-11-01&to=2026-12-01", nil, &sim)
+	d, err := time.Parse(time.DateOnly, date)
+	require.NoError(t, err)
+	emptyFrom := d.AddDate(0, 0, 1)
+	emptyTo := emptyFrom.AddDate(0, 0, 30)
+	f.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("%s?from=%s&to=%s", path, emptyFrom.Format(time.DateOnly), emptyTo.Format(time.DateOnly)), nil, &sim)
 	require.Zero(t, sim.HoursBuilt, "no grid hour in the empty range")
 }
