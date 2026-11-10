@@ -207,7 +207,7 @@ const (
 	SortTitle  TrackSort = "title"
 	SortArtist TrackSort = "artist"
 	SortType   TrackSort = "type"
-	// SortDuration: tracks without a duration last.
+	// SortDuration: by the on-air length; tracks without a duration last.
 	SortDuration TrackSort = "duration"
 	// SortFormat: tracks without a format last.
 	SortFormat TrackSort = "format"
@@ -272,6 +272,19 @@ type TrackPage struct {
 	Total int
 }
 
+// TrackStats are figures of the tracks matching a filter.
+type TrackStats struct {
+	Total    int
+	Reviewed int
+	// WithIssues counts what QualityIssuesFound selects: a track with a
+	// manual "ok" override and open issues is with issues.
+	WithIssues int
+	Unanalysed int
+	// AirDurationMS is the sum of the on-air lengths; a track without a
+	// duration adds nothing.
+	AirDurationMS int64
+}
+
 // TrackStore persists tracks (internal/repository/library).
 type TrackStore interface {
 	// WithTx returns the store bound to tx.
@@ -280,6 +293,9 @@ type TrackStore interface {
 	// or skipping f.Offset, and the number of tracks matching the filters
 	// (After, Offset, and Limit aside).
 	List(ctx context.Context, f TrackFilter) ([]Track, int, error)
+	// Stats returns the figures of the tracks matching the filters of f;
+	// its sort and page take no part.
+	Stats(ctx context.Context, f TrackFilter) (TrackStats, error)
 	// Get returns one track, or ErrTrackNotFound.
 	Get(ctx context.Context, id uint64) (Track, error)
 	// Create adds a track without playlists. ErrFilePathTaken,
@@ -382,6 +398,17 @@ func (s *Service) ListTracks(ctx context.Context, f TrackFilter) (TrackPage, err
 		page.Next = &TrackCursor{Title: last.Title, ID: last.ID}
 	}
 	return page, nil
+}
+
+// TrackStats returns the figures of the tracks matching the filters of f.
+func (s *Service) TrackStats(ctx context.Context, f TrackFilter) (TrackStats, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	stats, err := s.tracks.Stats(ctx, f)
+	if err != nil {
+		return TrackStats{}, fmt.Errorf("track stats: %w", err)
+	}
+	return stats, nil
 }
 
 // GetTrack returns one track.

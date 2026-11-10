@@ -381,6 +381,40 @@ VALUES ($1, $1, $2, 'sum-1', 200000, 5000, $3, 1000, 2000) RETURNING id`, path, 
 	require.False(t, reset)
 }
 
+// The generated on-air length follows the duration and the cue that
+// SaveAnalysis writes (docs/track-stats-plan.md decision 1).
+func TestSaveAnalysisUpdatesTheOnAirLength(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	air := func(id uint64) int {
+		t.Helper()
+		var ms int
+		require.NoError(t, f.d.Pool.QueryRow(ctx, `SELECT air_duration_ms FROM tracks WHERE id = $1`, id).Scan(&ms))
+		return ms
+	}
+	track := func(path string, cueIn int, cueOut *int) uint64 {
+		return f.id(`INSERT INTO tracks (title, file_path, type_id, file_checksum, duration_ms, cue_in_ms, cue_out_ms)
+VALUES ($1, $1, $2, 'sum-1', 200000, $3, $4) RETURNING id`, path, f.music, cueIn, cueOut)
+	}
+	whole, fits, beyond := track("whole.mp3", 0, nil), track("fits.mp3", 5000, new(170000)), track("beyond.mp3", 5000, new(190000))
+	require.Equal(t, 200000, air(whole))
+
+	// The new files are 180 s long (analysis()).
+	_, err := f.store.SaveAnalysis(ctx, whole, analysis("whole.mp3", "sum-2"))
+	require.NoError(t, err)
+	require.Equal(t, 180000, air(whole), "the new duration")
+
+	_, err = f.store.SaveAnalysis(ctx, fits, analysis("fits.mp3", "sum-2"))
+	require.NoError(t, err)
+	require.Equal(t, 165000, air(fits), "a cue that fits stays")
+
+	reset, err := f.store.SaveAnalysis(ctx, beyond, analysis("beyond.mp3", "sum-2"))
+	require.NoError(t, err)
+	require.True(t, reset)
+	require.Equal(t, 180000, air(beyond), "the cue is reset")
+}
+
 func TestWaveformRows(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

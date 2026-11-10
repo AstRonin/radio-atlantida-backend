@@ -27,7 +27,10 @@ type trackPageOutput struct {
 	Body dto.TrackPage
 }
 
-type listTracksInput struct {
+// TrackFilterQuery holds the filter parameters shared by the track list and
+// the track statistics, so that the two cannot drift apart. It is exported
+// because huma skips unexported embedded fields.
+type TrackFilterQuery struct {
 	TypeID     uint64 `query:"type_id" minimum:"0" doc:"Only tracks of this type."`
 	ArtistID   uint64 `query:"artist_id" minimum:"0" doc:"Only tracks of this artist."`
 	PlaylistID uint64 `query:"playlist_id" minimum:"0" doc:"Only tracks in this playlist."`
@@ -36,11 +39,41 @@ type listTracksInput struct {
 	Reviewed   string `query:"reviewed" enum:"true,false" doc:"Only tracks with (true) or without (false) the reviewed mark."`
 	InPlan     string `query:"in_plan" enum:"true,false" doc:"Only tracks with (true) or without (false) a planned or queued item in the track plan."`
 	InPlaylist string `query:"in_playlist" enum:"true,false" doc:"Only tracks in at least one playlist (true) or in none (false)."`
-	Sort       string `query:"sort" enum:"title,artist,type,duration,format,quality,reviewed,next_planned_at" default:"title" doc:"Sort key; ties are ordered by title and ID. Tracks without the value are last in both orders (reviewed: by the time of the mark, tracks not reviewed last; next_planned_at: tracks not in the plan last)."`
-	Order      string `query:"order" enum:"asc,desc" default:"asc"`
-	Offset     int    `query:"offset" minimum:"0" maximum:"1000000" default:"0" doc:"Tracks to skip in the sorted list."`
-	Cursor     string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page; only in the default order (title, asc) and without offset."`
-	Limit      int    `query:"limit" minimum:"1" maximum:"500" default:"100"`
+}
+
+// filter returns the library filter of the parameters.
+func (in TrackFilterQuery) filter() library.TrackFilter {
+	f := library.TrackFilter{
+		TypeID: in.TypeID, ArtistID: in.ArtistID, PlaylistID: in.PlaylistID,
+		Query: in.Query, Quality: in.Quality,
+	}
+	if in.Reviewed != "" {
+		f.Reviewed = new(in.Reviewed == "true")
+	}
+	if in.InPlan != "" {
+		f.InPlan = new(in.InPlan == "true")
+	}
+	if in.InPlaylist != "" {
+		f.InPlaylist = new(in.InPlaylist == "true")
+	}
+	return f
+}
+
+type listTracksInput struct {
+	TrackFilterQuery
+	Sort   string `query:"sort" enum:"title,artist,type,duration,format,quality,reviewed,next_planned_at" default:"title" doc:"Sort key; ties are ordered by title and ID. Tracks without the value are last in both orders (reviewed: by the time of the mark, tracks not reviewed last; next_planned_at: tracks not in the plan last)."`
+	Order  string `query:"order" enum:"asc,desc" default:"asc"`
+	Offset int    `query:"offset" minimum:"0" maximum:"1000000" default:"0" doc:"Tracks to skip in the sorted list."`
+	Cursor string `query:"cursor" maxLength:"2000" doc:"next_cursor of the previous page; only in the default order (title, asc) and without offset."`
+	Limit  int    `query:"limit" minimum:"1" maximum:"500" default:"100"`
+}
+
+type trackStatsInput struct {
+	TrackFilterQuery
+}
+
+type trackStatsOutput struct {
+	Body dto.TrackStats
 }
 
 type createTrackInput struct {
@@ -119,20 +152,8 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *listTracksInput) (*trackPageOutput, error) {
-		f := library.TrackFilter{
-			TypeID: in.TypeID, ArtistID: in.ArtistID, PlaylistID: in.PlaylistID,
-			Query: in.Query, Quality: in.Quality,
-			Sort: library.TrackSort(in.Sort), Desc: in.Order == "desc", Offset: in.Offset, Limit: in.Limit,
-		}
-		if in.Reviewed != "" {
-			f.Reviewed = new(in.Reviewed == "true")
-		}
-		if in.InPlan != "" {
-			f.InPlan = new(in.InPlan == "true")
-		}
-		if in.InPlaylist != "" {
-			f.InPlaylist = new(in.InPlaylist == "true")
-		}
+		f := in.filter()
+		f.Sort, f.Desc, f.Offset, f.Limit = library.TrackSort(in.Sort), in.Order == "desc", in.Offset, in.Limit
 		if in.Cursor != "" {
 			c, err := decodeCursor(in.Cursor)
 			if err != nil {
@@ -152,6 +173,24 @@ func registerTracks(api huma.API, log *slog.Logger, svc Library, rules PlayRules
 			out.Body.NextCursor = encodeCursor(*page.Next)
 		}
 		return out, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "get-track-stats",
+		Method:      http.MethodGet,
+		Path:        "/api/tracks/stats",
+		Summary:     "Get the track statistics",
+		Description: "Figures of the tracks matching the filters, which are those of GET /api/tracks and combine in the same way; without filters they describe the whole library.",
+		Tags:        tags,
+		Errors:      errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *trackStatsInput) (*trackStatsOutput, error) {
+		s, err := svc.TrackStats(ctx, in.filter())
+		if err != nil {
+			return nil, err
+		}
+		return &trackStatsOutput{Body: dto.TrackStats{
+			Total: s.Total, Reviewed: s.Reviewed, WithIssues: s.WithIssues, Unanalysed: s.Unanalysed, AirDurationMS: s.AirDurationMS,
+		}}, nil
 	})
 
 	register(api, log, huma.Operation{

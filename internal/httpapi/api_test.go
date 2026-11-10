@@ -246,7 +246,7 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/playlist-types", "/api/playlist-types/{id}",
 		"/api/playlists", "/api/playlists/{id}", "/api/playlists/{id}/tracks", "/api/playlists/{id}/play-rules",
 		"/api/artists", "/api/artists/{id}",
-		"/api/tracks", "/api/tracks/{id}", "/api/tracks/{id}/play-rules", "/api/tracks/{id}/audio",
+		"/api/tracks", "/api/tracks/stats", "/api/tracks/{id}", "/api/tracks/{id}/play-rules", "/api/tracks/{id}/audio",
 		"/api/play-rules", "/api/play-rules/{id}", "/api/play-rules/{id}/targets",
 		"/api/clocks", "/api/clocks/{id}", "/api/track-plan", "/api/track-plan/rebuild",
 		"/api/track-plan/inserts", "/api/track-plan/inserts/{id}",

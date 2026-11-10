@@ -100,7 +100,7 @@ var trackSortKeys = map[library.TrackSort][]string{
 	library.SortTitle:    {"tr.title"},
 	library.SortArtist:   {"a.name"},
 	library.SortType:     {"t.name"},
-	library.SortDuration: {"tr.duration_ms"},
+	library.SortDuration: {"tr.air_duration_ms"},
 	library.SortFormat:   {"NULLIF(tr.format, '')"},
 	library.SortQuality: {
 		"CASE WHEN tr.analyzed_at IS NULL THEN NULL WHEN cardinality(tr.quality_issues) = 0 THEN 0 ELSE 1 END",
@@ -135,9 +135,20 @@ func trackOrder(f library.TrackFilter) (string, error) {
 	return strings.Join(append(order, "tr.id"), ", "), nil
 }
 
+// The states of a track, each defined once: the filters of trackWhere and the
+// figures of Stats use these, so a change of a definition changes both
+// (docs/track-stats-plan.md decision 3). quality_ok takes no part: a track
+// with a manual "ok" override and open issues is with issues.
+const (
+	condTrackNoIssues   = "tr.analyzed_at IS NOT NULL AND cardinality(tr.quality_issues) = 0"
+	condTrackHasIssues  = "cardinality(tr.quality_issues) > 0"
+	condTrackUnanalysed = "tr.analyzed_at IS NULL"
+	condTrackReviewed   = "tr.reviewed_at IS NOT NULL"
+)
+
 // trackWhere is the WHERE of the filters of f (not the cursor), shared by
-// the page and the count so that they cannot drift. The conditions are
-// fixed strings; values go in args.
+// the page, the count, and the statistics so that they cannot drift. The
+// conditions are fixed strings; values go in args.
 func trackWhere(f library.TrackFilter) (where []string, args []any) {
 	if f.TypeID != 0 {
 		where = append(where, "tr.type_id = ?")
@@ -158,18 +169,14 @@ func trackWhere(f library.TrackFilter) (where []string, args []any) {
 	}
 	switch f.Quality {
 	case library.QualityOK:
-		where = append(where, "tr.analyzed_at IS NOT NULL AND cardinality(tr.quality_issues) = 0")
+		where = append(where, condTrackNoIssues)
 	case library.QualityIssuesFound:
-		where = append(where, "cardinality(tr.quality_issues) > 0")
+		where = append(where, condTrackHasIssues)
 	case library.QualityUnanalysed:
-		where = append(where, "tr.analyzed_at IS NULL")
+		where = append(where, condTrackUnanalysed)
 	}
-	switch {
-	case f.Reviewed == nil:
-	case *f.Reviewed:
-		where = append(where, "tr.reviewed_at IS NOT NULL")
-	default:
-		where = append(where, "tr.reviewed_at IS NULL")
+	if f.Reviewed != nil {
+		where = append(where, notIf(!*f.Reviewed)+"("+condTrackReviewed+")")
 	}
 	switch {
 	case f.InPlan == nil:
@@ -277,6 +284,33 @@ func (s *Tracks) count(ctx context.Context, f library.TrackFilter) (int, error) 
 		return 0, fmt.Errorf("count tracks: %w", err)
 	}
 	return n, nil
+}
+
+// trackStatsRow is the one row of Stats.
+type trackStatsRow struct {
+	Total         int
+	Reviewed      int
+	WithIssues    int
+	Unanalysed    int
+	AirDurationMS int64 `gorm:"column:air_duration_ms"`
+}
+
+// Stats returns the figures of the tracks matching the filters of f; the sort
+// and the page of f take no part. It scans the filtered tracks, as count does;
+// fromTracks is needed for the joins of q and in_plan. No index
+// (docs/track-stats-plan.md decision 8).
+func (s *Tracks) Stats(ctx context.Context, f library.TrackFilter) (library.TrackStats, error) {
+	where, args := trackWhere(f)
+	sql := `SELECT count(*) AS total,
+       count(*) FILTER (WHERE ` + condTrackReviewed + `) AS reviewed,
+       count(*) FILTER (WHERE ` + condTrackHasIssues + `) AS with_issues,
+       count(*) FILTER (WHERE ` + condTrackUnanalysed + `) AS unanalysed,
+       COALESCE(sum(tr.air_duration_ms), 0) AS air_duration_ms` + fromTracks + whereClause(where)
+	var r trackStatsRow
+	if err := s.g.WithContext(ctx).Raw(sql, args...).Scan(&r).Error; err != nil {
+		return library.TrackStats{}, fmt.Errorf("select track stats: %w", err)
+	}
+	return library.TrackStats(r), nil
 }
 
 // Get returns one track, or library.ErrTrackNotFound.

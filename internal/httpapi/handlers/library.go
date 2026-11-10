@@ -30,6 +30,7 @@ type Library interface {
 	DeleteArtist(ctx context.Context, id uint64) error
 
 	ListTracks(ctx context.Context, f library.TrackFilter) (library.TrackPage, error)
+	TrackStats(ctx context.Context, f library.TrackFilter) (library.TrackStats, error)
 	GetTrack(ctx context.Context, id uint64) (library.Track, error)
 	TrackInUse(ctx context.Context, id uint64) (bool, error)
 	CreateTrack(ctx context.Context, in library.TrackInput) (library.Track, error)

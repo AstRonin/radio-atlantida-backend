@@ -179,6 +179,17 @@ type TrackPage struct {
 	Total      int     `json:"total" minimum:"0" doc:"Tracks matching the filters, on every page."`
 }
 
+// TrackStats is the response of GET /api/tracks/stats: figures of the tracks
+// matching the filters. WithIssues means the quality=issues filter: a track
+// with a manual "ok" override and open issues counts.
+type TrackStats struct {
+	Total         int   `json:"total" minimum:"0" doc:"Tracks matching the filters."`
+	Reviewed      int   `json:"reviewed" minimum:"0" doc:"Of those, tracks with the reviewed mark."`
+	WithIssues    int   `json:"with_issues" minimum:"0" doc:"Of those, tracks the quality=issues filter selects: with open quality issues, whatever the manual quality override says."`
+	Unanalysed    int   `json:"unanalysed" minimum:"0" doc:"Of those, tracks never analysed."`
+	AirDurationMS int64 `json:"air_duration_ms" minimum:"0" doc:"Sum of the on-air lengths of those tracks, in milliseconds; a track without a duration adds nothing."`
+}
+
 // TrackBody is the body of POST /api/tracks, which registers a file by its
 // path. Metadata left out (duration, format, bitrate, sample rate) is read
 // from the file when it exists.

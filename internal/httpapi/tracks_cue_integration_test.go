@@ -49,6 +49,14 @@ func TestTrackCueRebuildsPlannedHours(t *testing.T) {
 	f.ok(http.StatusOK, http.MethodGet, "/api/tracks?in_plan=false", nil, &page)
 	require.Equal(t, 1, page.Total, "the jingle")
 
+	// The statistics on the real router: the path is not taken by
+	// /api/tracks/{id}, and the filter applies.
+	var stats dto.TrackStats
+	f.ok(http.StatusOK, http.MethodGet, "/api/tracks/stats?in_plan=true", nil, &stats)
+	require.Equal(t, 4, stats.Total)
+	f.ok(http.StatusOK, http.MethodGet, "/api/tracks/stats?in_plan=false", nil, &stats)
+	require.Equal(t, 1, stats.Total, "the jingle")
+
 	// A 20 s cut at the start: 18:40 on air.
 	f.exec(`UPDATE tracks SET reviewed_at = now() WHERE id = $1 RETURNING id`, planned)
 	var res dto.TrackCueResult
