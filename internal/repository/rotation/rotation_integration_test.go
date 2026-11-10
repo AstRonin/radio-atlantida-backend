@@ -293,3 +293,37 @@ func TestFilteredSnapshotBuildsTheSameItems(t *testing.T) {
 		require.NotEmpty(t, a.Items, "hour %d", h)
 	}
 }
+
+// A planned item keeps the playlist it was drawn from, and the plan reads the
+// playlist with its type in the same query: a fill item and a rule item carry
+// their playlist and its type code, and a general item has none.
+func TestPlannedItemsKeepTheirPlaylist(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	f.inTx(func(ctx context.Context, st rotation.Store) error {
+		return st.ReplaceHour(ctx, f.planHour(hour), []rotation.Item{
+			{TrackID: f.tracks[0], OffsetMS: 0, OutMS: 180000, Source: rotation.SourceFill, PlaylistID: new(f.playlist)},
+			{TrackID: f.tracks[1], OffsetMS: 180000, OutMS: 200000, Source: rotation.SourceRule, PlaylistID: new(f.playlist)},
+			{TrackID: f.tracks[0], OffsetMS: 380000, OutMS: 200000, Source: rotation.SourceGeneral},
+		})
+	})
+	plan, err := f.store.Plan(ctx, hour, hour.Add(time.Hour))
+	require.NoError(t, err)
+	require.Len(t, plan, 1)
+	items := plan[0].Items
+	require.Len(t, items, 3)
+
+	fill := items[0]
+	require.Equal(t, "fill", fill.Source)
+	require.NotNil(t, fill.Playlist, "a fill item carries its playlist")
+	require.Equal(t, rotation.PlannedPlaylist{ID: f.playlist, Name: "P", Type: "music"}, *fill.Playlist)
+
+	rule := items[1]
+	require.Equal(t, "rule", rule.Source)
+	require.NotNil(t, rule.Playlist, "a rule item carries its playlist")
+	require.Equal(t, f.playlist, rule.Playlist.ID)
+
+	general := items[2]
+	require.Equal(t, "general", general.Source)
+	require.Nil(t, general.Playlist, "a general item has no playlist")
+}

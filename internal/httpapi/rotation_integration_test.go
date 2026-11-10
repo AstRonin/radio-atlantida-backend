@@ -75,7 +75,9 @@ func TestTrackPlanFollowsGridAndClock(t *testing.T) {
 	require.Len(t, h.Items, 4)
 	seen := map[uint64]bool{}
 	for i, it := range h.Items {
-		require.Equal(t, "fill", it.Source)
+		require.NotNil(t, it.Playlist.V, "a fill item names its playlist")
+		require.Equal(t, f.music, it.Playlist.V.ID)
+		require.Equal(t, "music", it.Playlist.V.Type, "the playlist type by its code")
 		require.Equal(t, "planned", it.Status)
 		require.Equal(t, start.Add(time.Duration(i)*19*time.Minute), it.PlannedStartUTC)
 		require.False(t, seen[it.TrackID])
@@ -102,6 +104,8 @@ func TestTrackPlanFollowsGridAndClock(t *testing.T) {
 	}, &again)
 	f.waitOperation(again.BuildOperationID)
 	require.Equal(t, "rule", f.plan().Items[0].Items[0].Source, "the jingle starts the hour")
+	require.NotNil(t, f.plan().Items[0].Items[0].Playlist.V, "a rule item names its playlist")
+	require.Equal(t, f.jingles, f.plan().Items[0].Items[0].Playlist.V.ID)
 	f.ok(http.StatusOK, http.MethodPut, fmt.Sprintf("/api/playlists/%d", f.jingles), map[string]any{
 		"name": "Jingles", "type_id": f.typeID("jingle"), "clock_rule": "end",
 	}, &pl)

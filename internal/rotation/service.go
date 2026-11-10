@@ -59,8 +59,19 @@ func (h PlanHour) current(c clocks.Clock) bool {
 	return h.ClockID == c.ID && h.ClockUpdatedAt.Equal(c.UpdatedAt)
 }
 
+// PlannedPlaylist is the playlist a planned item was drawn from, with the code
+// of its type (music, jingle, news, segment, or a custom type).
+type PlannedPlaylist struct {
+	ID   uint64
+	Name string
+	Type string
+}
+
 // PlannedItem is an item of the track plan, for the panel.
 type PlannedItem struct {
+	// Playlist is the fill or rule playlist of the item; nil for a general item
+	// and for an item built before its playlist was stored (migration 0019).
+	Playlist   *PlannedPlaylist
 	ID         uint64
 	TrackID    uint64
 	Title      string

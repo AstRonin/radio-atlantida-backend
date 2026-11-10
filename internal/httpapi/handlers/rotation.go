@@ -216,6 +216,11 @@ func planHourDTO(h rotation.PlannedHour) dto.TrackPlanHour {
 			InsertID: it.InsertID, HourInsertID: it.HourInsertID, PlannedStartUTC: it.Start.UTC(), PlannedInMS: it.InMS,
 			PlannedOutMS: it.OutMS, Truncated: it.Truncated, Source: it.Source, Status: it.Status,
 		}
+		if it.Playlist != nil {
+			out.Items[i].Playlist = dto.TrackPlanPlaylistField{V: &dto.TrackPlanPlaylist{
+				ID: it.Playlist.ID, Name: it.Playlist.Name, Type: it.Playlist.Type,
+			}}
+		}
 	}
 	for i, ins := range h.Inserts {
 		out.Inserts[i] = dto.TrackPlanInsert{

@@ -1,6 +1,12 @@
 package dto
 
-import "time"
+import (
+	"encoding/json"
+	"reflect"
+	"time"
+
+	"github.com/danielgtaylor/huma/v2"
+)
 
 // TrackPlanClock is the clock of a built hour.
 type TrackPlanClock struct {
@@ -8,21 +14,67 @@ type TrackPlanClock struct {
 	Name string `json:"name"`
 }
 
+// TrackPlanPlaylist is the playlist a planned item was drawn from.
+type TrackPlanPlaylist struct {
+	ID   uint64 `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type" doc:"Type of the playlist by its code: music, jingle, news, segment, or a custom type."`
+}
+
+// TrackPlanPlaylistField is the playlist of an item: the object, or null. The
+// schema says so (huma cannot mark a struct pointer nullable).
+type TrackPlanPlaylistField struct {
+	V *TrackPlanPlaylist
+}
+
+// MarshalJSON writes the playlist object, or null.
+func (f TrackPlanPlaylistField) MarshalJSON() ([]byte, error) {
+	if f.V == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(f.V)
+}
+
+// UnmarshalJSON reads the playlist object, or null.
+func (f *TrackPlanPlaylistField) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		f.V = nil
+		return nil
+	}
+	var v TrackPlanPlaylist
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	f.V = &v
+	return nil
+}
+
+// Schema is the playlist object or null (OpenAPI 3.1: oneOf with the null type).
+func (TrackPlanPlaylistField) Schema(r huma.Registry) *huma.Schema {
+	return &huma.Schema{
+		OneOf: []*huma.Schema{
+			r.Schema(reflect.TypeFor[TrackPlanPlaylist](), true, "TrackPlanPlaylist"),
+			{Type: "null"},
+		},
+	}
+}
+
 // TrackPlanItem is a track of the plan (§7).
 type TrackPlanItem struct {
-	ID              uint64    `json:"id"`
-	TrackID         uint64    `json:"track_id"`
-	Title           string    `json:"title"`
-	ArtistName      *string   `json:"artist_name,omitempty"`
-	DurationMS      int       `json:"duration_ms" doc:"Length of the track file."`
-	InsertID        *uint64   `json:"insert_id,omitempty" doc:"The template insert of an insert item; absent when the insert was removed since."`
-	HourInsertID    *uint64   `json:"hour_insert_id,omitempty" doc:"The one-time insert of an hour_insert or reschedule item."`
-	PlannedStartUTC time.Time `json:"planned_start_utc"`
-	PlannedInMS     int       `json:"planned_in_ms" minimum:"0" doc:"In point from the start of the file (the track's cue in when it was planned)."`
-	PlannedOutMS    int       `json:"planned_out_ms" doc:"Out point from the start of the file; the length is planned_out_ms - planned_in_ms, shorter than the track's air_duration_ms when truncated."`
-	Truncated       bool      `json:"truncated" doc:"The track crosses the next insert or the end of the hour; it fades out and ends there."`
-	Source          string    `json:"source" enum:"fill,rule,insert,hour_insert,reschedule,general"`
-	Status          string    `json:"status" enum:"planned,queued,aired,missed,replaced"`
+	ID              uint64                 `json:"id"`
+	TrackID         uint64                 `json:"track_id"`
+	Title           string                 `json:"title"`
+	ArtistName      *string                `json:"artist_name,omitempty"`
+	DurationMS      int                    `json:"duration_ms" doc:"Length of the track file."`
+	InsertID        *uint64                `json:"insert_id,omitempty" doc:"The template insert of an insert item; absent when the insert was removed since."`
+	HourInsertID    *uint64                `json:"hour_insert_id,omitempty" doc:"The one-time insert of an hour_insert or reschedule item."`
+	PlannedStartUTC time.Time              `json:"planned_start_utc"`
+	PlannedInMS     int                    `json:"planned_in_ms" minimum:"0" doc:"In point from the start of the file (the track's cue in when it was planned)."`
+	PlannedOutMS    int                    `json:"planned_out_ms" doc:"Out point from the start of the file; the length is planned_out_ms - planned_in_ms, shorter than the track's air_duration_ms when truncated."`
+	Truncated       bool                   `json:"truncated" doc:"The track crosses the next insert or the end of the hour; it fades out and ends there."`
+	Source          string                 `json:"source" enum:"fill,rule,insert,hour_insert,reschedule,general"`
+	Status          string                 `json:"status" enum:"planned,queued,aired,missed,replaced"`
+	Playlist        TrackPlanPlaylistField `json:"playlist" doc:"The fill or rule playlist the track was drawn from; null for a general item, a one-time insert or a reschedule, and for items built before the playlist was stored."`
 }
 
 // TrackPlanInsert is a one-time insert of a built hour (§7.2).

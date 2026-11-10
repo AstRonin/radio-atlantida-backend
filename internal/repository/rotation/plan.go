@@ -86,12 +86,14 @@ func (s *Store) ReplaceHour(ctx context.Context, h rotation.PlanHour, items []ro
 		rows[i] = []any{
 			h.GridSlotID, h.ClockID, it.TrackID, h.Start.Add(time.Duration(it.OffsetMS) * time.Millisecond),
 			it.InMS, it.OutMS, it.Truncated, string(it.Source), it.ClockInsertID, it.HourInsertID, it.RescheduleOfID,
+			it.PlaylistID,
 		}
 	}
 	if len(rows) > 0 {
 		_, err := s.q.CopyFrom(ctx, pgx.Identifier{"scheduled_items"}, []string{
 			"grid_slot_id", "clock_id", "track_id", "planned_start_utc",
 			"planned_in_ms", "planned_out_ms", "truncated", "source", "clock_insert_id", "hour_insert_id", "reschedule_of_id",
+			"playlist_id",
 		}, pgx.CopyFromRows(rows))
 		if err != nil {
 			return fmt.Errorf("insert planned items: %w", err)
@@ -133,19 +135,22 @@ type plannedHourRow struct {
 }
 
 type plannedItemRow struct {
-	ID         uint64    `db:"id"`
-	TrackID    uint64    `db:"track_id"`
-	Title      string    `db:"title"`
-	ArtistName *string   `db:"artist_name"`
-	DurationMS *int32    `db:"duration_ms"`
-	InsertID   *uint64   `db:"clock_insert_id"`
-	HourInsert *uint64   `db:"hour_insert_id"`
-	Start      time.Time `db:"planned_start_utc"`
-	InMS       int32     `db:"planned_in_ms"`
-	OutMS      int32     `db:"planned_out_ms"`
-	Truncated  bool      `db:"truncated"`
-	Source     string    `db:"source"`
-	Status     string    `db:"status"`
+	ID           uint64    `db:"id"`
+	TrackID      uint64    `db:"track_id"`
+	Title        string    `db:"title"`
+	ArtistName   *string   `db:"artist_name"`
+	DurationMS   *int32    `db:"duration_ms"`
+	InsertID     *uint64   `db:"clock_insert_id"`
+	HourInsert   *uint64   `db:"hour_insert_id"`
+	Start        time.Time `db:"planned_start_utc"`
+	InMS         int32     `db:"planned_in_ms"`
+	OutMS        int32     `db:"planned_out_ms"`
+	Truncated    bool      `db:"truncated"`
+	Source       string    `db:"source"`
+	Status       string    `db:"status"`
+	PlaylistID   *uint64   `db:"playlist_id"`
+	PlaylistName *string   `db:"playlist_name"`
+	PlaylistType *string   `db:"playlist_type"`
 }
 
 func (r plannedItemRow) domain() rotation.PlannedItem {
@@ -155,6 +160,9 @@ func (r plannedItemRow) domain() rotation.PlannedItem {
 	}
 	if r.DurationMS != nil {
 		out.DurationMS = int(*r.DurationMS)
+	}
+	if r.PlaylistID != nil && r.PlaylistName != nil && r.PlaylistType != nil {
+		out.Playlist = &rotation.PlannedPlaylist{ID: *r.PlaylistID, Name: *r.PlaylistName, Type: *r.PlaylistType}
 	}
 	return out
 }
@@ -185,10 +193,13 @@ ORDER BY h.hour_start_utc`, from, to)
 
 	rows, err = s.q.Query(ctx, `
 SELECT si.id, si.track_id, t.title, a.name AS artist_name, t.duration_ms, si.clock_insert_id, si.hour_insert_id,
-       si.planned_start_utc, si.planned_in_ms, si.planned_out_ms, si.truncated, si.source, si.status
+       si.planned_start_utc, si.planned_in_ms, si.planned_out_ms, si.truncated, si.source, si.status,
+       si.playlist_id, p.name AS playlist_name, pt.code AS playlist_type
 FROM scheduled_items si
 JOIN tracks t ON t.id = si.track_id
 LEFT JOIN artists a ON a.id = t.artist_id
+LEFT JOIN playlists p ON p.id = si.playlist_id
+LEFT JOIN playlist_types pt ON pt.id = p.type_id
 WHERE si.planned_start_utc >= $1 AND si.planned_start_utc < $2
 ORDER BY si.planned_start_utc, si.id`, hours[0].Start, hours[len(hours)-1].Start.Add(time.Hour))
 	if err != nil {
