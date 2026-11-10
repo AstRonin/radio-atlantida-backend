@@ -84,6 +84,11 @@ func inputsHash(c clocks.Clock, inserts []Insert, set Settings, loc string, lib 
 	for _, ins := range inserts {
 		fmt.Fprintf(h, "insert %d track %d missed %s placement %s offset %s tolerance %d\n",
 			ins.ID, ins.TrackID, optUint(ins.MissedID), ins.Placement, optInt(ins.OffsetMS), ins.ToleranceMS)
+		// Only when set: the stored hashes of the inserts without a claim stay
+		// valid.
+		if ins.RulePlaylistID != nil || ins.RuleOriginMS != nil {
+			fmt.Fprintf(h, "claim playlist %s origin %s\n", optUint(ins.RulePlaylistID), optInt(ins.RuleOriginMS))
+		}
 		if t, ok := lib.track(ins.TrackID); ok {
 			writeTrack(h, t)
 		} else {

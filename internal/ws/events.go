@@ -135,7 +135,7 @@ type TrackPlanWarningData struct {
 
 // TrackPlanWarning is one warning of a build. The panel translates by code.
 type TrackPlanWarning struct {
-	Code          string  `json:"code" enum:"insert_replaced,insert_skipped,hour_insert_dropped,rule_slot_skipped,rule_blocked_by_play_rules,fill_general_pool,fill_emergency,gap_unfilled,reschedule_dropped"`
+	Code          string  `json:"code" enum:"insert_replaced,insert_skipped,hour_insert_dropped,rule_slot_skipped,rule_blocked_by_play_rules,fill_general_pool,fill_emergency,gap_unfilled,reschedule_dropped,pin_claim_stale"`
 	Message       string  `json:"message" doc:"English message for developers."`
 	PlaylistIndex *int    `json:"playlist_index,omitempty" doc:"Index into the clock's playlists."`
 	InsertIndex   *int    `json:"insert_index,omitempty" doc:"Index into the clock's inserts."`

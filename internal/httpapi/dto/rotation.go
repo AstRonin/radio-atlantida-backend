@@ -119,7 +119,7 @@ type HourInsertBody struct {
 
 // TrackPinBody is the body of POST /api/track-plan/pins.
 type TrackPinBody struct {
-	PlanItemID  uint64 `json:"plan_item_id" minimum:"1" doc:"ID of a planned fill track of an hour that has not started."`
+	PlanItemID  uint64 `json:"plan_item_id" minimum:"1" doc:"ID of a planned fill or rule track of an hour that has not started."`
 	OffsetMS    int    `json:"offset_ms" minimum:"0" maximum:"3599000" multipleOf:"1000" doc:"New start inside the hour, whole seconds (18:30:00 in its hour is 1800000)."`
 	ToleranceMS *int   `json:"tolerance_ms,omitempty" nullable:"true" minimum:"0" maximum:"600000" doc:"Start tolerance in milliseconds. Default: setting rotation.default_fixed_tolerance_ms."`
 }

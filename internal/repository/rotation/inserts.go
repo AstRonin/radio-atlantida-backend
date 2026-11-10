@@ -54,20 +54,26 @@ type insertRow struct {
 	Placement   string    `db:"placement"`
 	OffsetMS    *int32    `db:"offset_ms"`
 	ToleranceMS int32     `db:"tolerance_ms"`
+	// RulePlaylistID and RuleOriginMS are the slot claim of a pin.
+	RulePlaylistID *uint64 `db:"rule_playlist_id"`
+	RuleOriginMS   *int32  `db:"rule_origin_ms"`
 }
 
 func (r insertRow) domain() rotation.Insert {
 	out := rotation.Insert{
 		ID: r.ID, HourStart: r.HourStart.UTC(), TrackID: r.TrackID, MissedID: r.MissedID,
-		Placement: rotation.Placement(r.Placement), ToleranceMS: int(r.ToleranceMS),
+		Placement: rotation.Placement(r.Placement), ToleranceMS: int(r.ToleranceMS), RulePlaylistID: r.RulePlaylistID,
 	}
 	if r.OffsetMS != nil {
 		out.OffsetMS = new(int(*r.OffsetMS))
 	}
+	if r.RuleOriginMS != nil {
+		out.RuleOriginMS = new(int(*r.RuleOriginMS))
+	}
 	return out
 }
 
-const insertColumns = `id, hour_start_utc, track_id, missed_id, placement, offset_ms, tolerance_ms`
+const insertColumns = `id, hour_start_utc, track_id, missed_id, placement, offset_ms, tolerance_ms, rule_playlist_id, rule_origin_ms`
 
 // InsertsRange returns the inserts of the hours that start in [from, to), in
 // hour and ID order (ix_hour_inserts_hour_start_utc). A full pass reads its
@@ -116,9 +122,9 @@ func (s *Store) Insert(ctx context.Context, id uint64) (rotation.Insert, error) 
 // CreateInsert stores an insert.
 func (s *Store) CreateInsert(ctx context.Context, ins rotation.Insert) (uint64, error) {
 	var id uint64
-	err := s.q.QueryRow(ctx, `INSERT INTO hour_inserts (hour_start_utc, track_id, missed_id, placement, offset_ms, tolerance_ms)
-VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-		ins.HourStart, ins.TrackID, ins.MissedID, string(ins.Placement), ins.OffsetMS, ins.ToleranceMS).Scan(&id)
+	err := s.q.QueryRow(ctx, `INSERT INTO hour_inserts (hour_start_utc, track_id, missed_id, placement, offset_ms, tolerance_ms, rule_playlist_id, rule_origin_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		ins.HourStart, ins.TrackID, ins.MissedID, string(ins.Placement), ins.OffsetMS, ins.ToleranceMS, ins.RulePlaylistID, ins.RuleOriginMS).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert hour insert: %w", err)
 	}

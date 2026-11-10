@@ -153,7 +153,7 @@ func (f *fakeStore) ReplaceHour(_ context.Context, h PlanHour, items []Item) err
 	for i, it := range items {
 		f.nextID++
 		ids[i] = f.nextID
-		f.planItems[f.nextID] = PlanItemRef{ID: f.nextID, HourStart: h.Start, TrackID: it.TrackID, Source: it.Source, Status: planItemPlanned}
+		f.planItems[f.nextID] = PlanItemRef{ID: f.nextID, HourStart: h.Start, TrackID: it.TrackID, Source: it.Source, Status: planItemPlanned, PlaylistID: it.PlaylistID, OffsetMS: it.OffsetMS}
 	}
 	f.itemIDs[key] = ids
 	return nil

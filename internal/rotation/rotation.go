@@ -162,6 +162,12 @@ type Insert struct {
 	// OffsetMS is the target start of a fixed insert, whole seconds.
 	OffsetMS    *int
 	ToleranceMS int
+	// RulePlaylistID and RuleOriginMS are the claim of a pin of a rule track:
+	// the pin takes over one slot of that playlist in the hour. RuleOriginMS
+	// is the offset of the row when it was pinned, and tells which slot. Nil
+	// for every other insert; a deleted playlist clears RulePlaylistID only.
+	RulePlaylistID *uint64
+	RuleOriginMS   *int
 }
 
 // Item is a planned track.
@@ -222,13 +228,17 @@ const (
 	// WarnRescheduleDropped: a rescheduled item no longer fits its hour or
 	// breaks a rule there; it is removed and its missed item is open again.
 	WarnRescheduleDropped WarningCode = "reschedule_dropped"
+	// WarnPinClaimStale: a pinned rule track no longer takes a slot, because
+	// its playlist left the clock, is a fill playlist now, or has no slot
+	// left; the hour has one track more.
+	WarnPinClaimStale WarningCode = "pin_claim_stale"
 )
 
 // WarningCodes lists every warning code.
 func WarningCodes() []WarningCode {
 	return []WarningCode{
 		WarnInsertReplaced, WarnInsertSkipped, WarnHourInsertDropped, WarnRuleSlotSkipped, WarnRuleBlocked,
-		WarnGeneralPool, WarnEmergency, WarnGapUnfilled, WarnRescheduleDropped,
+		WarnGeneralPool, WarnEmergency, WarnGapUnfilled, WarnRescheduleDropped, WarnPinClaimStale,
 	}
 }
 

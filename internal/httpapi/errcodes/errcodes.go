@@ -105,7 +105,8 @@ const (
 	// PlanItemNotFound: no planned item of the track plan has the requested ID.
 	PlanItemNotFound Problem = "plan_item_not_found"
 	// NotMovable: the item cannot be pinned or moved. Only a planned fill
-	// track, and a one-time insert with a fixed time, can be.
+	// track, a planned rule track with a known playlist, and a one-time insert
+	// with a fixed time, can be.
 	NotMovable Problem = "not_movable"
 	// TrackPlanFullRunning: a full pass of the track plan is running; one runs
 	// at a time. Wait for its terminal event (track_plan_full.completed or

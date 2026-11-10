@@ -9,8 +9,9 @@ around it. This replaces the current way of moving a track, which is to delete
 it and add an insert in a modal.
 
 Decision (from the operator's discussion): the pin lasts until the end of the
-hour, with no separate duration. The move stays inside the clock: rule items and
-clock anchors are not moved.
+hour, with no separate duration. The move stays inside the clock: clock anchors
+are not moved. Moving Rule rows was left out of this plan and is added by
+`track-pin-rule-plan.md`.
 
 ## What already exists (backend, checked in code)
 
@@ -147,8 +148,8 @@ kind `hour_insert`; the page waits for `hour_insert.completed` or
 
 ## Out of scope
 
-- Moving Rule items, clock anchors or inserts that belong to a clock (not a
-  one-time insert).
+- Moving Rule items (see `track-pin-rule-plan.md`), clock anchors or inserts that
+  belong to a clock (not a one-time insert).
 - Moving an item to another hour.
 - A pin with a duration other than "until the end of the hour".
 - Changing the builder itself beyond what the conflict refusal needs.

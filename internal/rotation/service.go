@@ -29,7 +29,8 @@ var (
 	// ErrPlanItemNotFound: no planned item of the track plan has the ID.
 	ErrPlanItemNotFound = errors.New("plan item not found")
 	// ErrNotMovable: the item cannot be pinned or moved. Only a planned fill
-	// track, and a one-time insert with a fixed time, can be.
+	// track, a planned rule track with a known playlist, and a one-time insert
+	// with a fixed time, can be.
 	ErrNotMovable = errors.New("the item cannot be pinned or moved")
 )
 
@@ -107,6 +108,11 @@ type PlanItemRef struct {
 	TrackID   uint64
 	Source    Source
 	Status    string
+	// PlaylistID is the fill or rule playlist of the item; nil for an item
+	// built before its playlist was stored (migration 0019).
+	PlaylistID *uint64
+	// OffsetMS is the planned start, from the start of the hour.
+	OffsetMS int
 }
 
 // PlannedHour is a built hour with its items and its one-time inserts.

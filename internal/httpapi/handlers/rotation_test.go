@@ -23,7 +23,7 @@ type pinRotation struct {
 	move *rotation.MoveInsertRequest
 }
 
-func (f *pinRotation) PinFill(_ context.Context, r rotation.PinRequest) (uint64, error) {
+func (f *pinRotation) Pin(_ context.Context, r rotation.PinRequest) (uint64, error) {
 	f.pin = &r
 	return 1, nil
 }

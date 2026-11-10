@@ -44,8 +44,8 @@ type AddInsertRequest struct {
 	TrackID     uint64
 }
 
-// PinRequest pins a planned fill track of an open hour at a new time: a
-// one-time insert of its track, fixed at OffsetMS (§7.2, pins).
+// PinRequest pins a planned fill or rule track of an open hour at a new time:
+// a one-time insert of its track, fixed at OffsetMS (§7.2, pins).
 type PinRequest struct {
 	PlanItemID uint64
 	OffsetMS   int
@@ -178,14 +178,16 @@ func (s *Service) AddInsert(ctx context.Context, r AddInsertRequest) (uint64, er
 	return id, nil
 }
 
-// PinFill pins a planned fill track at a new time inside its hour. It stores
-// a one-time insert of the same track, fixed at the offset, and rebuilds the
-// hour in the same unit of work as the insert (runInsert). The hour is kept
-// around the pin: the track stays until the end of the hour, and a rebuild
-// keeps it. A frozen hour is refused (ErrHourStarted); an item that is not a
-// planned fill track is refused (ErrNotMovable). A pin the builder cannot
-// place fails the operation with the reason and changes nothing.
-func (s *Service) PinFill(ctx context.Context, r PinRequest) (uint64, error) {
+// Pin pins a planned fill or rule track at a new time inside its hour. It
+// stores a one-time insert of the same track, fixed at the offset, and
+// rebuilds the hour in the same unit of work as the insert (runInsert). The
+// hour is kept around the pin: the track stays until the end of the hour, and
+// a rebuild keeps it. The pin of a rule track also claims one slot of its
+// playlist, so the hour keeps the same number of rule tracks. A frozen hour is
+// refused (ErrHourStarted); an item that cannot be pinned is refused
+// (ErrNotMovable). A pin the builder cannot place fails the operation with the
+// reason and changes nothing.
+func (s *Service) Pin(ctx context.Context, r PinRequest) (uint64, error) {
 	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
 	set, err := s.settings(rctx)
@@ -199,7 +201,7 @@ func (s *Service) PinFill(ctx context.Context, r PinRequest) (uint64, error) {
 	if set.frozen(it.HourStart, s.now().UTC()) {
 		return 0, ErrHourStarted
 	}
-	if it.Source != SourceFill || it.Status != planItemPlanned {
+	if !pinnable(it) {
 		return 0, ErrNotMovable
 	}
 	lib, err := libraryFor(rctx, s.store, LibraryScope{Tracks: []uint64{it.TrackID}})
@@ -213,6 +215,9 @@ func (s *Service) PinFill(ctx context.Context, r PinRequest) (uint64, error) {
 	ins := Insert{
 		HourStart: it.HourStart, TrackID: it.TrackID, Placement: PlacementFixed, OffsetMS: new(r.OffsetMS),
 		ToleranceMS: set.DefaultFixedToleranceMS,
+	}
+	if it.Source == SourceRule {
+		ins.RulePlaylistID, ins.RuleOriginMS = it.PlaylistID, new(it.OffsetMS)
 	}
 	if r.ToleranceMS != nil {
 		ins.ToleranceMS = *r.ToleranceMS
@@ -228,9 +233,18 @@ func (s *Service) PinFill(ctx context.Context, r PinRequest) (uint64, error) {
 	return id, nil
 }
 
+// pinnable reports whether a stored item can be pinned: a planned fill track,
+// or a planned rule track whose playlist is known (its slot is claimed).
+func pinnable(it PlanItemRef) bool {
+	if it.Status != planItemPlanned {
+		return false
+	}
+	return it.Source == SourceFill || (it.Source == SourceRule && it.PlaylistID != nil)
+}
+
 // MoveInsert moves a one-time insert inside its hour and starts the
 // hour_insert operation that stores the new offset and rebuilds the hour in
-// one transaction. An insert with no fixed time (start or end) is refused
+// one transaction. A pin keeps its slot claim and origin. An insert with no fixed time (start or end) is refused
 // (ErrNotMovable); a frozen hour is refused (ErrHourStarted). When the
 // builder cannot place the insert at its new place, the operation fails with
 // the reason and the insert keeps its old offset.

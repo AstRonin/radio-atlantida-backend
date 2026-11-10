@@ -286,11 +286,15 @@ type planItemRow struct {
 	TrackID   uint64    `db:"track_id"`
 	Source    string    `db:"source"`
 	Status    string    `db:"status"`
+	// PlaylistID and Start are read for the slot claim of a rule pin.
+	PlaylistID *uint64   `db:"playlist_id"`
+	Start      time.Time `db:"planned_start_utc"`
 }
 
 func (r planItemRow) domain() rotation.PlanItemRef {
 	return rotation.PlanItemRef{
 		ID: r.ID, HourStart: r.HourStart.UTC(), TrackID: r.TrackID, Source: rotation.Source(r.Source), Status: r.Status,
+		PlaylistID: r.PlaylistID, OffsetMS: int(r.Start.Sub(r.HourStart).Milliseconds()),
 	}
 }
 
@@ -298,7 +302,7 @@ func (r planItemRow) domain() rotation.PlanItemRef {
 // hour that holds its start), or rotation.ErrPlanItemNotFound.
 func (s *Store) PlanItem(ctx context.Context, id uint64) (rotation.PlanItemRef, error) {
 	rows, err := s.q.Query(ctx, `
-SELECT si.id, h.hour_start_utc, si.track_id, si.source, si.status
+SELECT si.id, h.hour_start_utc, si.track_id, si.source, si.status, si.playlist_id, si.planned_start_utc
 FROM scheduled_items si
 JOIN plan_hours h ON h.hour_start_utc <= si.planned_start_utc
   AND si.planned_start_utc < h.hour_start_utc + INTERVAL '1 hour'

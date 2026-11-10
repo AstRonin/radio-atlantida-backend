@@ -80,7 +80,7 @@ type WeekdayHour struct {
 // ClockWarning is a problem of the dry check or of the sample hour; it does
 // not block the save. The panel translates by code.
 type ClockWarning struct {
-	Code          string        `json:"code" enum:"playlist_no_tracks,fill_few_tracks,fill_no_interval_rule,rule_blocked_by_play_rules,insert_replaced,insert_skipped,hour_insert_dropped,rule_slot_skipped,fill_general_pool,fill_emergency,gap_unfilled,reschedule_dropped"`
+	Code          string        `json:"code" enum:"playlist_no_tracks,fill_few_tracks,fill_no_interval_rule,rule_blocked_by_play_rules,insert_replaced,insert_skipped,hour_insert_dropped,rule_slot_skipped,fill_general_pool,fill_emergency,gap_unfilled,reschedule_dropped,pin_claim_stale"`
 	Message       string        `json:"message" doc:"English message for developers."`
 	PlaylistIndex *int          `json:"playlist_index,omitempty" doc:"Index into playlists."`
 	InsertIndex   *int          `json:"insert_index,omitempty" doc:"Index into inserts."`

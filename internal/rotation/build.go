@@ -1,7 +1,9 @@
 package rotation
 
 import (
+	"cmp"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"time"
@@ -90,9 +92,25 @@ type builder struct {
 	// as played in this hour: fill draws never pick them again (decision 6).
 	// Template inserts and rule slots are not affected.
 	pinned map[uint64]bool
+	claims slotClaims
 	cursor int
 	prev   kind
 	softs  []soft
+}
+
+// slotClaims are the rule slots that pins of rule tracks took over
+// (docs/track-pin-rule-plan.md). The maps are by index into the clock's
+// playlists.
+type slotClaims struct {
+	start, end, middle map[int]bool
+	// spread holds the origins of the claims on the slots of a spread
+	// playlist, in insert ID order. Which slot each takes is known once the
+	// windows are drawn (softAnchors).
+	spread map[int][]int
+	// tracks are the tracks of the claiming pins: rule draws avoid them.
+	tracks map[uint64]bool
+	// pins are the IDs of the claiming pins.
+	pins map[uint64]bool
 }
 
 // Build plans one hour of a clock (§7, §7.2, docs/phase-23-plan.md §3.3).
@@ -112,45 +130,42 @@ type builder struct {
 //  5. Inserts chain: one starts when the content before it ends, not
 //     before its window opens; past its window it is skipped (template) or
 //     refused (one-time).
+//
+// A pin of a rule track takes over one slot of its rule (slotClaims). A
+// refused claiming pin gives the slot back in the same build: the hour is
+// built again without the refused inserts, and Refused holds those of every
+// attempt.
 func Build(in HourInput) HourPlan {
-	b := &builder{
-		in:     in,
-		rng:    rand.New(rand.NewPCG(in.Seed, in.Seed^0x9e3779b97f4a7c15)), //nolint:gosec // G404: rotation needs a seeded, reproducible source, not a secure one
-		chk:    newChecker(in),
-		plan:   HourPlan{Refused: map[uint64]Refusal{}},
-		minGap: max(in.Settings.MinGapMS, 1),
-		tracks: map[uint64][]Track{},
-	}
-	b.index()
-
-	anchors := b.anchors()
-	var starts, ends []Insert
-	for _, ins := range in.HourInserts {
-		switch ins.Placement {
-		case PlacementStart:
-			starts = append(starts, ins)
-		case PlacementEnd:
-			ends = append(ends, ins)
+	refused := map[uint64]Refusal{}
+	for {
+		plan := buildHour(in)
+		maps.Copy(refused, plan.Refused)
+		if !refusedClaim(in.HourInserts, plan.Refused) {
+			plan.Refused = refused
+			return plan
 		}
+		// Every insert refused now goes, not only the claiming ones: an insert
+		// refused here and placed by the next attempt would be planned and
+		// dropped at once.
+		in.HourInserts = slices.DeleteFunc(slices.Clone(in.HourInserts), func(h Insert) bool {
+			_, gone := plan.Refused[h.ID]
+			return gone
+		})
 	}
-	block, blockStart := b.endBlock(ends)
+}
 
-	// The start block: an insert at 0:00, the one-time start inserts, the
-	// start tracks.
-	for len(anchors) > 0 && anchors[0].target == 0 {
-		b.placeAnchor(anchors[0])
-		anchors = anchors[1:]
-	}
-	for i := range starts {
-		b.placeStartInsert(&starts[i])
-	}
-	for i, p := range in.Clock.Playlists {
-		if r := p.EffectiveRule(); r == clocks.RuleStart || r == clocks.RuleStartEnd {
-			b.placeStartRule(i)
-		}
-	}
+// refusedClaim reports whether a refused insert carries a slot claim.
+func refusedClaim(inserts []Insert, refused map[uint64]Refusal) bool {
+	return slices.ContainsFunc(inserts, func(h Insert) bool {
+		_, gone := refused[h.ID]
+		return gone && h.RulePlaylistID != nil
+	})
+}
 
-	b.softs = b.softAnchors(anchors, blockStart, len(block) > 0)
+// buildHour is one attempt of Build.
+func buildHour(in HourInput) HourPlan {
+	b := newBuilder(in)
+	anchors, block, blockStart := b.opening()
 	hards := make([]hard, 0, len(anchors)+2)
 	for i := range anchors {
 		a := &anchors[i]
@@ -185,6 +200,54 @@ func Build(in HourInput) HourPlan {
 	return b.plan
 }
 
+func newBuilder(in HourInput) *builder {
+	return &builder{
+		in:     in,
+		rng:    rand.New(rand.NewPCG(in.Seed, in.Seed^0x9e3779b97f4a7c15)), //nolint:gosec // G404: rotation needs a seeded, reproducible source, not a secure one
+		chk:    newChecker(in),
+		plan:   HourPlan{Refused: map[uint64]Refusal{}},
+		minGap: max(in.Settings.MinGapMS, 1),
+		tracks: map[uint64][]Track{},
+	}
+}
+
+// opening does what comes before the fill: it resolves the anchors and the
+// end block, places the start block, and sets the soft slots. It returns the
+// anchors still to be placed and the end block with its start.
+func (b *builder) opening() ([]anchor, []blockItem, int) {
+	b.index()
+
+	anchors := b.anchors()
+	var starts, ends []Insert
+	for _, ins := range b.in.HourInserts {
+		switch ins.Placement {
+		case PlacementStart:
+			starts = append(starts, ins)
+		case PlacementEnd:
+			ends = append(ends, ins)
+		}
+	}
+	block, blockStart := b.endBlock(ends)
+
+	// The start block: an insert at 0:00, the one-time start inserts, the
+	// start tracks.
+	for len(anchors) > 0 && anchors[0].target == 0 {
+		b.placeAnchor(anchors[0])
+		anchors = anchors[1:]
+	}
+	for i := range starts {
+		b.placeStartInsert(&starts[i])
+	}
+	for i, p := range b.in.Clock.Playlists {
+		if r := p.EffectiveRule(); r == clocks.RuleStart || r == clocks.RuleStartEnd {
+			b.placeStartRule(i)
+		}
+	}
+
+	b.softs = b.softAnchors(anchors, blockStart, len(block) > 0)
+	return anchors, block, blockStart
+}
+
 // index groups the tracks of the clock's playlists and insert playlists,
 // and lists the fill playlists with their shares (decision 9: without
 // shares, every fill playlist weighs 1).
@@ -195,6 +258,7 @@ func (b *builder) index() {
 			b.pinned[h.TrackID] = true
 		}
 	}
+	b.indexClaims()
 	want := map[uint64]bool{}
 	for _, p := range b.in.Clock.Playlists {
 		want[p.PlaylistID] = true
@@ -219,6 +283,95 @@ func (b *builder) index() {
 		}
 	}
 }
+
+// indexClaims resolves the slot claims of the hour's pins, in insert ID order
+// so the build is deterministic. A claim that finds no slot claims nothing,
+// and the operator is told why the hour has one track more.
+func (b *builder) indexClaims() {
+	b.claims = slotClaims{
+		start: map[int]bool{}, end: map[int]bool{}, middle: map[int]bool{},
+		spread: map[int][]int{}, tracks: map[uint64]bool{}, pins: map[uint64]bool{},
+	}
+	pins := slices.Clone(b.in.HourInserts)
+	slices.SortStableFunc(pins, func(a, b Insert) int { return cmp.Compare(a.ID, b.ID) })
+	for _, h := range pins {
+		// A deleted playlist leaves the origin behind (ON DELETE SET NULL).
+		if h.RulePlaylistID == nil && h.RuleOriginMS == nil {
+			continue
+		}
+		if b.claimSlot(h) {
+			b.claims.tracks[h.TrackID], b.claims.pins[h.ID] = true, true
+			continue
+		}
+		b.warn(Warning{
+			Code: WarnPinClaimStale, TrackID: new(h.TrackID), HourInsertID: new(h.ID),
+			Message: "a pinned rule track no longer takes a slot of its playlist, so the hour has one track more",
+		})
+	}
+}
+
+// claimSlot gives the claim of h a slot of its playlist; false if the
+// playlist left the clock, is a fill playlist now, or has no slot left.
+func (b *builder) claimSlot(h Insert) bool {
+	if h.RulePlaylistID == nil || h.RuleOriginMS == nil || h.Placement != PlacementFixed {
+		return false
+	}
+	i := slices.IndexFunc(b.in.Clock.Playlists, func(p clocks.ClockPlaylist) bool { return p.PlaylistID == *h.RulePlaylistID })
+	if i < 0 {
+		return false
+	}
+	take := func(slots map[int]bool) bool {
+		if slots[i] {
+			return false
+		}
+		slots[i] = true
+		return true
+	}
+	p := b.in.Clock.Playlists[i]
+	switch p.EffectiveRule() {
+	case clocks.RuleStart:
+		return take(b.claims.start)
+	case clocks.RuleEnd:
+		return take(b.claims.end)
+	case clocks.RuleStartEnd:
+		if *h.RuleOriginMS < middleTargetMS {
+			return take(b.claims.start)
+		}
+		return take(b.claims.end)
+	case clocks.RuleMiddle:
+		return take(b.claims.middle)
+	case clocks.RuleSpread:
+		if len(b.claims.spread[i]) >= spreadCount(p) {
+			return false
+		}
+		b.claims.spread[i] = append(b.claims.spread[i], *h.RuleOriginMS)
+		return true
+	default:
+		return false
+	}
+}
+
+// spreadCount is the number of slots of a spread playlist.
+func spreadCount(p clocks.ClockPlaylist) int {
+	if c := p.EffectiveCount(); c != nil {
+		return *c
+	}
+	return 1
+}
+
+// avoidClaimed returns the candidates of a rule draw without the tracks of
+// the claiming pins; all of them when nothing else is left.
+func (b *builder) avoidClaimed(ts []Track) []Track {
+	rest := slices.DeleteFunc(slices.Clone(ts), func(t Track) bool { return b.claims.tracks[t.ID] })
+	if len(rest) == 0 {
+		return ts
+	}
+	return rest
+}
+
+// burnDraw uses up the draw of a slot a pin took over, so the draws after it
+// (the targets of later playlists) stay the same as without the pin.
+func (b *builder) burnDraw() { b.rng.Uint64() }
 
 // at returns the instant of an offset into the hour.
 func (b *builder) at(offsetMS int) time.Time {
@@ -394,6 +547,10 @@ func (b *builder) endBlock(ends []Insert) ([]blockItem, int) {
 			}
 			s.track, s.item = t, hourItem(s.hourInsert)
 		} else {
+			if b.claims.end[s.playlist] {
+				b.burnDraw()
+				continue
+			}
 			pid := b.in.Clock.Playlists[s.playlist].PlaylistID
 			var fit []Track
 			for _, t := range b.tracks[pid] {
@@ -405,6 +562,7 @@ func (b *builder) endBlock(ends []Insert) ([]blockItem, int) {
 				b.ruleMissing(s.playlist, start, "the end track")
 				continue
 			}
+			fit = b.avoidClaimed(fit)
 			s.track = fit[b.rng.IntN(len(fit))]
 			s.item = Item{Source: SourceRule, PlaylistID: new(pid)}
 		}
@@ -475,12 +633,17 @@ func (b *builder) placeStartInsert(h *Insert) {
 
 // placeStartRule places the start track of a rule playlist at the cursor.
 func (b *builder) placeStartRule(i int) {
+	if b.claims.start[i] {
+		b.burnDraw()
+		return
+	}
 	pid := b.in.Clock.Playlists[i].PlaylistID
 	allowed := b.allowedOf(b.tracks[pid], b.cursor)
 	if len(allowed) == 0 {
 		b.ruleMissing(i, b.cursor, "the start track")
 		return
 	}
+	allowed = b.avoidClaimed(allowed)
 	t := allowed[b.rng.IntN(len(allowed))]
 	b.place(t, Item{Source: SourceRule, PlaylistID: new(pid)}, b.cursor, clocks.HourMS, kindRule, true)
 }
@@ -489,11 +652,15 @@ func (b *builder) placeStartRule(i int) {
 // playlist cuts the free time (the hour without the start block, the
 // inserts, and the end block) into equal parts; each slot lies at a random
 // point of the middle half of its part, with a window of a quarter part on
-// each side.
+// each side. A claiming pin does not count as busy and every slot is drawn,
+// the claimed ones too, so the slots that remain keep their windows.
 func (b *builder) softAnchors(anchors []anchor, blockStart int, hasBlock bool) []soft {
 	type span struct{ from, to int }
 	busy := []span{{0, b.cursor}}
 	for _, a := range anchors {
+		if a.hourInsert != nil && b.claims.pins[a.hourInsert.ID] {
+			continue
+		}
 		busy = append(busy, span{a.target, min(a.target+a.track.DurationMS, clocks.HourMS)})
 	}
 	if hasBlock {
@@ -527,28 +694,47 @@ func (b *builder) softAnchors(anchors []anchor, blockStart int, hasBlock bool) [
 	for i, p := range b.in.Clock.Playlists {
 		switch p.EffectiveRule() {
 		case clocks.RuleMiddle:
+			if b.claims.middle[i] {
+				continue
+			}
 			out = append(out, soft{
 				target: middleTargetMS, earliest: middleTargetMS - middleWindowMS,
 				latest: middleTargetMS + middleWindowMS, playlist: i,
 			})
 		case clocks.RuleSpread:
-			n := 1
-			if c := p.EffectiveCount(); c != nil {
-				n = *c
-			}
+			n := spreadCount(p)
 			part := total / n
 			if part <= 0 {
 				b.warnRule(WarnRuleSlotSkipped, i, "the hour has no free time for its %d tracks", n)
 				continue
 			}
+			slots := make([]soft, 0, n)
 			for k := range n {
 				x := k*part + part/4 + b.rng.IntN(max(part/2, 1))
-				out = append(out, soft{target: clockAt(x), earliest: clockAt(x - part/4), latest: clockAt(x + part/4), playlist: i})
+				slots = append(slots, soft{target: clockAt(x), earliest: clockAt(x - part/4), latest: clockAt(x + part/4), playlist: i})
 			}
+			for _, origin := range b.claims.spread[i] {
+				k := nearestSlot(slots, origin)
+				slots = slices.Delete(slots, k, k+1)
+			}
+			out = append(out, slots...)
 		}
 	}
 	slices.SortStableFunc(out, func(a, b soft) int { return a.target - b.target })
 	return out
+}
+
+// nearestSlot returns the index of the slot whose window holds origin, else
+// of the slot whose window is nearest; the earlier slot on a tie.
+func nearestSlot(slots []soft, origin int) int {
+	best, bestDist := 0, -1
+	for k, s := range slots {
+		d := max(s.earliest-origin, origin-s.latest, 0)
+		if bestDist < 0 || d < bestDist {
+			best, bestDist = k, d
+		}
+	}
+	return best
 }
 
 // nextSoft returns the first slot that is still open and lies before limit.
@@ -648,6 +834,7 @@ func (b *builder) placeSoft(s soft, h hard) {
 			clockTime(s.target))
 		return
 	}
+	fit = b.avoidClaimed(fit)
 	t := fit[b.rng.IntN(len(fit))]
 	b.place(t, Item{Source: SourceRule, PlaylistID: new(pid)}, b.cursor, clocks.HourMS, kindRule, true)
 }

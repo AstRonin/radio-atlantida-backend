@@ -127,7 +127,7 @@ func TestPinCreatesAOneTimeInsertWithTheFillTrack(t *testing.T) {
 	buildPlan(t, ts)
 	itemID, fill := fillItem(t, ts, pinHour, 0)
 
-	_, err := ts.svc.PinFill(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn})
+	_, err := ts.svc.Pin(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn})
 	require.NoError(t, err)
 	drainPlanner(t, ts.svc)
 	require.Empty(t, ts.ops.failed)
@@ -173,7 +173,7 @@ func TestPinAndMoveRefusedForAFrozenHour(t *testing.T) {
 			})
 			ts.svc.now = fixedNow(tt.now)
 
-			_, err := ts.svc.PinFill(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn})
+			_, err := ts.svc.Pin(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn})
 			require.ErrorIs(t, err, ErrHourStarted)
 			_, err = ts.svc.MoveInsert(t.Context(), MoveInsertRequest{ID: 500, OffsetMS: 30 * mn})
 			require.ErrorIs(t, err, ErrHourStarted)
@@ -189,9 +189,9 @@ func TestPinRefusesAnItemThatIsNotAFillTrack(t *testing.T) {
 	buildPlan(t, ts)
 	ts.store.planItems[77] = PlanItemRef{ID: 77, HourStart: pinHour, TrackID: 999, Source: SourceRule, Status: planItemPlanned}
 
-	_, err := ts.svc.PinFill(t.Context(), PinRequest{PlanItemID: 77, OffsetMS: 30 * mn})
+	_, err := ts.svc.Pin(t.Context(), PinRequest{PlanItemID: 77, OffsetMS: 30 * mn})
 	require.ErrorIs(t, err, ErrNotMovable)
-	_, err = ts.svc.PinFill(t.Context(), PinRequest{PlanItemID: 999999, OffsetMS: 30 * mn})
+	_, err = ts.svc.Pin(t.Context(), PinRequest{PlanItemID: 999999, OffsetMS: 30 * mn})
 	require.ErrorIs(t, err, ErrPlanItemNotFound)
 
 	ts.store.inserts = append(ts.store.inserts, Insert{
@@ -238,7 +238,7 @@ func TestRebuildOfAPinnedHourIsDeterministic(t *testing.T) {
 	ts := newPinTest(t, fullBase)
 	buildPlan(t, ts)
 	itemID, fill := fillItem(t, ts, pinHour, 0)
-	_, err := ts.svc.PinFill(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn})
+	_, err := ts.svc.Pin(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn})
 	require.NoError(t, err)
 	drainPlanner(t, ts.svc)
 	require.Empty(t, ts.ops.failed)
@@ -281,7 +281,7 @@ func TestPinToleranceIsValidatedInMilliseconds(t *testing.T) {
 			buildPlan(t, ts)
 			itemID, _ := fillItem(t, ts, pinHour, 0)
 
-			_, err := ts.svc.PinFill(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn, ToleranceMS: tt.tol})
+			_, err := ts.svc.Pin(t.Context(), PinRequest{PlanItemID: itemID, OffsetMS: 30 * mn, ToleranceMS: tt.tol})
 			if tt.field != "" {
 				var ve *validation.Error
 				require.ErrorAs(t, err, &ve)
