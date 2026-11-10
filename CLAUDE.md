@@ -34,6 +34,7 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | `make import-samples` | Generate files with known quality issues into the folder `.dev/media/import-samples` (ffmpeg in a container); import that folder |
 | `make live-check` | Go live through a running backend with a test tone over WebRTC, no browser (`dev/livecheck`) |
 | `make run` | Run the backend on the host against the dev stack |
+| `make dev` | Same, and restart it when a `.go` (not `_test.go`) or `.sql` file changes (air, `.air.toml`) |
 | `make build` | Build `bin/backend` (version from `git describe`) |
 | `make image` | Build the runtime image `radio-atlantida-backend:dev` locally with that version |
 | `make test` | Unit tests with `-race` |

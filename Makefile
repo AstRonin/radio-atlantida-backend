@@ -2,13 +2,14 @@
 
 DOCKER        ?= docker
 GOLANGCI_LINT ?= golangci-lint
+AIR           ?= go run github.com/air-verse/air@v1.67.4
 REDOCLY       ?= npx --yes @redocly/cli@2.61.0
 COMPOSE       := $(DOCKER) compose -f docker-compose.dev.yml
 BIN           := bin/backend
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 IMAGE         ?= radio-atlantida-backend:dev
 
-.PHONY: help run build test test-integration lint fmt vuln migrate openapi openapi-lint \
+.PHONY: help run dev build test test-integration lint fmt vuln migrate openapi openapi-lint \
         image db-up db-down stack-up stack-down stack-logs media import-samples live-check env \
         monitoring-up monitoring-down monitoring-reset
 
@@ -20,6 +21,9 @@ env: ## Create .env from .env.example if missing
 
 run: env ## Run the backend on the host against the dev stack
 	go run ./cmd/backend serve
+
+dev: env ## Run the backend on the host and restart it when the code changes (air, .air.toml)
+	$(AIR)
 
 build: ## Build the binary into bin/
 	CGO_ENABLED=0 go build -trimpath -ldflags="-X main.version=$(VERSION)" -o $(BIN) ./cmd/backend
