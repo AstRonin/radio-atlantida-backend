@@ -150,7 +150,7 @@ func TestReviewedFilterAndSort(t *testing.T) {
 }
 
 func newService(f *fixture) *library.Service {
-	return library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, noneOnAir{},
+	return library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, noneOnAir{}, nil,
 		slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
 }
 

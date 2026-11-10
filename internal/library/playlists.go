@@ -87,6 +87,14 @@ type PlaylistStore interface {
 	SetTracks(ctx context.Context, id uint64, trackIDs []uint64) error
 }
 
+// EmergencySetting reads the setting playout.emergency_playlist_id (§8.6;
+// internal/settings, wired in cmd).
+type EmergencySetting interface {
+	// EmergencyPlaylistID returns the emergency playlist; nil when none is
+	// set.
+	EmergencyPlaylistID(ctx context.Context) (*uint64, error)
+}
+
 // ListPlaylists returns the playlists with their type and track count, of
 // one type when typeID is not 0.
 func (s *Service) ListPlaylists(ctx context.Context, typeID uint64) ([]Playlist, error) {
@@ -189,15 +197,42 @@ func (s *Service) UpdatePlaylist(ctx context.Context, id uint64, in PlaylistInpu
 
 func equalCount(a, b *int) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 
-// DeletePlaylist deletes a playlist that no clock uses. Its tracks stay in
-// the library. An *InUseError names the clocks that use it.
+// DeletePlaylist deletes a playlist that no clock uses and that is not the
+// emergency playlist. Its tracks stay in the library. An *InUseError names
+// the emergency setting and the clocks that block it.
 func (s *Service) DeletePlaylist(ctx context.Context, id uint64) error {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	err := s.playlists.Delete(ctx, id)
+	emergency, err := s.emergency.EmergencyPlaylistID(ctx)
+	if err != nil {
+		return fmt.Errorf("read emergency playlist setting: %w", err)
+	}
+	if emergency != nil && *emergency == id {
+		return s.refuseEmergency(ctx, id)
+	}
+	err = s.playlists.Delete(ctx, id)
 	return refuseDelete(ctx, err, ErrPlaylistInUse, func(ctx context.Context) ([]Ref, error) {
 		return s.playlists.Users(ctx, id, MaxUsers)
 	})
+}
+
+// refuseEmergency returns the refusal to delete the emergency playlist; the
+// clocks that also use it are named after the setting. The setting may
+// point at a playlist that no longer exists: that is ErrPlaylistNotFound,
+// not a refusal.
+func (s *Service) refuseEmergency(ctx context.Context, id uint64) error {
+	p, err := s.playlists.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	users, err := s.playlists.Users(ctx, id, MaxUsers)
+	if err != nil {
+		return fmt.Errorf("list users: %w", err)
+	}
+	return &InUseError{
+		Err:    ErrPlaylistInUse,
+		UsedBy: append([]Ref{{Kind: KindEmergencyPlaylist, ID: p.ID, Name: p.Name}}, users...),
+	}
 }
 
 // SetPlaylistTracks makes trackIDs the tracks of the playlist, in one

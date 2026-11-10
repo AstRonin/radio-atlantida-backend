@@ -133,11 +133,12 @@ func serve(ctx context.Context) error {
 	// the outage detector's checks and outages.
 	broadcastState := broadcast.NewTracker(database, broadcastrepo.New(database.Pool), hub, log, time.Now)
 	playoutSvc := newPlayout(database, settingsSvc, hub, broadcastState, log)
-	// The library refuses a cue change of the track on air (playout).
+	// The library refuses a cue change of the track on air (playout) and
+	// the delete of the emergency playlist (settings).
 	librarySvc := library.NewService(database,
 		libraryrepo.NewTypes(database), libraryrepo.NewPlaylists(database),
 		libraryrepo.NewArtists(database), libraryrepo.NewTracks(database),
-		mediaLib, prober, playoutSvc, log)
+		mediaLib, prober, playoutSvc, emergencySetting{settingsSvc}, log)
 	airWindowSvc := airwindow.NewService(airwindowrepo.New(database.Pool), playoutSvc, airWindowSettings(settingsSvc), time.Now)
 	ingestSvc := ingest.NewService(database, ingestrepo.New(database.Pool), librarySvc, mediaLib, prober, ff, tracker,
 		ingestSettings(settingsSvc), log, time.Now)
@@ -348,9 +349,14 @@ func playoutSettings(svc *settings.Service) playout.SettingsFunc {
 		if err != nil {
 			return playout.Settings{}, err
 		}
+		heartbeat, err := settings.Value(ctx, svc, settings.OutageHeartbeatTimeoutSeconds)
+		if err != nil {
+			return playout.Settings{}, err
+		}
 		return playout.Settings{
 			Location: loc, Lookahead: lookahead, Prepush: time.Duration(prepush) * time.Minute, FadeOutMS: fade,
 			MediaRoot: root, MusicGain: gain, DuckGain: duck, EmergencyPlaylistID: emergency,
+			HeartbeatTimeout: time.Duration(heartbeat) * time.Second,
 		}, nil
 	}
 }
@@ -384,6 +390,15 @@ func intervalLimit(svc *settings.Service) playrules.MaxIntervalFunc {
 		}
 		return days * 24 * 60, nil
 	}
+}
+
+// emergencySetting reads the emergency playlist for the library on each
+// delete, so a change applies at once.
+type emergencySetting struct{ svc *settings.Service }
+
+// EmergencyPlaylistID implements library.EmergencySetting.
+func (e emergencySetting) EmergencyPlaylistID(ctx context.Context) (*uint64, error) {
+	return settings.Value(ctx, e.svc, settings.PlayoutEmergencyPlaylistID)
 }
 
 // guardRetention refuses a play log retention shorter than the longest

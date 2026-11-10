@@ -80,6 +80,10 @@ const (
 	// KindPlayout is a track queued in Liquidsoap or on air (named by the
 	// ingest service, which owns the check).
 	KindPlayout = "playout"
+	// KindEmergencyPlaylist is the playlist itself, chosen in the setting
+	// playout.emergency_playlist_id (§8.6): the setting blocks the delete,
+	// so the entry has the playlist's ID and name.
+	KindEmergencyPlaylist = "emergency_playlist"
 )
 
 // Ref names an entity that blocks a delete.
@@ -121,17 +125,19 @@ type Service struct {
 	files     Files
 	prober    Prober
 	onAir     OnAir
+	emergency EmergencySetting
 	log       *slog.Logger
 }
 
-// NewService returns the service. onAir tells which track is on air; log
-// is the root logger.
+// NewService returns the service. onAir tells which track is on air;
+// emergency tells which playlist is the emergency playlist; log is the root
+// logger.
 func NewService(tx TxRunner, types TypeStore, playlists PlaylistStore, artists ArtistStore, tracks TrackStore,
-	files Files, prober Prober, onAir OnAir, log *slog.Logger,
+	files Files, prober Prober, onAir OnAir, emergency EmergencySetting, log *slog.Logger,
 ) *Service {
 	return &Service{
 		tx: tx, types: types, playlists: playlists, artists: artists, tracks: tracks,
-		files: files, prober: prober, onAir: onAir,
+		files: files, prober: prober, onAir: onAir, emergency: emergency,
 		log: logging.For(log, logging.ComponentAPI),
 	}
 }

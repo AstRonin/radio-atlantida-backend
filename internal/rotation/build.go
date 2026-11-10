@@ -208,6 +208,7 @@ func newBuilder(in HourInput) *builder {
 		plan:   HourPlan{Refused: map[uint64]Refusal{}},
 		minGap: max(in.Settings.MinGapMS, 1),
 		tracks: map[uint64][]Track{},
+		cursor: in.FromMS,
 	}
 }
 
@@ -235,12 +236,15 @@ func (b *builder) opening() ([]anchor, []blockItem, int) {
 		b.placeAnchor(anchors[0])
 		anchors = anchors[1:]
 	}
-	for i := range starts {
-		b.placeStartInsert(&starts[i])
-	}
-	for i, p := range b.in.Clock.Playlists {
-		if r := p.EffectiveRule(); r == clocks.RuleStart || r == clocks.RuleStartEnd {
-			b.placeStartRule(i)
+	// The start of a partial hour has passed.
+	if b.in.FromMS == 0 {
+		for i := range starts {
+			b.placeStartInsert(&starts[i])
+		}
+		for i, p := range b.in.Clock.Playlists {
+			if r := p.EffectiveRule(); r == clocks.RuleStart || r == clocks.RuleStartEnd {
+				b.placeStartRule(i)
+			}
 		}
 	}
 
@@ -436,21 +440,26 @@ func (b *builder) anchors() []anchor {
 
 	kept := out[:0]
 	for _, a := range out {
+		if a.latest < b.in.FromMS {
+			continue // its window has passed, in a partial hour
+		}
+		// An insert whose window holds FromMS starts there, not at its target.
+		at := max(a.target, b.in.FromMS)
 		if a.hourInsert != nil {
-			t, ok := b.hourTrack(a.hourInsert, a.target)
+			t, ok := b.hourTrack(a.hourInsert, at)
 			if !ok {
 				continue
 			}
 			a.track, a.item = t, hourItem(a.hourInsert)
 		} else {
 			ci := b.in.Clock.Inserts[*a.item.InsertIndex]
-			t, ok := b.templateTrack(*a.item.InsertIndex, ci, a.target)
+			t, ok := b.templateTrack(*a.item.InsertIndex, ci, at)
 			if !ok {
 				continue
 			}
 			a.track = t
 		}
-		b.chk.add(a.track.ID, a.track.ArtistID, b.at(a.target))
+		b.chk.add(a.track.ID, a.track.ArtistID, b.at(at))
 		kept = append(kept, a)
 	}
 	return kept
@@ -656,7 +665,10 @@ func (b *builder) placeStartRule(i int) {
 // the claimed ones too, so the slots that remain keep their windows.
 func (b *builder) softAnchors(anchors []anchor, blockStart int, hasBlock bool) []soft {
 	type span struct{ from, to int }
-	busy := []span{{0, b.cursor}}
+	// The slots of a partial hour are drawn over the whole hour, so the time
+	// that has passed is not busy: its slots fall out in fillTo, and the slots
+	// that remain are not moved or added to make up for them.
+	busy := []span{{0, b.cursor - b.in.FromMS}}
 	for _, a := range anchors {
 		if a.hourInsert != nil && b.claims.pins[a.hourInsert.ID] {
 			continue
@@ -754,7 +766,11 @@ func (b *builder) fillTo(h hard) {
 	for {
 		s := b.nextSoft(h.target)
 		if s != nil && b.cursor > s.latest {
-			b.warnRule(WarnRuleSlotSkipped, s.playlist, "the slot %s to %s is passed", clockTime(s.earliest), clockTime(s.latest))
+			// In a partial hour, a slot whose window opened before the build
+			// begins is expected to pass.
+			if s.earliest >= b.in.FromMS {
+				b.warnRule(WarnRuleSlotSkipped, s.playlist, "the slot %s to %s is passed", clockTime(s.earliest), clockTime(s.latest))
+			}
 			b.popSoft()
 			continue
 		}

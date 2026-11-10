@@ -42,6 +42,9 @@ type Event struct {
 	ElapsedMS int
 	// Connected is the Icecast output state (output).
 	Connected bool
+	// SafetyOnAir is whether the safety tone is on air (heartbeat); nil
+	// when the script does not report it.
+	SafetyOnAir *bool
 }
 
 // Callback records an event from Liquidsoap. Every event is idempotent: a
@@ -55,6 +58,7 @@ func (s *Service) Callback(ctx context.Context, e Event) error {
 
 	switch {
 	case e.Kind == EventHeartbeat:
+		s.safetyHeartbeat(at, e.SafetyOnAir)
 		return nil
 	case e.Kind == EventOutput:
 		s.setOutput(ctx, e)

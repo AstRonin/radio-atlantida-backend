@@ -55,7 +55,7 @@ const (
 	// PlaylistNotFound: no playlist has the requested ID.
 	PlaylistNotFound Problem = "playlist_not_found"
 	// PlaylistInUse: clocks use the playlist as a clock playlist or as an
-	// insert source; see used_by.
+	// insert source, or it is the emergency playlist; see used_by.
 	PlaylistInUse Problem = "playlist_in_use"
 	// ArtistNotFound: no artist has the requested ID.
 	ArtistNotFound Problem = "artist_not_found"

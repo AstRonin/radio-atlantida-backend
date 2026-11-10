@@ -298,6 +298,8 @@ type fakeGrid struct {
 	hoursRead int
 	// err, if set, fails the read: a run that fails.
 	err error
+	// without are the hour starts (Unix seconds) the grid does not assign.
+	without map[int64]bool
 }
 
 func (g *fakeGrid) Hours(_ context.Context, from, to time.Time) ([]grid.ScheduledHour, error) {
@@ -313,6 +315,9 @@ func (g *fakeGrid) Hours(_ context.Context, from, to time.Time) ([]grid.Schedule
 		first = first.Add(time.Hour)
 	}
 	for h := first; h.Before(to); h = h.Add(time.Hour) {
+		if g.without[h.Unix()] {
+			continue
+		}
 		out = append(out, grid.ScheduledHour{StartUTC: h, SlotID: 9, Clock: grid.ClockRef{ID: g.clock, Name: "Day"}})
 	}
 	g.hoursRead += len(out)

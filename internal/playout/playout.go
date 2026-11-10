@@ -132,7 +132,11 @@ type Status struct {
 	LastCallbackAt *time.Time
 	// MusicGain is the gain last set; nil before the first connect.
 	MusicGain *float64
-	Queued    []QueuedItem
+	// SafetyOnAir is whether the safety tone is on air (safety.go).
+	SafetyOnAir bool
+	// SafetySince is when it was counted on air; nil when it is not.
+	SafetySince *time.Time
+	Queued      []QueuedItem
 }
 
 // Store persists playout (internal/repository/playout).
@@ -217,6 +221,9 @@ type Settings struct {
 	// and when it changes.
 	DuckGain            float64
 	EmergencyPlaylistID *uint64
+	// HeartbeatTimeout: heartbeats silent this long reset the safety state
+	// (outage.heartbeat_timeout_seconds).
+	HeartbeatTimeout time.Duration
 }
 
 // SettingsFunc reads the settings.
@@ -259,6 +266,7 @@ type Service struct {
 	gain          *float64
 	gainPending   bool
 	lastEmergency uint64
+	safety        safetyState
 }
 
 // NewService returns the service. outputs follows the Icecast output
@@ -311,6 +319,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if s.gain != nil {
 		st.MusicGain = new(*s.gain)
 	}
+	st.SafetyOnAir, st.SafetySince = s.safety.onAir, s.safety.since()
 	return st, nil
 }
 

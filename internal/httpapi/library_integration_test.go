@@ -74,6 +74,13 @@ type libraryAPI struct {
 	tools bool
 }
 
+// emergencyFromSettings is the wiring of cmd/backend (emergencySetting).
+type emergencyFromSettings struct{ svc *settings.Service }
+
+func (e emergencyFromSettings) EmergencyPlaylistID(ctx context.Context) (*uint64, error) {
+	return settings.Value(ctx, e.svc, settings.PlayoutEmergencyPlaylistID)
+}
+
 // atomicID is a setting value the test changes while services read it.
 type atomicID struct {
 	mu sync.Mutex
@@ -153,9 +160,11 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 			MusicGain: 1, EmergencyPlaylistID: a.emergency.get(),
 		}, nil
 	}, hub, broadcastState, log, clock.now, rand.New(rand.NewPCG(1, 1))) //nolint:gosec // G404: emergency picks, not security
+	settingsSvc, err := settings.NewService(settings.NewRegistry(), settingsrepo.New(d), config.Secrets{}.IsSet(), log, time.Now)
+	require.NoError(t, err)
 	svc := library.NewService(d,
 		libraryrepo.NewTypes(d), libraryrepo.NewPlaylists(d), libraryrepo.NewArtists(d), libraryrepo.NewTracks(d),
-		lib, prober, a.playout, log)
+		lib, prober, a.playout, emergencyFromSettings{settingsSvc}, log)
 	ingestSvc := ingest.NewService(d, ingestrepo.New(d.Pool), svc, lib, prober, ff, tracker,
 		func(context.Context) (ingest.Settings, error) {
 			return ingest.Settings{ // setting defaults
@@ -166,8 +175,6 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 				},
 			}, nil
 		}, log, clock.now)
-	settingsSvc, err := settings.NewService(settings.NewRegistry(), settingsrepo.New(d), config.Secrets{}.IsSet(), log, time.Now)
-	require.NoError(t, err)
 	// The counts are read on every request, as in serve.
 	airWindowSvc := airwindow.NewService(airwindowrepo.New(d.Pool), a.playout,
 		func(ctx context.Context) (airwindow.Settings, error) {
@@ -308,6 +315,49 @@ func refsOf(p dto.Problem) []string {
 		out = append(out, fmt.Sprintf("%s:%d:%s", r.Kind, r.ID, r.Name))
 	}
 	return out
+}
+
+// The emergency playlist is refused like a playlist of a clock, through the
+// real setting; clearing the setting allows the delete.
+func TestDeleteEmergencyPlaylist(t *testing.T) {
+	a := newLibraryAPI(t)
+	setEmergency := func(value any) {
+		a.ok(http.StatusOK, http.MethodPut, "/api/settings/playout.emergency_playlist_id", map[string]any{"value": value}, nil)
+	}
+	newPlaylist := func(name string) dto.Playlist {
+		var p dto.Playlist
+		a.ok(http.StatusCreated, http.MethodPost, "/api/playlists", map[string]any{"name": name, "type_id": a.typeID("music")}, &p)
+		return p
+	}
+	path := func(id uint64) string { return fmt.Sprintf("/api/playlists/%d", id) }
+
+	reserve, other := newPlaylist("Reserve"), newPlaylist("Other")
+	setEmergency(reserve.ID)
+
+	p := a.problem(http.StatusConflict, errcodes.PlaylistInUse, http.MethodDelete, path(reserve.ID), nil)
+	require.Equal(t, []string{fmt.Sprintf("emergency_playlist:%d:Reserve", reserve.ID)}, refsOf(p))
+	a.ok(http.StatusOK, http.MethodGet, path(reserve.ID), nil, nil)
+
+	a.ok(http.StatusNoContent, http.MethodDelete, path(other.ID), nil, nil)
+
+	// A clock and the setting: both are named, in the shape of the clock
+	// refusal.
+	clock := a.exec(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
+	a.exec(`INSERT INTO clock_playlists (clock_id, playlist_id, position) VALUES ($1, $2, 0) RETURNING clock_id`, clock, reserve.ID)
+	p = a.problem(http.StatusConflict, errcodes.PlaylistInUse, http.MethodDelete, path(reserve.ID), nil)
+	require.Equal(t, []string{
+		fmt.Sprintf("emergency_playlist:%d:Reserve", reserve.ID), fmt.Sprintf("clock:%d:Morning", clock),
+	}, refsOf(p))
+
+	// With the setting cleared only the clock blocks it.
+	setEmergency(nil)
+	p = a.problem(http.StatusConflict, errcodes.PlaylistInUse, http.MethodDelete, path(reserve.ID), nil)
+	require.Equal(t, []string{fmt.Sprintf("clock:%d:Morning", clock)}, refsOf(p))
+
+	// No check refuses an ID with no playlist, so the setting can point at
+	// nothing; deleting that ID is a not found, not a refusal.
+	setEmergency(9999)
+	a.problem(http.StatusNotFound, errcodes.PlaylistNotFound, http.MethodDelete, path(9999), nil)
 }
 
 func TestLibraryPlaylistTypes(t *testing.T) {

@@ -16,6 +16,9 @@ type PlayoutCallbackBody struct {
 	Filename  string    `json:"filename,omitempty" doc:"The resolved file."`
 	ElapsedMS int       `json:"elapsed_ms,omitempty" minimum:"0" doc:"end: how long the track played."`
 	Connected bool      `json:"connected,omitempty" doc:"output: the Icecast output is connected."`
+	// SafetyOnAir is a pointer: a script that does not report it means
+	// unknown, not false.
+	SafetyOnAir *bool `json:"safety_on_air,omitempty" doc:"heartbeat: the safety tone is on air. Absent: unknown, nothing changes."`
 }
 
 // PlayoutLink is the state of the Liquidsoap control link.
@@ -64,6 +67,8 @@ type PlayoutStatus struct {
 	NowPlaying     *NowPlaying         `json:"now_playing,omitempty" doc:"Absent between tracks or when nothing is known."`
 	LastCallbackAt *time.Time          `json:"last_callback_at,omitempty" doc:"When the last callback from Liquidsoap arrived."`
 	MusicGain      *float64            `json:"music_gain,omitempty" doc:"The gain last set; absent before the first connect."`
+	SafetyOnAir    bool                `json:"safety_on_air" doc:"The safety tone is on air: two heartbeats in a row reported it. False after the heartbeats are lost."`
+	SafetySince    *time.Time          `json:"safety_since,omitempty" doc:"When the backend counted the safety tone on air; absent when it is not."`
 	Queued         []PlayoutQueuedItem `json:"queued" nullable:"false" doc:"In planned order."`
 }
 

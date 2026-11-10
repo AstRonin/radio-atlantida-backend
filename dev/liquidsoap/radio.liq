@@ -118,16 +118,6 @@ def report(event, source, m, elapsed_ms) =
   callback(line)
 end
 
-# A heartbeat every 5 seconds, callback only (not journaled): the outage
-# detector tells a stalled Liquidsoap from a long track by it (§7.1).
-thread.run(
-  every=5.,
-  fun () ->
-    callback(
-      json.stringify(compact=true, {event="heartbeat", time=utc_now()})
-    )
-)
-
 # The journal is kept 10 days (§7.1). The backend mounts it read-only, so
 # Liquidsoap deletes the older files, checking a few days back in case it was
 # not running when a file came of age.
@@ -309,6 +299,26 @@ music =
 # Safety source: a quiet sine tone, so the stream never stops (§8.6).
 safety = amplify(0.1, sine(id="safety", 440.))
 automation = fallback(id="automation", track_sensitive=false, [music, safety])
+
+# A heartbeat every 5 seconds, callback only (not journaled): the outage
+# detector tells a stalled Liquidsoap from a long track by it (§7.1). It also
+# says whether the safety tone is on air, that is, whether the source before
+# it in the fallback (the hour queues and the emergency source) has nothing
+# to play. Below `music`, because it reads it.
+thread.run(
+  every=5.,
+  fun () ->
+    callback(
+      json.stringify(
+        compact=true,
+        {
+          event="heartbeat",
+          time=utc_now(),
+          safety_on_air=not source.is_ready(music)
+        }
+      )
+    )
+)
 
 # Live voice from the backend WebRTC bridge (§8.4): an Ogg/Opus stream sent
 # with the Icecast source protocol to the mount `live` (fixed: the backend

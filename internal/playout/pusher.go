@@ -95,6 +95,8 @@ func (s *Service) pass(ctx context.Context) error {
 		return fmt.Errorf("read playout settings: %w", err)
 	}
 	now := s.now().UTC()
+	// Before the link: heartbeats are lost exactly when Liquidsoap is gone.
+	s.safetyExpire(now, set.HeartbeatTimeout)
 	cur := hourStart(now, set.Location)
 	next := cur.Add(time.Hour)
 	hours := []time.Time{cur}

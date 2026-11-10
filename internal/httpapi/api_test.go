@@ -273,7 +273,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	schemas := doc.Components.Schemas
 	require.Equal(t, stringsOf(errcodes.Problems()), schemas["ProblemCode"].Enum)
 	require.Equal(t, stringsOf(errcodes.Fields()), schemas["FieldErrorCode"].Enum)
-	require.Len(t, schemas["Event"].OneOf, 15)
+	require.Len(t, schemas["Event"].OneOf, 16)
 	require.Equal(t, []string{ws.EventLiveState}, schemas["LiveStateEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventErrorAlert}, schemas["ErrorAlertEvent"].Properties["type"].Enum)
 	require.Equal(t, []string{ws.EventTrackAnalysed}, schemas["TrackAnalysedEvent"].Properties["type"].Enum)

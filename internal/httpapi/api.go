@@ -124,6 +124,7 @@ func registerEventSchemas(reg huma.Registry) {
 		{reflect.TypeFor[ws.TrackPlanFullEvent](), []string{ws.EventTrackPlanFull}},
 		{reflect.TypeFor[ws.NowPlayingEvent](), []string{ws.EventNowPlaying}},
 		{reflect.TypeFor[ws.TrackEndedEvent](), []string{ws.EventTrackEnded}},
+		{reflect.TypeFor[ws.SafetyEvent](), []string{ws.EventSafety}},
 		{reflect.TypeFor[ws.LiquidsoapStateEvent](), []string{ws.EventLiquidsoapState}},
 		{reflect.TypeFor[ws.IcecastStateEvent](), []string{ws.EventIcecastState}},
 		{reflect.TypeFor[ws.BroadcastStateEvent](), []string{ws.EventBroadcastState}},

@@ -372,7 +372,7 @@ Clock endpoints (§6.0) take `playlists` and `inserts` (v7-23); the filler endpo
 | Method and path | Purpose |
 |-----------------|---------|
 | `GET /api/track-plan?from=&to=` | Built hours (at most 7 days) with their items |
-| `POST /api/track-plan/rebuild` | Body: `from`, `to`. Rebuilds the future hours of the range; returns `accepted` with an operation ID (`clock_build`) |
+| `POST /api/track-plan/rebuild` | Body: `from`, `to`. Rebuilds the future hours of the range and builds the current hour if it has no plan (§7); returns `accepted` with an operation ID (`clock_build`) |
 | `POST /api/track-plan/inserts` | v7-23. Body: `hour_start_utc`, `offset_ms`, optional `tolerance_ms`, `track_id`. Adds a one-time insert to a planned hour that is not frozen and rebuilds the hour; returns `accepted` with an operation ID (`hour_insert`). A track that cannot be placed whole fails the operation |
 | `POST /api/track-plan/pins` | `docs/track-pin-plan.md`. Body: `plan_item_id`, `offset_ms`, optional `tolerance_ms`. Pins a planned fill or rule track at a new time as a one-time insert of the same track and rebuilds the hour; `accepted` with an operation ID (`hour_insert`). Refused for a frozen hour (`hour_started`), an unknown item (`plan_item_not_found`), and an item that is not a planned fill or rule track, or a rule track with no playlist (`not_movable`). A track that cannot be placed fails the operation and nothing changes |
 | `PATCH /api/track-plan/inserts/{id}` | `docs/track-pin-plan.md`. Body: `offset_ms`, optional `tolerance_ms` (default: keep the current one). Moves a one-time insert with a fixed time inside its hour and rebuilds the hour; `accepted` with an operation ID (`hour_insert`). Refused for a frozen hour (`hour_started`), an unknown ID (`hour_insert_not_found`), and an insert without a fixed time (`not_movable`). An insert that cannot be placed fails the operation and keeps its old place |
@@ -384,7 +384,7 @@ Clock endpoints (§6.0) take `playlists` and `inserts` (v7-23); the filler endpo
 |-----------------|---------|
 | `POST /api/playout/callback` | Called by Liquidsoap: track `start` and `end`, and the Icecast output state (§8.3). A started plan item moves to `play_log`; repeated events change nothing |
 | `GET /api/playout/emergency/next` | Called by Liquidsoap: the next track of the emergency playlist as a request (`text/plain`), or 204 (§8.2, §8.6) |
-| `GET /api/playout/status` | Control link, Icecast output, now playing, items waiting in Liquidsoap's queues, music gain |
+| `GET /api/playout/status` | Control link, Icecast output, now playing, items waiting in Liquidsoap's queues, music gain, whether the safety tone is on air (`safety_on_air`, `safety_since`) |
 | `PUT /api/playout/music-gain` | Body: `gain` (0 to 1). Sets the live music gain (§8.5); refused with `liquidsoap_unavailable` when the control link is down |
 
 **Implemented in v7-13 (`docs/phase-10-plan.md` §4).** The v7-6 endpoints above are implemented with these details: `GET /api/play-history` takes `from` and `to` (at most 31 days), an optional `status`, and is keyset paginated (`limit`, `cursor`, `next_cursor`); `GET /api/outages` takes at most 7 days; reschedule refuses the checks that need no build per field (422) and a resolved item with 409 `missed_item_resolved`, and its operation fails when the track breaks a rule at its place or does not fit whole. `POST /api/playout/callback` also takes a `heartbeat` event, sent by Liquidsoap every 5 seconds and not journaled.
@@ -500,6 +500,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 **Playout events (from Liquidsoap's track callbacks; not sent for journal replay)**
 
 - `playout.now_playing`: a track has started on air: the plan item (absent for an emergency track), the track, `started_at`, `out_ms`, `truncated`.
+- `playout.safety`: the safety tone went on or off air: `on_air`, and `since` while it is on air. Sent only on a change.
 - `playout.track_ended`: a track has left the air and its end is in the play log: the plan item (absent for an emergency track), the track, `source`, the final `status` (`aired` or `truncated`), `started_at`, `ended_at`, `actual_duration_ms`. Sent after the write, once per item (a repeated end sends nothing). The panel clears its now playing unless a newer track has started, and reloads the air window (v7-17).
 
 **Operation tracking**
@@ -561,7 +562,7 @@ A rule slot or a playlist insert with no allowed track is skipped with a warning
 
 The engine is deterministic for a given input and seed, which makes it testable.
 
-**Implementation decisions (v7-11, v7-23).** `docs/phase-8-plan.md` §2 recorded the element engine; `docs/phase-23-plan.md` §3.3 replaces it with the playlist and insert build above. Kept from v7-11: music only in gaps of at least `rotation.min_gap_ms`; hours that have started are never rebuilt; the seed is the hour start. Since v7-22 (`docs/phase-22-plan.md`) every fit, reschedule, and the crossing rule use the on-air length of a track (between its cue points); a plan item records the cut it was planned with (`planned_in_ms` is the cue in, a crossing item is cut at `cue_in + time left`), and keeps it when the track's cue changes later; a cue change rebuilds the future hours that hold a planned item of the track. Besides the operation events, the planner sends `track_plan.warning` (the warnings of one built hour).
+**Implementation decisions (v7-11, v7-23).** `docs/phase-8-plan.md` §2 recorded the element engine; `docs/phase-23-plan.md` §3.3 replaces it with the playlist and insert build above. Kept from v7-11: music only in gaps of at least `rotation.min_gap_ms`; hours that have started are never rebuilt; the seed is the hour start. A grid hour that has started and has no stored plan is built once by the sync, for what is left of the hour, and only if at least 2 minutes remain (`docs/started-hour-build-plan.md`, 2026-11-10); its start offset is not stored, so the seed alone does not reproduce such an hour. Since v7-22 (`docs/phase-22-plan.md`) every fit, reschedule, and the crossing rule use the on-air length of a track (between its cue points); a plan item records the cut it was planned with (`planned_in_ms` is the cue in, a crossing item is cut at `cue_in + time left`), and keeps it when the track's cue changes later; a cue change rebuilds the future hours that hold a planned item of the track. Besides the operation events, the planner sends `track_plan.warning` (the warnings of one built hour).
 
 ### 7.1 Broadcast Outages and Missed Items
 
@@ -573,7 +574,7 @@ An outage is a period when the station's audio did not reach listeners, for exam
   1. **Icecast state**: the backend checks the mount point on the Icecast server at the configured interval (§6.3). Liquidsoap also reports its output connection state through its callbacks (§8.3).
   2. **Liquidsoap callbacks**: track start and end events. If no callback arrives within the heartbeat timeout while the station should be on air, the detector treats the playout as stalled.
   3. **Liquidsoap control link**: the backend's connection to the control interface (§8.1). Loss of this link for longer than the heartbeat timeout is treated as an outage while planned items are due: Liquidsoap keeps streaming (its queue, then the emergency source), but planned items cannot be pushed, so they become missed and the manager can reschedule them (decided 2026-10-14, v7-13).
-- Liquidsoap sends a heartbeat callback every 5 seconds, so a stalled playout is told apart from a long track (v7-13).
+- Liquidsoap sends a heartbeat callback every 5 seconds, so a stalled playout is told apart from a long track (v7-13). The heartbeat also carries the optional `safety_on_air`: true when the source before the safety tone is not ready. The backend keeps this in memory: two true reports in a row (about 10 seconds) turn the state on, so a short gap between tracks is not reported, one false report turns it off, a heartbeat without the field changes nothing, and the state is reset when the heartbeat is silent beyond the timeout.
 - An outage opens after the configured number of consecutive failed checks, so a single dropped request does not create a false outage. It is written to `broadcast_outages` with `started_at`, `detected_by`, and `component`.
 - The outage closes when all signals report normal operation again. `ended_at` is set and `broadcast_outage.ended` is sent (§6.5).
 - Detection must not block playout. It runs in its own goroutine and only writes state.
@@ -735,10 +736,10 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 ### 8.6 Fallback
 
 - Liquidsoap uses `fallback` so that if live voice drops, automation takes over.
-- If the automation source fails, a safety playlist or silence is played.
+- If the automation source fails, a safety source is played (a quiet tone in the development script). The panel header warns on every page while the safety tone or an emergency track is on air (§7.1 for how the tone is reported).
 - Go is informed of state changes but is not required for the fallback to work.
 - Items already in `scheduled_items` with status `planned` remain valid during a Go outage. Liquidsoap's queue keeps playing, and the planned tracks that were already pushed are not affected. Their outcome is recorded by the journal and reconciled later (§7.1).
-- The emergency playlist is a set of tracks chosen by the operator in settings. It plays when the pool and the plan are both empty. Tracks played from the emergency playlist are logged as `source = emergency` and are not counted as missed items.
+- The emergency playlist is a set of tracks chosen by the operator in settings or with the checkbox on the playlist page; both write `playout.emergency_playlist_id`. It plays when the pool and the plan are both empty. The current emergency playlist cannot be deleted: another one must be chosen, or the setting cleared, first (`docs/emergency-playlist-delete-guard-plan.md`). Tracks played from the emergency playlist are logged as `source = emergency` and are not counted as missed items.
 
 ### 8.7 Media files (not stored in Docker)
 

@@ -296,6 +296,11 @@ type HourInput struct {
 	History  []Play
 	Settings Settings
 	Seed     uint64
+	// FromMS is where the build begins, from the start of the hour; 0 builds
+	// the whole hour. A larger value is the first build of an hour that has
+	// started (docs/started-hour-build-plan.md): what lies before it has
+	// passed, and is left out without a warning.
+	FromMS int
 }
 
 // HourPlan is the result of a build.

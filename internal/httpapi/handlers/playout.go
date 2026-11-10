@@ -52,7 +52,7 @@ func registerPlayout(api huma.API, log *slog.Logger, svc Playout) {
 		Method:        http.MethodPost,
 		Path:          "/api/playout/callback",
 		Summary:       "Liquidsoap callback",
-		Description:   "Called by Liquidsoap only: a track start or end, or the Icecast output state (§8.3). A started plan item moves to the play log; the first end of an item records its actual duration. Repeated events change nothing.",
+		Description:   "Called by Liquidsoap only: a track start or end, the Icecast output state, or a heartbeat (§8.3). A started plan item moves to the play log; the first end of an item records its actual duration. Repeated events change nothing.",
 		Tags:          tags,
 		DefaultStatus: http.StatusNoContent,
 		Errors:        errorsWith(http.StatusUnprocessableEntity),
@@ -94,7 +94,7 @@ func registerPlayout(api huma.API, log *slog.Logger, svc Playout) {
 		Method:      http.MethodGet,
 		Path:        "/api/playout/status",
 		Summary:     "Get the playout state",
-		Description: "The Liquidsoap control link, the Icecast output, the track on air, the items waiting in Liquidsoap's queues, and the music gain.",
+		Description: "The Liquidsoap control link, the Icecast output, the track on air, whether the safety tone is on air, the items waiting in Liquidsoap's queues, and the music gain.",
 		Tags:        tags,
 		Errors:      errorsWith(),
 	}, func(ctx context.Context, _ *struct{}) (*playoutStatusOutput, error) {
@@ -125,6 +125,7 @@ func callbackEvent(b dto.PlayoutCallbackBody) playout.Event {
 	return playout.Event{
 		Kind: playout.EventKind(b.Event), Time: b.Time.UTC(), Source: b.Source,
 		ItemID: parseID(b.ItemID), TrackID: parseID(b.TrackID), ElapsedMS: b.ElapsedMS, Connected: b.Connected,
+		SafetyOnAir: b.SafetyOnAir,
 	}
 }
 
@@ -143,6 +144,8 @@ func playoutStatusDTO(st playout.Status) dto.PlayoutStatus {
 		ControlLink:    dto.PlayoutLink{Connected: st.Link.Connected, Since: nonZero(st.Link.Since), LastOKAt: nonZero(st.Link.LastOK)},
 		LastCallbackAt: st.LastCallbackAt,
 		MusicGain:      st.MusicGain,
+		SafetyOnAir:    st.SafetyOnAir,
+		SafetySince:    st.SafetySince,
 		Queued:         make([]dto.PlayoutQueuedItem, len(st.Queued)),
 	}
 	if st.Output != nil {

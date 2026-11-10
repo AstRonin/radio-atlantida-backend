@@ -192,6 +192,23 @@ type TrackEndedData struct {
 	ActualDurationMS int       `json:"actual_duration_ms" doc:"How long it played."`
 }
 
+// EventSafety is the type of [SafetyEvent].
+const EventSafety = "playout.safety"
+
+// SafetyEvent reports that the safety tone came on air or left it
+// (docs/safety-on-air-state-plan.md). It is sent only on a change.
+type SafetyEvent struct {
+	Type string     `json:"type" doc:"Always playout.safety."`
+	Time time.Time  `json:"time"`
+	Data SafetyData `json:"data"`
+}
+
+// SafetyData is the payload of [SafetyEvent].
+type SafetyData struct {
+	OnAir bool       `json:"on_air" doc:"The safety tone is on air: the plan and the emergency playlist have nothing to play."`
+	Since *time.Time `json:"since,omitempty" doc:"When the backend counted it on air; absent when it is not."`
+}
+
 // EventLiquidsoapState is the type of [LiquidsoapStateEvent].
 const EventLiquidsoapState = "liquidsoap.state"
 

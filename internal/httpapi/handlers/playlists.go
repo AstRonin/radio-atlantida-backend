@@ -130,7 +130,7 @@ func registerPlaylists(api huma.API, log *slog.Logger, svc Library, rules PlayRu
 		Method:      http.MethodDelete,
 		Path:        "/api/playlists/{id}",
 		Summary:     "Delete a playlist",
-		Description: "Its tracks stay in the library. Refused while a clock uses the playlist as a clock playlist or an insert source (playlist_in_use, with used_by naming the clocks).",
+		Description: "Its tracks stay in the library. Refused while a clock uses the playlist as a clock playlist or an insert source (playlist_in_use, with used_by naming the clocks), and while it is the emergency playlist (playlist_in_use, with a used_by entry of kind emergency_playlist; first choose another one or clear the setting playout.emergency_playlist_id).",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *idInput) (*struct{}, error) {

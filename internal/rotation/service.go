@@ -266,6 +266,15 @@ const (
 	// MaxPlanDays bounds one request of a range rebuild, and the range the
 	// rebuild checks (checkRange): at most this many days.
 	MaxPlanDays = 31
+	// startedHourLead is how far ahead of now the first build of a started
+	// hour begins. The planner does not wake the pusher, which ticks every
+	// 5 s and skips an item more than 30 s late: the lead lets the next tick
+	// push the first item before its planned start.
+	startedHourLead = 10 * time.Second
+	// startedHourMinRemainder is the least time, after the lead, worth
+	// building for: under it a track or two would only cut the emergency
+	// source for moments before the next hour.
+	startedHourMinRemainder = 2 * time.Minute
 )
 
 // Service keeps the track plan.
@@ -328,9 +337,11 @@ type SyncResult struct {
 // now and within the plan horizon: it builds missing and stale hours and
 // those in force, and clears built hours the grid no longer assigns. A
 // built hour that is frozen (PlanSettings.Freeze) is never rebuilt or
-// cleared; a missing one is still built. A failed hour does not stop the
-// others; the errors are returned together. A pass that builds at least one
-// hour is logged (its start and its end, see passlog.go).
+// cleared; a missing one is still built. The grid hour that contains now is
+// built too if it has no plan_hours row, once, for what is left of it
+// (startedHour). A failed hour does not stop the others; the errors are
+// returned together. A pass that builds at least one hour is logged (its
+// start and its end, see passlog.go).
 func (s *Service) sync(ctx context.Context, trigger Trigger, force []Range) (SyncResult, error) {
 	res := SyncResult{ByCode: map[WarningCode]int{}}
 	began := s.now()
@@ -346,6 +357,22 @@ func (s *Service) sync(ctx context.Context, trigger Trigger, force []Range) (Syn
 	horizon := planHorizon(now, set)
 	st := countingStore{Store: s.store, n: count}
 	count.add(1) // settings
+
+	cache := map[uint64]*clocks.Clock{}
+	var todo []hourJob
+	var errs []error
+	// Read on its own, so the window below stays (now, horizon]: stale hours
+	// that have started must not join the work list.
+	count.add(1)
+	started, err := s.startedHour(rctx, st, cache, now)
+	switch {
+	case err != nil:
+		errs = append(errs, err)
+	case started != nil:
+		started.count = count
+		todo = append(todo, *started)
+	}
+
 	hours, err := s.grid.Hours(rctx, after, horizon)
 	if err != nil {
 		return res, fmt.Errorf("read grid hours: %w", err)
@@ -362,10 +389,7 @@ func (s *Service) sync(ctx context.Context, trigger Trigger, force []Range) (Syn
 		planned[h.Start.Unix()] = h
 	}
 
-	cache := map[uint64]*clocks.Clock{}
 	assigned := map[int64]bool{}
-	var todo []hourJob
-	var errs []error
 	for _, h := range hours {
 		assigned[h.StartUTC.Unix()] = true
 		c, cerr := s.clock(ctx, cache, h.Clock.ID)
@@ -410,7 +434,11 @@ func (s *Service) sync(ctx context.Context, trigger Trigger, force []Range) (Syn
 	var runStart memStats
 	if active {
 		runStart = readMem()
-		s.logPassStart(passShort, trigger, after, horizon, len(todo), len(hours)-len(todo), runStart)
+		considered := len(hours)
+		if started != nil {
+			considered++ // the started hour is not one of hours
+		}
+		s.logPassStart(passShort, trigger, after, horizon, len(todo), considered-len(todo), runStart)
 	}
 	for _, j := range todo {
 		out, err := s.build(ctx, j, &lib, set)
@@ -446,6 +474,49 @@ func (s *Service) sync(ctx context.Context, trigger Trigger, force []Range) (Syn
 	return res, errors.Join(errs...)
 }
 
+// startedHour returns the job of the grid hour that contains now, if it has
+// no plan_hours row and enough of it is left; nil otherwise. A row of any
+// kind, even with no items, keeps the hour as it is.
+func (s *Service) startedHour(ctx context.Context, st Store, cache map[uint64]*clocks.Clock, now time.Time) (*hourJob, error) {
+	// The hours that start in (now - 1 h, now]: the one that contains now,
+	// whatever the station's offset from UTC.
+	hours, err := s.grid.Hours(ctx, now.Add(time.Nanosecond-time.Hour), now.Add(time.Nanosecond))
+	if err != nil {
+		return nil, fmt.Errorf("read the grid hour on air: %w", err)
+	}
+	if len(hours) == 0 {
+		return nil, nil
+	}
+	h := hours[len(hours)-1]
+	if _, ok := startedOffset(h.StartUTC, now); !ok {
+		return nil, nil
+	}
+	_, found, err := st.PlanHour(ctx, h.StartUTC)
+	if err != nil {
+		return nil, fmt.Errorf("read plan hour %s: %w", h.StartUTC.Format(time.RFC3339), err)
+	}
+	if found {
+		return nil, nil
+	}
+	c, err := s.clock(ctx, cache, h.Clock.ID)
+	if err != nil || c == nil {
+		return nil, err
+	}
+	return &hourJob{start: h.StartUTC, slotID: new(h.SlotID), clock: *c, started: true}, nil
+}
+
+// startedOffset returns where the first build of the hour that starts at
+// start begins when it is built at now, from the start of the hour; false if
+// too little of the hour is left.
+func startedOffset(start, now time.Time) (int, bool) {
+	from := now.Add(startedHourLead).Sub(start)
+	if time.Hour-from < startedHourMinRemainder {
+		return 0, false
+	}
+	// Rounded up: the first item never starts before now + lead.
+	return int((from + time.Millisecond - 1) / time.Millisecond), true
+}
+
 // clock returns the clock, cached per sync; nil if it no longer exists.
 func (s *Service) clock(ctx context.Context, cache map[uint64]*clocks.Clock, id uint64) (*clocks.Clock, error) {
 	if c, ok := cache[id]; ok {
@@ -470,6 +541,9 @@ type hourJob struct {
 	clock  clocks.Clock
 	// force rebuilds the hour even when it is current.
 	force bool
+	// started is the first build of an hour that has started: it covers what
+	// is left of the hour (startedOffset).
+	started bool
 	// add stores this one-time insert before the build and fails the build
 	// when it cannot be placed whole.
 	add *Insert
@@ -529,6 +603,15 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	case !j.force && found && ph.current(c):
 		return hourOutcome{skipped: true}, nil
 	}
+	// From the time under the lock: the sync read may be seconds old. The
+	// found && frozen case above makes this build one-shot.
+	fromMS := 0
+	if j.started {
+		var ok bool
+		if fromMS, ok = startedOffset(j.start, now); !ok {
+			return hourOutcome{skipped: true}, nil
+		}
+	}
 
 	// ownID is the one-time insert the job adds or moves; its refusal fails
 	// the job instead of dropping the insert with a warning.
@@ -557,6 +640,8 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 		return hourOutcome{}, err
 	}
 	span := lib.maxRuleInterval()
+	// The window spans the whole hour, so a partial build also counts what
+	// has aired in the hour up to now.
 	history, err := st.History(ctx, j.start.Add(-span), j.start.Add(time.Hour+span), j.start)
 	if err != nil {
 		return hourOutcome{}, err
@@ -564,6 +649,7 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	in := HourInput{
 		Start: j.start, Location: set.Location, Clock: c, HourInserts: inserts, Library: lib, History: history,
 		Settings: set.Build, Seed: uint64(j.start.Unix()), //nolint:gosec // G115: hour starts are after 1970
+		FromMS: fromMS,
 	}
 	plan := Build(in)
 	out := hourOutcome{plan: plan}

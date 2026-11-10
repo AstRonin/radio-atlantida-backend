@@ -150,6 +150,39 @@ func TestProblemForStoppedBulkDelete(t *testing.T) {
 	require.Contains(t, logs.String(), "delete track 9")
 }
 
+// Every reason a playlist is in use is the same refusal: one status, one
+// code, the blockers in used_by.
+func TestProblemForPlaylistInUse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ref  library.Ref
+		want dto.EntityRef
+	}{
+		{
+			"a clock",
+			library.Ref{Kind: library.KindClock, ID: 2, Name: "Morning"},
+			dto.EntityRef{Kind: "clock", ID: 2, Name: "Morning"},
+		},
+		{
+			"the emergency playlist",
+			library.Ref{Kind: library.KindEmergencyPlaylist, ID: 7, Name: "Reserve"},
+			dto.EntityRef{Kind: "emergency_playlist", ID: 7, Name: "Reserve"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := &library.InUseError{Err: library.ErrPlaylistInUse, UsedBy: []library.Ref{tt.ref}}
+			p := problemFor(t.Context(), slog.New(slog.DiscardHandler), err)
+			require.Equal(t, http.StatusConflict, p.Status)
+			require.Equal(t, errcodes.PlaylistInUse, p.Code)
+			require.Equal(t, library.ErrPlaylistInUse.Error(), p.Detail)
+			require.Equal(t, []dto.EntityRef{tt.want}, p.UsedBy)
+		})
+	}
+}
+
 // The codes of a bulk delete's refusals are those of the single delete.
 func TestTrackRefusalCode(t *testing.T) {
 	t.Parallel()
