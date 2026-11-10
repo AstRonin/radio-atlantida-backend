@@ -102,6 +102,11 @@ const (
 	// HourStarted: the hour is on air, over, or about to start (its items
 	// may be in Liquidsoap's queue); its plan is not changed.
 	HourStarted Problem = "hour_started"
+	// PlanItemNotFound: no planned item of the track plan has the requested ID.
+	PlanItemNotFound Problem = "plan_item_not_found"
+	// NotMovable: the item cannot be pinned or moved. Only a planned fill
+	// track, and a one-time insert with a fixed time, can be.
+	NotMovable Problem = "not_movable"
 	// TrackPlanFullRunning: a full pass of the track plan is running; one runs
 	// at a time. Wait for its terminal event (track_plan_full.completed or
 	// .failed).
@@ -158,7 +163,7 @@ func Problems() []Problem {
 		PlayRuleNotFound, PlayRuleInUse,
 		ClockNotFound, ClockInUse, ClockHasHistory,
 		GridSlotNotFound, GridConflict,
-		HourInsertNotFound, HourStarted, TrackPlanFullRunning,
+		HourInsertNotFound, HourStarted, PlanItemNotFound, NotMovable, TrackPlanFullRunning,
 		LiquidsoapUnavailable,
 		MissedItemNotFound, MissedItemResolved,
 		MediaOperationRunning, MediaToolsUnavailable,

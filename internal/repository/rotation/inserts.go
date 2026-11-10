@@ -157,3 +157,17 @@ WHERE pl.id = $1 AND pl.status = 'missed' AND si.reschedule_of_id = pl.id`, miss
 	}
 	return nil
 }
+
+// UpdateInsert sets the offset and the tolerance of an insert, or
+// rotation.ErrInsertNotFound.
+func (s *Store) UpdateInsert(ctx context.Context, ins rotation.Insert) error {
+	tag, err := s.q.Exec(ctx, `UPDATE hour_inserts SET offset_ms = $2, tolerance_ms = $3 WHERE id = $1`,
+		ins.ID, ins.OffsetMS, ins.ToleranceMS)
+	if err != nil {
+		return fmt.Errorf("update hour insert %d: %w", ins.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return rotation.ErrInsertNotFound
+	}
+	return nil
+}

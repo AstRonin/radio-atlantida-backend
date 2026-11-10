@@ -117,6 +117,19 @@ type HourInsertBody struct {
 	TrackID      uint64    `json:"track_id" minimum:"1"`
 }
 
+// TrackPinBody is the body of POST /api/track-plan/pins.
+type TrackPinBody struct {
+	PlanItemID  uint64 `json:"plan_item_id" minimum:"1" doc:"ID of a planned fill track of an hour that has not started."`
+	OffsetMS    int    `json:"offset_ms" minimum:"0" maximum:"3599000" multipleOf:"1000" doc:"New start inside the hour, whole seconds (18:30:00 in its hour is 1800000)."`
+	ToleranceMS *int   `json:"tolerance_ms,omitempty" nullable:"true" minimum:"0" maximum:"600000" doc:"Start tolerance in milliseconds. Default: setting rotation.default_fixed_tolerance_ms."`
+}
+
+// HourInsertMoveBody is the body of PATCH /api/track-plan/inserts/{id}.
+type HourInsertMoveBody struct {
+	OffsetMS    int  `json:"offset_ms" minimum:"0" maximum:"3599000" multipleOf:"1000" doc:"New start inside the hour, whole seconds. The insert must have a fixed time."`
+	ToleranceMS *int `json:"tolerance_ms,omitempty" nullable:"true" minimum:"0" maximum:"600000" doc:"Start tolerance in milliseconds. Default: the tolerance the insert has."`
+}
+
 // OperationAccepted is the answer to a request that started an
 // asynchronous operation (§6.5).
 type OperationAccepted struct {

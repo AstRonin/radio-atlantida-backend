@@ -25,6 +25,8 @@ type Rotation interface {
 	Sample(ctx context.Context, c clocks.Clock) (rotation.Sample, error)
 	Simulate(ctx context.Context, from, to time.Time, withItems bool) (rotation.Simulation, error)
 	AddInsert(ctx context.Context, r rotation.AddInsertRequest) (uint64, error)
+	PinFill(ctx context.Context, r rotation.PinRequest) (uint64, error)
+	MoveInsert(ctx context.Context, r rotation.MoveInsertRequest) (uint64, error)
 	RemoveInsert(ctx context.Context, id uint64) (uint64, error)
 	Rescheduler
 }
@@ -58,6 +60,15 @@ type operationAcceptedOutput struct {
 
 type addHourInsertInput struct {
 	Body dto.HourInsertBody
+}
+
+type pinInput struct {
+	Body dto.TrackPinBody
+}
+
+type moveHourInsertInput struct {
+	ID   uint64 `path:"id" minimum:"1"`
+	Body dto.HourInsertMoveBody
 }
 
 func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
@@ -153,6 +164,44 @@ func registerRotation(api huma.API, log *slog.Logger, svc Rotation) {
 	}, func(ctx context.Context, in *addHourInsertInput) (*operationAcceptedOutput, error) {
 		id, err := svc.AddInsert(ctx, rotation.AddInsertRequest{
 			HourStart: in.Body.HourStartUTC.UTC(), OffsetMS: in.Body.OffsetMS, ToleranceMS: in.Body.ToleranceMS, TrackID: in.Body.TrackID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &operationAcceptedOutput{Body: dto.OperationAccepted{OperationID: id}}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID:   "pin-track-plan-item",
+		Method:        http.MethodPost,
+		Path:          "/api/track-plan/pins",
+		Summary:       "Pin a planned fill track at a new time",
+		Description:   "Fixes a planned fill track of an hour that has not started at a new time with seconds, until the end of the hour, as an hour_insert operation: a one-time insert of the same track is stored and the hour is rebuilt around it in one transaction (§7.2). A later rebuild keeps the track at that place. The rest of the hour is built around it. Refused once the hour is frozen (hour_started), and for an item that is not a planned fill track (not_movable). When the builder cannot place the track at its new place, the operation fails with the reason (insert_does_not_fit or insert_blocked) and nothing changes.",
+		Tags:          tags,
+		DefaultStatus: http.StatusAccepted,
+		Errors:        errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *pinInput) (*operationAcceptedOutput, error) {
+		id, err := svc.PinFill(ctx, rotation.PinRequest{
+			PlanItemID: in.Body.PlanItemID, OffsetMS: in.Body.OffsetMS, ToleranceMS: in.Body.ToleranceMS,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &operationAcceptedOutput{Body: dto.OperationAccepted{OperationID: id}}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID:   "move-hour-insert",
+		Method:        http.MethodPatch,
+		Path:          "/api/track-plan/inserts/{id}",
+		Summary:       "Move a one-time insert inside its hour",
+		Description:   "Sets the new start of a one-time insert with a fixed time and rebuilds its hour, as an hour_insert operation (§7.2). The insert keeps its track. Refused once the hour is frozen (hour_started), for an insert without a fixed time (not_movable), and for an unknown ID (hour_insert_not_found). When the builder cannot place the insert at its new place, the operation fails with the reason and the insert keeps its old place.",
+		Tags:          tags,
+		DefaultStatus: http.StatusAccepted,
+		Errors:        errorsWith(http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *moveHourInsertInput) (*operationAcceptedOutput, error) {
+		id, err := svc.MoveInsert(ctx, rotation.MoveInsertRequest{
+			ID: in.ID, OffsetMS: in.Body.OffsetMS, ToleranceMS: in.Body.ToleranceMS,
 		})
 		if err != nil {
 			return nil, err

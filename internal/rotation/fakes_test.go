@@ -28,6 +28,11 @@ type fakeStore struct {
 	cleared []time.Time
 	// claims are the nightly claims by station date.
 	claims map[string]bool
+	// planItems are the stored items by ID; itemIDs holds the IDs of each
+	// hour's items, in the order of items. nextID counts the IDs given out.
+	planItems map[uint64]PlanItemRef
+	itemIDs   map[int64][]uint64
+	nextID    uint64
 }
 
 // ClaimNightly takes the claim of a date once, as the repository does.
@@ -44,7 +49,10 @@ func (f *fakeStore) ClaimNightly(_ context.Context, day string) (bool, error) {
 }
 
 func newFakeStore(lib Library) *fakeStore {
-	return &fakeStore{lib: lib, hours: map[int64]PlanHour{}, items: map[int64][]Item{}, calls: map[string]int{}}
+	return &fakeStore{
+		lib: lib, hours: map[int64]PlanHour{}, items: map[int64][]Item{}, calls: map[string]int{},
+		planItems: map[uint64]PlanItemRef{}, itemIDs: map[int64][]uint64{}, nextID: 1000,
+	}
 }
 
 func (f *fakeStore) count(name string) { f.calls[name]++ }
@@ -137,17 +145,45 @@ func (f *fakeStore) PlanHour(_ context.Context, start time.Time) (PlanHour, bool
 
 func (f *fakeStore) ReplaceHour(_ context.Context, h PlanHour, items []Item) error {
 	f.count("replace")
-	f.hours[h.Start.Unix()] = h
-	f.items[h.Start.Unix()] = slices.Clone(items)
+	key := h.Start.Unix()
+	f.forgetItems(key)
+	f.hours[key] = h
+	f.items[key] = slices.Clone(items)
+	ids := make([]uint64, len(items))
+	for i, it := range items {
+		f.nextID++
+		ids[i] = f.nextID
+		f.planItems[f.nextID] = PlanItemRef{ID: f.nextID, HourStart: h.Start, TrackID: it.TrackID, Source: it.Source, Status: planItemPlanned}
+	}
+	f.itemIDs[key] = ids
 	return nil
+}
+
+// forgetItems drops the stored item IDs of the hour that starts at key.
+func (f *fakeStore) forgetItems(key int64) {
+	for _, id := range f.itemIDs[key] {
+		delete(f.planItems, id)
+	}
+	delete(f.itemIDs, key)
 }
 
 func (f *fakeStore) ClearHour(_ context.Context, start time.Time) error {
 	f.count("clear")
+	f.forgetItems(start.Unix())
 	delete(f.hours, start.Unix())
 	delete(f.items, start.Unix())
 	f.cleared = append(f.cleared, start)
 	return nil
+}
+
+// PlanItem returns a stored planned item by ID.
+func (f *fakeStore) PlanItem(_ context.Context, id uint64) (PlanItemRef, error) {
+	f.count("planItem")
+	ref, ok := f.planItems[id]
+	if !ok {
+		return PlanItemRef{}, ErrPlanItemNotFound
+	}
+	return ref, nil
 }
 
 func (f *fakeStore) Plan(context.Context, time.Time, time.Time) ([]PlannedHour, error) {
@@ -195,12 +231,33 @@ func (f *fakeStore) QueuedHours(_ context.Context, from, to time.Time) ([]time.T
 	return out, nil
 }
 
-func (f *fakeStore) Insert(context.Context, uint64) (Insert, error) {
-	return Insert{}, ErrInsertNotFound
+func (f *fakeStore) Insert(_ context.Context, id uint64) (Insert, error) {
+	i := slices.IndexFunc(f.inserts, func(ins Insert) bool { return ins.ID == id })
+	if i < 0 {
+		return Insert{}, ErrInsertNotFound
+	}
+	return f.inserts[i], nil
 }
 
-func (f *fakeStore) CreateInsert(context.Context, Insert) (uint64, error) {
-	return 0, errors.New("fake: CreateInsert is not used by the service tests")
+// CreateInsert stores the insert under a new ID.
+func (f *fakeStore) CreateInsert(_ context.Context, ins Insert) (uint64, error) {
+	f.count("createInsert")
+	f.nextID++
+	ins.ID = f.nextID
+	f.inserts = append(f.inserts, ins)
+	return ins.ID, nil
+}
+
+// UpdateInsert sets the offset and tolerance of a stored insert.
+func (f *fakeStore) UpdateInsert(_ context.Context, ins Insert) error {
+	f.count("updateInsert")
+	i := slices.IndexFunc(f.inserts, func(s Insert) bool { return s.ID == ins.ID })
+	if i < 0 {
+		return ErrInsertNotFound
+	}
+	f.inserts[i].OffsetMS = ins.OffsetMS
+	f.inserts[i].ToleranceMS = ins.ToleranceMS
+	return nil
 }
 
 func (f *fakeStore) DeleteInsert(_ context.Context, id uint64) error {
@@ -249,10 +306,13 @@ func (g *fakeGrid) Hours(_ context.Context, from, to time.Time) ([]grid.Schedule
 	}
 	g.lastFrom, g.lastTo = from, to
 	var out []grid.ScheduledHour
-	for h := from.Truncate(time.Hour).Add(time.Hour); h.Before(to); h = h.Add(time.Hour) {
-		if h.Before(from) {
-			continue
-		}
+	// The first hour is the one that starts at or after from, as the grid
+	// reads it: an hour that starts exactly at from is included.
+	first := from.Truncate(time.Hour)
+	if first.Before(from) {
+		first = first.Add(time.Hour)
+	}
+	for h := first; h.Before(to); h = h.Add(time.Hour) {
 		out = append(out, grid.ScheduledHour{StartUTC: h, SlotID: 9, Clock: grid.ClockRef{ID: g.clock, Name: "Day"}})
 	}
 	g.hoursRead += len(out)

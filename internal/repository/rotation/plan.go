@@ -279,3 +279,36 @@ ON CONFLICT (station_date) DO NOTHING`, day)
 	}
 	return tag.RowsAffected() == 1, nil
 }
+
+type planItemRow struct {
+	ID        uint64    `db:"id"`
+	HourStart time.Time `db:"hour_start_utc"`
+	TrackID   uint64    `db:"track_id"`
+	Source    string    `db:"source"`
+	Status    string    `db:"status"`
+}
+
+func (r planItemRow) domain() rotation.PlanItemRef {
+	return rotation.PlanItemRef{
+		ID: r.ID, HourStart: r.HourStart.UTC(), TrackID: r.TrackID, Source: rotation.Source(r.Source), Status: r.Status,
+	}
+}
+
+// PlanItem returns one planned item with the start of its hour (the built
+// hour that holds its start), or rotation.ErrPlanItemNotFound.
+func (s *Store) PlanItem(ctx context.Context, id uint64) (rotation.PlanItemRef, error) {
+	rows, err := s.q.Query(ctx, `
+SELECT si.id, h.hour_start_utc, si.track_id, si.source, si.status
+FROM scheduled_items si
+JOIN plan_hours h ON h.hour_start_utc <= si.planned_start_utc
+  AND si.planned_start_utc < h.hour_start_utc + INTERVAL '1 hour'
+WHERE si.id = $1`, id)
+	if err != nil {
+		return rotation.PlanItemRef{}, fmt.Errorf("select plan item %d: %w", id, err)
+	}
+	it, err := db.CollectOne(rows, planItemRow.domain, rotation.ErrPlanItemNotFound)
+	if err != nil && !errors.Is(err, rotation.ErrPlanItemNotFound) {
+		return rotation.PlanItemRef{}, fmt.Errorf("scan plan item %d: %w", id, err)
+	}
+	return it, err
+}

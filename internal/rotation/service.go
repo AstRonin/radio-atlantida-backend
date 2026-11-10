@@ -26,6 +26,11 @@ var (
 	ErrHourStarted = errors.New("the hour has started")
 	// ErrInsertNotFound: no one-time insert has the ID.
 	ErrInsertNotFound = errors.New("hour insert not found")
+	// ErrPlanItemNotFound: no planned item of the track plan has the ID.
+	ErrPlanItemNotFound = errors.New("plan item not found")
+	// ErrNotMovable: the item cannot be pinned or moved. Only a planned fill
+	// track, and a one-time insert with a fixed time, can be.
+	ErrNotMovable = errors.New("the item cannot be pinned or moved")
 )
 
 // InsertError is the failure of an hour_insert or reschedule operation
@@ -88,6 +93,20 @@ type PlannedItem struct {
 	// one-time insert of an hour_insert or reschedule item.
 	InsertID     *uint64
 	HourInsertID *uint64
+}
+
+// planItemPlanned is the status of a planned item that is not yet queued in
+// Liquidsoap (scheduled_items.status).
+const planItemPlanned = "planned"
+
+// PlanItemRef is a stored planned item, as a pin reads it: its hour and the
+// placement it was built with.
+type PlanItemRef struct {
+	ID        uint64
+	HourStart time.Time
+	TrackID   uint64
+	Source    Source
+	Status    string
 }
 
 // PlannedHour is a built hour with its items and its one-time inserts.
@@ -153,6 +172,11 @@ type Store interface {
 	Insert(ctx context.Context, id uint64) (Insert, error)
 	// CreateInsert stores a one-time insert and returns its ID.
 	CreateInsert(ctx context.Context, ins Insert) (uint64, error)
+	// UpdateInsert sets the target start and the tolerance of a one-time
+	// insert; ErrInsertNotFound.
+	UpdateInsert(ctx context.Context, ins Insert) error
+	// PlanItem returns one planned item and its hour; ErrPlanItemNotFound.
+	PlanItem(ctx context.Context, id uint64) (PlanItemRef, error)
 	// DeleteInsert deletes a one-time insert.
 	DeleteInsert(ctx context.Context, id uint64) error
 	// ReopenMissed sets a rescheduled missed item open again.
@@ -445,6 +469,9 @@ type hourJob struct {
 	add *Insert
 	// remove deletes this one-time insert before the build.
 	remove *Insert
+	// move sets the offset and tolerance of this one-time insert before the
+	// build, and fails the build (rolling it back) when it cannot be placed.
+	move *Insert
 	// count counts the store calls of the build; nil counts nothing.
 	count *queryCount
 }
@@ -488,7 +515,7 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	c := j.clock
 	frozen := set.frozen(j.start, now)
 	switch {
-	case (j.add != nil || j.remove != nil) && frozen:
+	case (j.add != nil || j.remove != nil || j.move != nil) && frozen:
 		return hourOutcome{}, ErrHourStarted
 	case found && frozen:
 		// Its items may be in Liquidsoap's queue already.
@@ -497,11 +524,19 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 		return hourOutcome{skipped: true}, nil
 	}
 
-	var addedID uint64
+	// ownID is the one-time insert the job adds or moves; its refusal fails
+	// the job instead of dropping the insert with a warning.
+	var ownID uint64
 	if j.add != nil {
-		if addedID, err = s.storeInsert(ctx, st, *j.add); err != nil {
+		if ownID, err = s.storeInsert(ctx, st, *j.add); err != nil {
 			return hourOutcome{}, err
 		}
+	}
+	if j.move != nil {
+		if err = st.UpdateInsert(ctx, *j.move); err != nil {
+			return hourOutcome{}, err
+		}
+		ownID = j.move.ID
 	}
 	if j.remove != nil {
 		if err = dropInserts(ctx, st, []Insert{*j.remove}); err != nil {
@@ -526,11 +561,11 @@ func (s *Service) buildTx(ctx context.Context, st Store, j hourJob, lib *Library
 	}
 	plan := Build(in)
 	out := hourOutcome{plan: plan}
-	if addedID != 0 {
-		if r, ok := plan.Refused[addedID]; ok {
+	if ownID != 0 {
+		if r, ok := plan.Refused[ownID]; ok {
 			return hourOutcome{}, &InsertError{Reason: r.Reason, Message: r.Message}
 		}
-		i := slices.IndexFunc(plan.Items, func(it Item) bool { return it.HourInsertID != nil && *it.HourInsertID == addedID })
+		i := slices.IndexFunc(plan.Items, func(it Item) bool { return it.HourInsertID != nil && *it.HourInsertID == ownID })
 		if i >= 0 {
 			out.placed = &plan.Items[i]
 		}

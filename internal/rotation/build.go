@@ -86,6 +86,10 @@ type builder struct {
 	// tracks are the tracks of each playlist of the clock and its inserts.
 	tracks map[uint64][]Track
 	fill   []fillSource
+	// pinned are the tracks of the one-time inserts of the hour. They count
+	// as played in this hour: fill draws never pick them again (decision 6).
+	// Template inserts and rule slots are not affected.
+	pinned map[uint64]bool
 	cursor int
 	prev   kind
 	softs  []soft
@@ -102,7 +106,8 @@ type builder struct {
 //     one-time start inserts, the start tracks) opens the hour.
 //  3. Middle and spread slots are soft anchors in the free time.
 //  4. Fill: before each track a fill playlist is drawn by its share, then
-//     an allowed track of it. Before a hard point the last track is the best
+//     an allowed track of it. The tracks of the one-time inserts of the hour
+//     are not drawn again in that hour (they count as played). Before a hard point the last track is the best
 //     fit to its window, else it is cut at the target and faded out.
 //  5. Inserts chain: one starts when the content before it ends, not
 //     before its window opens; past its window it is skipped (template) or
@@ -184,6 +189,12 @@ func Build(in HourInput) HourPlan {
 // and lists the fill playlists with their shares (decision 9: without
 // shares, every fill playlist weighs 1).
 func (b *builder) index() {
+	b.pinned = map[uint64]bool{}
+	for _, h := range b.in.HourInserts {
+		if h.Placement == PlacementFixed {
+			b.pinned[h.TrackID] = true
+		}
+	}
 	want := map[uint64]bool{}
 	for _, p := range b.in.Clock.Playlists {
 		want[p.PlaylistID] = true
@@ -224,6 +235,12 @@ func (b *builder) allowedOf(ts []Track, offset int) []Track {
 		}
 	}
 	return out
+}
+
+// fillAllowed returns the tracks of ts that a fill draw may start at offset:
+// the allowed ones, without the tracks pinned in this hour.
+func (b *builder) fillAllowed(ts []Track, offset int) []Track {
+	return slices.DeleteFunc(b.allowedOf(ts, offset), func(t Track) bool { return b.pinned[t.ID] })
 }
 
 func clip(ms int) int { return min(max(ms, 0), clocks.HourMS) }
@@ -567,7 +584,7 @@ func (b *builder) fillTo(h hard) {
 		t, pid, ok := b.drawFill()
 		src := SourceFill
 		if !ok {
-			t, ok = b.closest(b.allowedOf(b.in.Library.Tracks, b.cursor), h.target-b.cursor)
+			t, ok = b.closest(b.fillAllowed(b.in.Library.Tracks, b.cursor), h.target-b.cursor)
 			if !ok {
 				b.warn(Warning{Code: WarnEmergency, Message: fmt.Sprintf(
 					"no track passes the play rules at %s; the gap to %s is left for the emergency source", b.clock(b.cursor), clockTime(h.target))})
@@ -650,7 +667,7 @@ func (b *builder) drawFill() (Track, *uint64, bool) {
 		for ; r >= left[k].weight; k++ {
 			r -= left[k].weight
 		}
-		allowed := b.allowedOf(b.tracks[left[k].playlistID], b.cursor)
+		allowed := b.fillAllowed(b.tracks[left[k].playlistID], b.cursor)
 		if len(allowed) > 0 {
 			return allowed[b.rng.IntN(len(allowed))], new(left[k].playlistID), true
 		}
@@ -670,7 +687,7 @@ func (b *builder) bestFit(earliest, latest, target int) (Track, *uint64, bool) {
 	var best []cand
 	bestDiff := -1
 	for _, f := range b.fill {
-		for _, t := range b.allowedOf(b.tracks[f.playlistID], b.cursor) {
+		for _, t := range b.fillAllowed(b.tracks[f.playlistID], b.cursor) {
 			end := b.cursor + t.DurationMS
 			if seen[t.ID] || end < earliest || end > latest {
 				continue

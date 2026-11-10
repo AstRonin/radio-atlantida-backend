@@ -44,11 +44,41 @@ type AddInsertRequest struct {
 	TrackID     uint64
 }
 
-// insertOp is a queued operation of a one-time insert: add (a reschedule
-// or a track of the manager) or remove.
+// PinRequest pins a planned fill track of an open hour at a new time: a
+// one-time insert of its track, fixed at OffsetMS (§7.2, pins).
+type PinRequest struct {
+	PlanItemID uint64
+	OffsetMS   int
+	// ToleranceMS nil takes the default of new inserts.
+	ToleranceMS *int
+}
+
+// MoveInsertRequest moves a one-time insert inside its hour.
+type MoveInsertRequest struct {
+	ID       uint64
+	OffsetMS int
+	// ToleranceMS nil keeps the tolerance the insert has.
+	ToleranceMS *int
+}
+
+// insertOp is a queued operation of a one-time insert: add (a reschedule,
+// a track of the manager, or a pin), move, or remove.
 type insertOp struct {
 	add    *Insert
+	move   *Insert
 	remove *Insert
+}
+
+// target is the insert the operation is about.
+func (op insertOp) target() *Insert {
+	switch {
+	case op.add != nil:
+		return op.add
+	case op.move != nil:
+		return op.move
+	default:
+		return op.remove
+	}
 }
 
 // Reschedule checks a request to place a missed item into a later hour and
@@ -145,6 +175,103 @@ func (s *Service) AddInsert(ctx context.Context, r AddInsertRequest) (uint64, er
 		return 0, err
 	}
 	s.enqueueOp(ctx, rebuild{opID: id, insert: &insertOp{add: &ins}})
+	return id, nil
+}
+
+// PinFill pins a planned fill track at a new time inside its hour. It stores
+// a one-time insert of the same track, fixed at the offset, and rebuilds the
+// hour in the same unit of work as the insert (runInsert). The hour is kept
+// around the pin: the track stays until the end of the hour, and a rebuild
+// keeps it. A frozen hour is refused (ErrHourStarted); an item that is not a
+// planned fill track is refused (ErrNotMovable). A pin the builder cannot
+// place fails the operation with the reason and changes nothing.
+func (s *Service) PinFill(ctx context.Context, r PinRequest) (uint64, error) {
+	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	set, err := s.settings(rctx)
+	if err != nil {
+		return 0, fmt.Errorf("read rotation settings: %w", err)
+	}
+	it, err := s.store.PlanItem(rctx, r.PlanItemID)
+	if err != nil {
+		return 0, err
+	}
+	if set.frozen(it.HourStart, s.now().UTC()) {
+		return 0, ErrHourStarted
+	}
+	if it.Source != SourceFill || it.Status != planItemPlanned {
+		return 0, ErrNotMovable
+	}
+	lib, err := libraryFor(rctx, s.store, LibraryScope{Tracks: []uint64{it.TrackID}})
+	if err != nil {
+		return 0, err
+	}
+	t, ok := lib.track(it.TrackID)
+	if !ok {
+		return 0, validation.Field("plan_item_id", validation.Invalid, "the track of the item has no duration")
+	}
+	ins := Insert{
+		HourStart: it.HourStart, TrackID: it.TrackID, Placement: PlacementFixed, OffsetMS: new(r.OffsetMS),
+		ToleranceMS: set.DefaultFixedToleranceMS,
+	}
+	if r.ToleranceMS != nil {
+		ins.ToleranceMS = *r.ToleranceMS
+	}
+	if err = checkPlacement(ins, t.DurationMS); err != nil {
+		return 0, err
+	}
+	id, err := s.ops.Start(ctx, operations.KindHourInsert)
+	if err != nil {
+		return 0, err
+	}
+	s.enqueueOp(ctx, rebuild{opID: id, insert: &insertOp{add: &ins}})
+	return id, nil
+}
+
+// MoveInsert moves a one-time insert inside its hour and starts the
+// hour_insert operation that stores the new offset and rebuilds the hour in
+// one transaction. An insert with no fixed time (start or end) is refused
+// (ErrNotMovable); a frozen hour is refused (ErrHourStarted). When the
+// builder cannot place the insert at its new place, the operation fails with
+// the reason and the insert keeps its old offset.
+func (s *Service) MoveInsert(ctx context.Context, r MoveInsertRequest) (uint64, error) {
+	rctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	set, err := s.settings(rctx)
+	if err != nil {
+		return 0, fmt.Errorf("read rotation settings: %w", err)
+	}
+	cur, err := s.store.Insert(rctx, r.ID)
+	if err != nil {
+		return 0, err
+	}
+	if set.frozen(cur.HourStart, s.now().UTC()) {
+		return 0, ErrHourStarted
+	}
+	if cur.Placement != PlacementFixed {
+		return 0, ErrNotMovable
+	}
+	lib, err := libraryFor(rctx, s.store, LibraryScope{Tracks: []uint64{cur.TrackID}})
+	if err != nil {
+		return 0, err
+	}
+	t, ok := lib.track(cur.TrackID)
+	if !ok {
+		return 0, validation.Field("id", validation.Invalid, "the track of the insert has no duration")
+	}
+	moved := cur
+	moved.OffsetMS = new(r.OffsetMS)
+	if r.ToleranceMS != nil {
+		moved.ToleranceMS = *r.ToleranceMS
+	}
+	if err = checkPlacement(moved, t.DurationMS); err != nil {
+		return 0, err
+	}
+	id, err := s.ops.Start(ctx, operations.KindHourInsert)
+	if err != nil {
+		return 0, err
+	}
+	s.enqueueOp(ctx, rebuild{opID: id, insert: &insertOp{move: &moved}})
 	return id, nil
 }
 
@@ -266,10 +393,7 @@ func (s *Service) runInsert(ctx context.Context, op insertOp) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read rotation settings: %w", err)
 	}
-	ins := op.add
-	if ins == nil {
-		ins = op.remove
-	}
+	ins := op.target()
 	h, c, err := s.findGridHour(rctx, ins.HourStart)
 	switch {
 	case errors.Is(err, errNoGridHour) && op.remove != nil:
@@ -284,7 +408,7 @@ func (s *Service) runInsert(ctx context.Context, op insertOp) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	j := hourJob{start: ins.HourStart, slotID: new(h.SlotID), clock: c, force: true, add: op.add, remove: op.remove}
+	j := hourJob{start: ins.HourStart, slotID: new(h.SlotID), clock: c, force: true, add: op.add, move: op.move, remove: op.remove}
 	out, err := s.build(ctx, j, &lib, set)
 	if err != nil {
 		return "", err
