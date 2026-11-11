@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 )
 
 type artistOutput struct {
@@ -19,7 +20,11 @@ type artistListOutput struct {
 }
 
 type listArtistsInput struct {
-	Query string `query:"q" maxLength:"200" doc:"Only artists whose name contains this text (case-insensitive)."`
+	Query  string `query:"q" maxLength:"200" doc:"Only artists whose name contains this text (case-insensitive)."`
+	Sort   string `query:"sort" enum:"name,track_count" default:"name" doc:"Sort key; ties are ordered by name and ID ascending."`
+	Order  string `query:"order" enum:"asc,desc" default:"asc"`
+	Offset int    `query:"offset" minimum:"0" maximum:"1000000" default:"0" doc:"Artists to skip in the sorted list."`
+	Limit  int    `query:"limit" minimum:"1" maximum:"500" default:"100"`
 }
 
 type createArtistInput struct {
@@ -39,16 +44,18 @@ func registerArtists(api huma.API, log *slog.Logger, svc Library) {
 		Method:      http.MethodGet,
 		Path:        "/api/artists",
 		Summary:     "List artists",
-		Description: "Artists with their track count, in name order.",
+		Description: "Artists with their track count, sorted by `sort` and `order` (ties by name and ID ascending), a page at a time: read the next page with `offset`. `total` counts every artist matching `q`, on every page. No cursor.",
 		Tags:        tags,
 		Errors:      errorsWith(http.StatusUnprocessableEntity),
 	}, func(ctx context.Context, in *listArtistsInput) (*artistListOutput, error) {
-		as, err := svc.ListArtists(ctx, in.Query)
+		page, err := svc.ListArtists(ctx, library.ArtistFilter{
+			Query: in.Query, Sort: library.ArtistSort(in.Sort), Desc: in.Order == "desc", Offset: in.Offset, Limit: in.Limit,
+		})
 		if err != nil {
 			return nil, err
 		}
-		out := &artistListOutput{Body: dto.ArtistList{Items: make([]dto.Artist, 0, len(as))}}
-		for _, a := range as {
+		out := &artistListOutput{Body: dto.ArtistList{Items: make([]dto.Artist, 0, len(page.Items)), Total: page.Total}}
+		for _, a := range page.Items {
 			out.Body.Items = append(out.Body.Items, artistDTO(a))
 		}
 		return out, nil

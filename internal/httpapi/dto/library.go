@@ -92,9 +92,10 @@ type Artist struct {
 	TrackCount int    `json:"track_count"`
 }
 
-// ArtistList is the artists in name order.
+// ArtistList is a page of artists in the requested order.
 type ArtistList struct {
 	Items []Artist `json:"items" nullable:"false"`
+	Total int      `json:"total" minimum:"0" doc:"Artists matching q, on every page."`
 }
 
 // ArtistBody is the body of POST /api/artists and PUT /api/artists/{id}.

@@ -23,7 +23,7 @@ type Library interface {
 	DeletePlaylist(ctx context.Context, id uint64) error
 	SetPlaylistTracks(ctx context.Context, id uint64, trackIDs []uint64) (library.Playlist, error)
 
-	ListArtists(ctx context.Context, query string) ([]library.Artist, error)
+	ListArtists(ctx context.Context, f library.ArtistFilter) (library.ArtistPage, error)
 	GetArtist(ctx context.Context, id uint64) (library.Artist, error)
 	CreateArtist(ctx context.Context, name string) (library.Artist, error)
 	RenameArtist(ctx context.Context, id uint64, name string) (library.Artist, error)

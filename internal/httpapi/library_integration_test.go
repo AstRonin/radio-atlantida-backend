@@ -518,6 +518,7 @@ func TestLibraryPlaylistsArtistsTracks(t *testing.T) {
 	var artists dto.ArtistList
 	a.ok(http.StatusOK, http.MethodGet, "/api/artists?q=ab", nil, &artists)
 	require.Len(t, artists.Items, 1)
+	require.Equal(t, 1, artists.Total)
 	a.problem(http.StatusNotFound, errcodes.TrackNotFound, http.MethodGet, "/api/tracks/9999", nil)
 	a.problem(http.StatusNotFound, errcodes.ArtistNotFound, http.MethodPut, "/api/artists/9999", map[string]any{"name": "Nobody"})
 }
@@ -576,6 +577,16 @@ func TestLibraryDeleteRefusals(t *testing.T) {
 		"title": "Aired", "type_id": music, "playlist_ids": []uint64{},
 	}, nil)
 	a.problem(http.StatusConflict, errcodes.ArtistHasHistory, http.MethodDelete, fmt.Sprintf("/api/artists/%d", gone.ID), nil)
+	// Nothing cascades: the refused artists keep their tracks.
+	var kept dto.Artist
+	a.ok(http.StatusOK, http.MethodGet, fmt.Sprintf("/api/artists/%d", abba.ID), nil, &kept)
+	require.Equal(t, 1, kept.TrackCount)
+
+	// An artist without tracks or play history goes.
+	var unused dto.Artist
+	a.ok(http.StatusCreated, http.MethodPost, "/api/artists", map[string]any{"name": "Unused"}, &unused)
+	a.ok(http.StatusNoContent, http.MethodDelete, fmt.Sprintf("/api/artists/%d", unused.ID), nil, nil)
+	a.problem(http.StatusNotFound, errcodes.ArtistNotFound, http.MethodGet, fmt.Sprintf("/api/artists/%d", unused.ID), nil)
 
 	// Play rules: in use while applied to a track or a playlist.
 	var rule dto.PlayRule
