@@ -8,7 +8,7 @@ Last updated: 2026-11-10
 The system manages a radio station's programming and broadcasts it online. It covers:
 
 - a content library (tracks, jingles, news, segments) organized into playlists, where every playlist has a type that the manager can extend;
-- hourly clock templates (60 minutes) and a weekly grid that assigns clocks to time slots, planned up to 30 days ahead;
+- hourly clock templates (60 minutes) and a weekly grid that assigns clocks to time slots, planned up to 183 days (about six months) ahead (`rotation.grid_horizon_days`, §6.3);
 - a rolling track plan (24 to 48 hours) that respects play rules (time windows, track and artist intervals, plays per hour);
 - play rules (time windows, minimum intervals, plays per hour) that the manager creates on a separate page and applies to tracks or playlists, mostly for jingles;
 - a play button for tracks in the panel, so the manager can listen without leaving the admin;
@@ -145,7 +145,7 @@ Entities are stored in separate tables and linked by IDs. Foreign keys are enfor
 - **clock_playlists** (v7-23): clock_id (FK, `ON DELETE CASCADE`), playlist_id (FK, `ON DELETE RESTRICT`: a playlist in a clock cannot be deleted), position, clock_rule (nullable: the playlist's own rule), clock_count (nullable; `spread` only), fill_weight (smallint 1 to 100, nullable). Primary key (clock_id, playlist_id), unique (clock_id, position).
   - A clock has at least one playlist whose effective rule is `fill`. Either every fill row of a clock has a `fill_weight` or none has (checked by the service, which knows the effective rule).
 - **clock_inserts** (v7-23): id, clock_id (FK, `ON DELETE CASCADE`), offset_ms (0 to 3 599 000, whole seconds), tolerance_ms (default 60000, 0 to 600000), track_id (nullable, FK `ON DELETE RESTRICT`), playlist_id (nullable, FK `ON DELETE RESTRICT`). Exactly one of track_id and playlist_id is set; unique (clock_id, offset_ms). A timed insert of the template: it plays in every hour of the clock (§7.2).
-- **grid_slots**: id, weekday (1 = Monday to 7 = Sunday), hour, clock_id, valid_from, valid_to (dates, both inclusive; null `valid_to` is open-ended). Weekday and hour are in station local time (see §10.2). Covers up to 30 days ahead.
+- **grid_slots**: id, weekday (1 = Monday to 7 = Sunday), hour, clock_id, valid_from, valid_to (dates, both inclusive; null `valid_to` is open-ended). Weekday and hour are in station local time (see §10.2). Covers up to the grid horizon ahead (`rotation.grid_horizon_days`, 1 to 183 days, default 183).
   - At most one clock per weekday and hour on any date: an exclusion constraint forbids two slots with the same weekday and hour and overlapping date ranges.
   - Saving a slot that overlaps an existing one replaces the existing slot for the overlapping dates, in one transaction, and the result names the replaced slot. A partly covered slot is trimmed or split to the dates outside the new one. A fully covered slot is deleted, whether or not it has aired; its history rows keep their `clock_id` and lose only `grid_slot_id` (`ON DELETE SET NULL`).
 - **scheduled_items**: id, grid_slot_id, clock_id, track_id, planned_start_utc, planned_in_ms, planned_out_ms, truncated (bool, default false), source (`fill`, `rule`, `insert`, `hour_insert`, `reschedule`, `general`; v7-23), status (`planned`, `queued`, `aired`, `missed`, `replaced`), outage_id (nullable, FK to `broadcast_outages`), missed_at (timestamptz, nullable), reschedule_of_id (nullable, FK to `play_log`: the missed item this item replaces; set only when `source = reschedule`), created_at. The rolling track plan, covering 24 to 48 hours ahead.
@@ -307,7 +307,7 @@ Everything the backend needs is managed by the manager in the Angular admin pane
 - **Liquidsoap**: default music gain, the music level under live voice (`liquidsoap.duck_gain`, default 0.2; v7-15), fade lengths (including `fade_out_ms`, default 2500, allowed 2000 to 3000), harbor input port, control host and port, and the media directory as Liquidsoap sees it (`liquidsoap.media_root`, default `/media`).
 - **Playout**: the emergency playlist (§8.6), and how long before its start an hour's first items are pushed to Liquidsoap (`playout.prepush_minutes`, default 5). From then on the hour is frozen: it is not rebuilt, and one-time inserts cannot be added to it or removed from it.
 - **Air window** (v7-17): how many played items (`air.played_count`, default 10, allowed 1 to 50) and queued items (`air.queued_count`, default 9, allowed 0 to 50) `GET /api/air-window` returns around the item on air. A change applies to the next request.
-- **Rotation**: planning horizons (grid up to 30 days, track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), the default start tolerance of a new insert (`rotation.default_fixed_tolerance_ms`, default 60 s), and the shortest gap that gets music (`rotation.min_gap_ms`, default 10 s). Separation values, duration tolerances, the filler settings, and the tolerance relaxation are removed in v7-23: separation is a play rule (§7.3).
+- **Rotation**: planning horizons (grid: `rotation.grid_horizon_days`, 1 to 183 days, default 183, about six months; track plan 24 to 48 hours), lookahead depth (2 to 3 tracks), the default start tolerance of a new insert (`rotation.default_fixed_tolerance_ms`, default 60 s), and the shortest gap that gets music (`rotation.min_gap_ms`, default 10 s). Separation values, duration tolerances, the filler settings, and the tolerance relaxation are removed in v7-23: separation is a play rule (§7.3).
 - **Outage detection**: heartbeat timeout for the Liquidsoap callback and control link (default 10 seconds), Icecast mount check interval (default 5 seconds), and the number of consecutive failed checks before an outage is opened (default 2).
 - **Retention**: play log days (default 10). Missed items are not subject to the play log days setting while they are open (see §4.1). Log retention is not an admin setting: Loki keeps 10 days as deploy configuration (§10.4).
 - **Import** (v7-14; the inbox and library folder settings are removed in v7-18, the import registers files where they lie, §8.7): the broadcast standard of track files: target codec (`mp3`, `aac`, or `vorbis`; default `mp3`), bitrate (320 kbps), sample rate (44100 Hz), channels (2); the lowest acceptable bitrate of a lossy file (128 kbps), the loudness tolerance around `stream.loudness_target_lufs` (2 LU), and the highest true peak (−1 dBTP).
@@ -549,7 +549,7 @@ The manager and the operator can listen to any track in the panel, without leavi
 
 The engine works on three horizons, each with its own job.
 
-**Grid (up to 30 days).** The grid is read, not computed. It says which clock plays in each hour. Changing the grid marks affected planned items as stale (see "Grid and clock changes" below).
+**Grid (up to 183 days).** The grid is read, not computed. It says which clock plays in each hour. Changing the grid marks affected planned items as stale (see "Grid and clock changes" below).
 
 **Track plan (rolling 24 to 48 hours).** Every hour, Go extends the plan so that it always covers the configured window. For each upcoming hour with a clock, the hour is built from the clock's playlists and inserts and the hour's one-time inserts (v7-23, `docs/phase-23-plan.md` §3.3):
 
@@ -1085,7 +1085,7 @@ The open questions from the previous version are closed. The decisions are recor
 
 ## 12. Non-functional Requirements
 
-- The clock grid covers up to 30 days ahead. The track plan is generated automatically and covers a rolling window of 24 to 48 hours.
+- The clock grid covers up to 183 days (about six months) ahead. The track plan is generated automatically and covers a rolling window of 24 to 48 hours.
 - A failure in the management panel or API must not stop the air. Playout continues from the planned queue.
 - Rotation generation for one hour completes within a few seconds for a library of tens of thousands of tracks.
 - The play log holds at most 10 days of aired history. Open missed items are kept until resolved.

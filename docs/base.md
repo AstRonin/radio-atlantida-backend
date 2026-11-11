@@ -11,7 +11,7 @@
   * The manager can play any track directly in the admin panel (a play button next to the track in playlists and in the library), without looking for the file on disk. The preview plays in the browser only and never goes to air.
 * Automated Scheduling: Auto-generation of broadcasting schedules for 24 hours in advance, ideally up to a month.
 * Planning Horizons:
-  * The clock grid (which clock plays in which hour) covers up to 30 days ahead and is edited explicitly by the operator.
+  * The clock grid (which clock plays in which hour) covers up to six months (183 days) ahead and is edited explicitly by the operator.
   * The track plan (concrete tracks per hour) covers a rolling window of 24 to 48 hours and is extended automatically.
   * Liquidsoap holds only the next 2 to 3 tracks.
 * Clock Rules & Rotation:
@@ -37,7 +37,7 @@
   * The manager can reschedule a missed item into a following hour. The manager chooses the placement (start, end, or a fixed time with seconds), and the hour is rebuilt around it like any other one-time insert. This is a one-time change for that hour; the clock template is not changed. If the item does not fit, the request is refused.
   * The manager can also dismiss a missed item if it should not be broadcast again.
   * If the outage ends while the backend is down, the system reconciles what actually aired from the playout log kept by Liquidsoap, so the played-tracks list is accurate after recovery.
-* Grid Management: Ability to create various clock templates and assign them to specific hours, days, and timeslots, up to 30 days ahead.
+* Grid Management: Ability to create various clock templates and assign them to specific hours, days, and timeslots, up to six months (183 days) ahead.
 * Play Rules: A separate page where the manager creates named, reusable play rules and applies them to tracks (mainly jingles) or to whole playlists. This replaces dayparting.
   * A rule may combine: a time window of the day with weekdays (for example, 06:00 to 08:00), a minimum interval between plays of the same track (for example, 10 minutes, or 72 hours), a minimum interval between tracks of the same artist (for example, 2 hours), and a maximum number of plays per hour (for example, 1).
   * Separation is a play rule: the default rule "Music rotation" (a track at most once per 72 hours; its artist interval is copied from the reference software) is attached to the music playlists. There are no separate separation rules. Only items that actually aired or are planned count; items marked as missed do not. An interval cannot be longer than the play log is kept.
