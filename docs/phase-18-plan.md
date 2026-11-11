@@ -25,6 +25,8 @@ This replaces the inbox model of phase 11 (inbox folder, library folder, files m
    - `in_library`: a track has this path, with `track_id`;
    - `original`: the original of a transcoded copy (2.8), with the `track_id` of the copy's track;
    - `not_audio`: not taken by an import.
+
+   Later extended (`docs/import-file-details-plan.md`): `in_library` and `original` files also carry `track`, a summary of the track from the database (title, artist, durations, format, codec, bitrate, sample rate, channels, quality issues, reviewed mark; for `original` it is the copy's track); `new` files carry `name_title` and `name_artist`, the guess from the file name by the rule of 6a. The listing still reads no file. One file is probed on request with `GET /api/import/file-info?path=` (technical facts, tags, and the title and artist an import would give it, with their source).
 6. **Import body.** `POST /api/import` takes `folder` (optional, absent or empty: the media root), `type_id` (required), `playlist_ids` (optional), and `artist_id` (optional, an existing artist; unknown ID: 422, field `artist_id`, rule `unknown_id`). The type, the playlists, and the artist apply to the new tracks of this run only; tracks that already exist are not changed (their type, playlists, and artist stay as the manager set them). A new artist is created on the artists page first; the import body takes an ID, not a name.
 6a. **Title and artist of a new track.** The title is never a path and never has the extension; `file_path` holds the path. Both are decided per file, each on its own:
    - **Artist**: the `artist_id` of the body when given (it wins over everything); else the artist tag; else the artist part of the file name (below); else none.
