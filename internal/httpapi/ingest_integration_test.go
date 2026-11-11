@@ -69,6 +69,7 @@ func TestImportFolder(t *testing.T) {
 		t.Log("ffmpeg not installed: only the refusals are checked")
 		a.problem(http.StatusServiceUnavailable, errcodes.MediaToolsUnavailable, http.MethodPost, "/api/import", map[string]any{"type_id": music})
 		a.problem(http.StatusServiceUnavailable, errcodes.MediaToolsUnavailable, http.MethodPost, "/api/tracks/analyse", map[string]any{})
+		a.problem(http.StatusServiceUnavailable, errcodes.MediaToolsUnavailable, http.MethodGet, "/api/import/file-info?path=a.mp3", nil)
 		return
 	}
 
@@ -93,6 +94,50 @@ func TestImportFolder(t *testing.T) {
 		"music/talk": {AudioFiles: 1, NewFiles: 1},
 	}, folders)
 
+	// Before the import: the file-name guess in the listing, and one probe.
+	var files dto.ImportFiles
+	a.ok(http.StatusOK, http.MethodGet, "/api/import/files?folder=music", nil, &files)
+	byPath := map[string]dto.ImportFile{}
+	for _, f := range files.Items {
+		byPath[f.Path] = f
+	}
+	require.Equal(t, "Morning", *byPath["music/DJ Ann - Morning.mp3"].NameTitle)
+	require.Equal(t, "DJ Ann", *byPath["music/DJ Ann - Morning.mp3"].NameArtist)
+	require.Equal(t, "Jay-Z - Song", *byPath["music/Jay-Z - Song.mp3"].NameTitle)
+	require.Nil(t, byPath["music/Jay-Z - Song.mp3"].NameArtist)
+	require.Nil(t, byPath["music/readme.txt"].NameTitle)
+	require.Nil(t, byPath["music/DJ Ann - Morning.mp3"].Track)
+
+	var info dto.ImportFileInfo
+	a.ok(http.StatusOK, http.MethodGet, "/api/import/file-info?path="+url.QueryEscape("music/talk/low.mp3"), nil, &info)
+	require.Equal(t, "music/talk/low.mp3", info.Path)
+	require.InDelta(t, 3000, info.DurationMS, 100)
+	require.Equal(t, "mp3", *info.Format)
+	require.Equal(t, "mp3", *info.Codec)
+	require.Equal(t, 22050, *info.SampleRate)
+	require.Equal(t, 1, *info.Channels)
+	require.Equal(t, "Low Tone", *info.Tags.Title)
+	require.Equal(t, "Test Artist", *info.Tags.Artist)
+	require.Equal(t, "Low Tone", info.Title)
+	require.Equal(t, "tag", info.TitleSource)
+	require.Equal(t, "Test Artist", *info.Artist)
+	require.Equal(t, "tag", info.ArtistSource)
+	require.Equal(t, []string{"sample_rate", "channels", "low_bitrate"}, info.Issues, "no loudness without a decode")
+	a.ok(http.StatusOK, http.MethodGet, "/api/import/file-info?path="+url.QueryEscape("music/Jay-Z - Song.mp3"), nil, &info)
+	require.Nil(t, info.Tags.Title)
+	require.Equal(t, "Jay-Z - Song", info.Title)
+	require.Equal(t, "file_name", info.TitleSource)
+	require.Nil(t, info.Artist)
+	require.Equal(t, "none", info.ArtistSource)
+	require.Empty(t, info.Issues)
+	a.fieldError("path", errcodes.NotAudio, http.MethodGet, "/api/import/file-info?path=music/readme.txt", nil)
+	a.fieldError("path", errcodes.Invalid, http.MethodGet, "/api/import/file-info?path=..%2Fetc%2Fpasswd.mp3", nil)
+	a.fieldError("path", errcodes.Invalid, http.MethodGet, "/api/import/file-info?path=.trash%2Fa.mp3", nil)
+	a.problem(http.StatusNotFound, errcodes.ImportFileNotFound, http.MethodGet, "/api/import/file-info?path=music/none.mp3", nil)
+	require.NoError(t, os.WriteFile(filepath.Join(a.mediaRoot, "music", "broken.mp3"), []byte("not audio"), 0o600))
+	a.problem(http.StatusUnprocessableEntity, errcodes.ProbeFailed, http.MethodGet, "/api/import/file-info?path=music/broken.mp3", nil)
+	require.NoError(t, os.Remove(filepath.Join(a.mediaRoot, "music", "broken.mp3")))
+
 	a.fieldError("folder", errcodes.Invalid, http.MethodPost, "/api/import", map[string]any{"folder": "missing", "type_id": jingle})
 	a.fieldError("type_id", errcodes.UnknownID, http.MethodPost, "/api/import", map[string]any{"type_id": 999999})
 	a.fieldError("playlist_ids", errcodes.UnknownID, http.MethodPost, "/api/import", map[string]any{"type_id": music, "playlist_ids": []uint64{999999}})
@@ -111,12 +156,22 @@ func TestImportFolder(t *testing.T) {
 	_, folders = a.folderCounts()
 	require.Equal(t, dto.ImportCounts{AudioFiles: 2, NewFiles: 0}, folders["jingles"])
 
-	var files dto.ImportFiles
+	files = dto.ImportFiles{} // json reuses the old items: omitted fields would stay
 	a.ok(http.StatusOK, http.MethodGet, "/api/import/files?folder=jingles", nil, &files)
 	require.Equal(t, "jingles", files.Folder)
 	require.Len(t, files.Items, 2)
 	require.Equal(t, "in_library", files.Items[0].Status)
 	require.Equal(t, id1.ID, *files.Items[0].TrackID)
+	tr := files.Items[0].Track
+	require.NotNil(t, tr, "the track from the database")
+	require.Equal(t, id1.ID, tr.ID)
+	require.Equal(t, "id1", tr.Title)
+	require.Nil(t, tr.Artist)
+	require.Equal(t, id1.DurationMS, tr.DurationMS)
+	require.Equal(t, id1.AirDurationMS, tr.AirDurationMS)
+	require.Equal(t, id1.SampleRate, tr.SampleRate)
+	require.Equal(t, id1.QualityIssues, tr.QualityIssues)
+	require.Nil(t, files.Items[0].NameTitle, "no file-name guess for a known file")
 
 	// A third jingle: the next import adds exactly that one.
 	a.tone("jingles/id3.mp3", append(good, "-metadata", "comment=5")...)
@@ -186,10 +241,14 @@ func TestImportFolder(t *testing.T) {
 	a.ok(http.StatusOK, http.MethodPost, "/api/tracks/review", map[string]any{"track_ids": []uint64{low.ID}, "reviewed": true}, &reviewed)
 	_, err = os.Stat(filepath.Join(a.mediaRoot, "music", "talk", "low.mp3"))
 	require.NoError(t, err, "the original stays next to the copy")
+	files = dto.ImportFiles{} // json reuses the old items: omitted fields would stay
 	a.ok(http.StatusOK, http.MethodGet, "/api/import/files?folder=music/talk", nil, &files)
 	require.Len(t, files.Items, 2)
 	require.Equal(t, "original", files.Items[0].Status, "the original is not new")
 	require.Equal(t, low.ID, *files.Items[0].TrackID)
+	require.Equal(t, 2, *files.Items[0].Track.Channels, "the facts of the copy, not of the mono original")
+	require.Equal(t, "Test Artist", *files.Items[0].Track.Artist)
+	require.NotNil(t, files.Items[0].Track.ReviewedAt)
 	_, folders = a.folderCounts()
 	require.Equal(t, dto.ImportCounts{AudioFiles: 2, NewFiles: 0}, folders["music/talk"])
 

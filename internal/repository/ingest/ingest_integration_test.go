@@ -203,6 +203,44 @@ func TestTrackPaths(t *testing.T) {
 	require.Empty(t, got)
 }
 
+func TestTrackSummaries(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	a := analysis("music/a.mp3", "s1", library.IssueLoudness, library.IssueLowBitrate)
+	full, err := f.store.CreateTrack(ctx, ingest.NewTrack{Title: "Waterloo", ArtistID: &f.artist, TypeID: f.music, Analysis: a})
+	require.NoError(t, err)
+	f.exec(`UPDATE tracks SET cue_in_ms = 1000, cue_out_ms = 170000, reviewed_at = $2 WHERE id = $1`, full, now.Add(time.Hour))
+	bare := f.id(`INSERT INTO tracks (title, file_path, type_id) VALUES ('Bare', 'music/rock/b.optimal.mp3', $1) RETURNING id`, f.music)
+	f.id(`INSERT INTO tracks (title, file_path, type_id) VALUES ('Old', 'music-old/c.mp3', $1) RETURNING id`, f.music)
+	f.id(`INSERT INTO tracks (title, file_path, type_id) VALUES ('Top', 'top.mp3', $1) RETURNING id`, f.music)
+
+	got, err := f.store.TrackSummaries(ctx, "music")
+	require.NoError(t, err)
+	require.Len(t, got, 2, "only below music/")
+	byID := map[uint64]ingest.TrackSummary{}
+	for _, s := range got {
+		byID[s.ID] = s
+	}
+	require.Equal(t, ingest.TrackSummary{
+		ID: full, FilePath: "music/a.mp3", Title: "Waterloo", Artist: "ABBA",
+		DurationMS: new(180000), AirDurationMS: new(169000), Format: new(media.FormatMP3), Codec: new("mp3"),
+		Bitrate: new(320000), SampleRate: new(44100), Channels: new(2),
+		QualityIssues: []library.QualityIssue{library.IssueLoudness, library.IssueLowBitrate},
+		ReviewedAt:    new(now.Add(time.Hour)),
+	}, byID[full])
+	require.Equal(t, ingest.TrackSummary{
+		ID: bare, FilePath: "music/rock/b.optimal.mp3", Title: "Bare", QualityIssues: []library.QualityIssue{},
+	}, byID[bare], "no artist, nothing analysed")
+
+	got, err = f.store.TrackSummaries(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, got, 4)
+	got, err = f.store.TrackSummaries(ctx, "missing")
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
 func TestEnsureArtist(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

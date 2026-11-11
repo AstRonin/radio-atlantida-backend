@@ -127,6 +127,17 @@ func (f *fakeFiles) IsDir(rel string) (bool, error) {
 	return false, nil
 }
 
+func (f *fakeFiles) Stat(rel string) (media.File, error) {
+	if err := media.ValidatePath(rel); err != nil {
+		return media.File{}, err
+	}
+	c, ok := f.get(rel)
+	if !ok {
+		return media.File{}, media.ErrFileNotFound
+	}
+	return media.File{Path: rel, Size: int64(len(c)), ModTime: testNow}, nil
+}
+
 func (f *fakeFiles) Checksum(_ context.Context, rel string) (string, error) {
 	f.mu.Lock()
 	f.reads++
@@ -376,6 +387,28 @@ func (s *fakeStore) TrackPaths(_ context.Context, folder string) (map[string]uin
 		if folder == "" || strings.HasPrefix(t.FilePath, folder+"/") {
 			out[t.FilePath] = id
 		}
+	}
+	return out, nil
+}
+
+func (s *fakeStore) TrackSummaries(_ context.Context, folder string) ([]TrackSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []TrackSummary
+	for id, t := range s.tracks {
+		if folder != "" && !strings.HasPrefix(t.FilePath, folder+"/") {
+			continue
+		}
+		m := t.Measurements
+		ts := TrackSummary{
+			ID: id, FilePath: t.FilePath, Title: t.Title, DurationMS: m.DurationMS, AirDurationMS: m.DurationMS,
+			Format: m.Format, Codec: m.Codec, Bitrate: m.Bitrate, SampleRate: m.SampleRate, Channels: m.Channels,
+			QualityIssues: append([]library.QualityIssue{}, t.Issues...),
+		}
+		if t.ArtistID != nil {
+			ts.Artist = s.artists[*t.ArtistID]
+		}
+		out = append(out, ts)
 	}
 	return out, nil
 }

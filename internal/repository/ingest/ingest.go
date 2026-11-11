@@ -143,6 +143,94 @@ func (s *Store) TrackPaths(ctx context.Context, folder string) (map[string]uint6
 	return out, nil
 }
 
+const (
+	// trackSummariesSQL selects every track with its artist.
+	trackSummariesSQL = `
+SELECT t.id, t.file_path, t.title, a.name AS artist, t.duration_ms, t.air_duration_ms, t.format, t.codec,
+       t.bitrate, t.sample_rate, t.channels, t.quality_issues, t.reviewed_at
+FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id`
+	// trackSummariesUnderSQL selects the tracks under a folder with their
+	// artist, by the same path range as trackPathsUnderSQL.
+	trackSummariesUnderSQL = trackSummariesSQL + `
+WHERE t.file_path ~>=~ $1 AND t.file_path ~<~ $2`
+)
+
+type summaryRow struct {
+	ID            uint64     `db:"id"`
+	FilePath      string     `db:"file_path"`
+	Title         string     `db:"title"`
+	Artist        *string    `db:"artist"`
+	DurationMS    *int       `db:"duration_ms"`
+	AirDurationMS *int       `db:"air_duration_ms"`
+	Format        *string    `db:"format"`
+	Codec         *string    `db:"codec"`
+	Bitrate       *int       `db:"bitrate"`
+	SampleRate    *int       `db:"sample_rate"`
+	Channels      *int       `db:"channels"`
+	QualityIssues []string   `db:"quality_issues"`
+	ReviewedAt    *time.Time `db:"reviewed_at"`
+}
+
+func (r summaryRow) domain() ingest.TrackSummary {
+	t := ingest.TrackSummary{
+		ID: r.ID, FilePath: r.FilePath, Title: r.Title, DurationMS: r.DurationMS, AirDurationMS: r.AirDurationMS,
+		Format: r.Format, Codec: r.Codec, Bitrate: r.Bitrate, SampleRate: r.SampleRate, Channels: r.Channels,
+		QualityIssues: make([]library.QualityIssue, len(r.QualityIssues)),
+	}
+	if r.Artist != nil {
+		t.Artist = *r.Artist
+	}
+	for i, c := range r.QualityIssues {
+		t.QualityIssues[i] = library.QualityIssue(c)
+	}
+	if r.ReviewedAt != nil {
+		t.ReviewedAt = new(r.ReviewedAt.UTC())
+	}
+	return t
+}
+
+// TrackSummaries returns the tracks under folder ("" for every track) with
+// their artist and the facts the import listing shows. Only the file
+// listing reads it; the folder counts and the import need only the paths
+// (TrackPaths).
+//
+// EXPLAIN ANALYZE (PostgreSQL 17.11, TestTrackSummariesUsesTheIndex: 3,000
+// tracks in 30 folders, 300 artists, folder f07):
+//
+//	Hash Left Join (actual rows=100 loops=1)
+//	  Hash Cond: (t.artist_id = a.id)
+//	  ->  Bitmap Heap Scan on tracks t (actual rows=100 loops=1)
+//	        Recheck Cond: ((file_path ~>=~ 'f07/'::text) AND (file_path ~<~ 'f070'::text))
+//	        Heap Blocks: exact=49
+//	        ->  Bitmap Index Scan on ix_tracks_file_path (actual rows=100 loops=1)
+//	              Index Cond: ((file_path ~>=~ 'f07/'::text) AND (file_path ~<~ 'f070'::text))
+//	  ->  Hash (actual rows=300 loops=1)
+//	        Buckets: 1024  Batches: 1  Memory Usage: 23kB
+//	        ->  Seq Scan on artists a (actual rows=300 loops=1)
+//	Planning Time: 0.242 ms
+//	Execution Time: 0.086 ms
+//
+// The artists are hashed whole: a station has a few hundred.
+func (s *Store) TrackSummaries(ctx context.Context, folder string) ([]ingest.TrackSummary, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if folder == "" {
+		rows, err = s.q.Query(ctx, trackSummariesSQL)
+	} else {
+		rows, err = s.q.Query(ctx, trackSummariesUnderSQL, folder+"/", folder+"0")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select track summaries: %w", err)
+	}
+	ts, err := db.CollectAll(rows, summaryRow.domain)
+	if err != nil {
+		return nil, fmt.Errorf("scan track summaries: %w", err)
+	}
+	return ts, nil
+}
+
 // EnsureArtist returns the artist with the name, ignoring case, and creates
 // it when there is none. The case-insensitive lookup scans artists: a
 // library has a few thousand, and an import looks up one per file.

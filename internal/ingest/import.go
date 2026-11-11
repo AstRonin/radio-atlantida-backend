@@ -1,7 +1,6 @@
 package ingest
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
-	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
@@ -261,19 +259,14 @@ func (im *importer) file(ctx context.Context, f media.File) string {
 
 // register creates the track at a.FilePath and, when needed, its artist,
 // in one transaction, and returns its ID. The title and the artist are
-// decided each on its own (decision 6a): the title from the tag, else from
-// the file name; the artist from the request, else the tag, else the file
-// name, else none.
+// importNames (decision 6a), the same rule GET /api/import/file-info
+// reports; the artist of the request wins over the artist there.
 func (im *importer) register(ctx context.Context, info media.Info, a Analysis) (uint64, error) {
 	s := im.s
-	base := path.Base(a.FilePath)
-	nameTitle, nameArtist := nameParts(strings.TrimSuffix(base, path.Ext(base)))
-	// The title rule (docs/phase-21-plan.md §2, decision 5) removes what the
-	// API refuses: control characters and runs of white space.
-	title := cmp.Or(library.CleanTitle(info.Title), library.CleanTitle(nameTitle))
-	artist := cmp.Or(strings.TrimSpace(info.Artist), nameArtist)
+	names := importNames(a.FilePath, info)
+	artist := names.Artist
 	nt := NewTrack{
-		Title: truncate(title, library.MaxTitleLength), ArtistID: im.req.ArtistID,
+		Title: names.Title, ArtistID: im.req.ArtistID,
 		TypeID: im.req.TypeID, PlaylistIDs: im.req.PlaylistIDs, Analysis: a,
 	}
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
@@ -282,7 +275,7 @@ func (im *importer) register(ctx context.Context, info media.Info, a Analysis) (
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		st := s.store.WithTx(tx)
 		if nt.ArtistID == nil && artist != "" {
-			aid, err := st.EnsureArtist(ctx, truncate(artist, maxArtistLength))
+			aid, err := st.EnsureArtist(ctx, artist)
 			if err != nil {
 				return fmt.Errorf("artist %q: %w", artist, err)
 			}

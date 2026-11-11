@@ -76,6 +76,9 @@ const (
 	// InsertSourceRequired: an insert names neither or both of a track and
 	// a playlist.
 	InsertSourceRequired Rule = "insert_source_required"
+	// NotAudio: the file is not one an import takes by its name (not an
+	// audio extension, or a temporary file).
+	NotAudio Rule = "not_audio"
 )
 
 // FieldError is the error of one request field.

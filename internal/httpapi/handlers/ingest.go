@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -16,6 +17,7 @@ import (
 type Ingest interface {
 	Folders(ctx context.Context) (ingest.Folders, error)
 	Files(ctx context.Context, folder string) (ingest.FolderFiles, error)
+	FileInfo(ctx context.Context, rel string) (ingest.FileInfo, error)
 	Import(ctx context.Context, req ingest.ImportRequest) (uint64, error)
 	Analyse(ctx context.Context, req ingest.AnalyseRequest) (uint64, error)
 	Transcode(ctx context.Context, req ingest.TranscodeRequest) (uint64, error)
@@ -33,6 +35,14 @@ type importFilesInput struct {
 
 type importFilesOutput struct {
 	Body dto.ImportFiles
+}
+
+type importFileInfoInput struct {
+	Path string `query:"path" required:"true" minLength:"1" maxLength:"1024" doc:"File relative to the media root (music/rock/DJ Ann - Morning.mp3), as path of GET /api/import/files."`
+}
+
+type importFileInfoOutput struct {
+	Body dto.ImportFileInfo
 }
 
 type importInput struct {
@@ -80,7 +90,7 @@ func registerIngest(api huma.API, log *slog.Logger, svc Ingest) {
 		Method:      http.MethodGet,
 		Path:        "/api/import/files",
 		Summary:     "List the files of a folder",
-		Description: "The files of a folder of the media root and its subfolders, in path order, at most 1,000, with what an import would do with each. " +
+		Description: "The files of a folder of the media root and its subfolders, in path order, at most 2,000, with what an import would do with each. " +
 			"A folder that is not a clean relative path, is hidden, or does not exist is refused per field (folder, invalid).",
 		Tags:   tags,
 		Errors: errorsWith(http.StatusUnprocessableEntity),
@@ -91,13 +101,30 @@ func registerIngest(api huma.API, log *slog.Logger, svc Ingest) {
 		}
 		out := &importFilesOutput{Body: dto.ImportFiles{Folder: fs.Folder, Items: make([]dto.ImportFile, len(fs.Files)), More: fs.More}}
 		for i, f := range fs.Files {
-			item := dto.ImportFile{Path: f.Path, Size: f.Size, ModifiedAt: f.ModTime.UTC(), Status: string(f.Status)}
-			if f.TrackID != 0 {
-				item.TrackID = new(f.TrackID)
-			}
-			out.Body.Items[i] = item
+			out.Body.Items[i] = importFile(f)
 		}
 		return out, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "get-import-file-info",
+		Method:      http.MethodGet,
+		Path:        "/api/import/file-info",
+		Summary:     "Probe a file before importing it",
+		Description: "Reads the headers of one file of the media root with ffprobe (no decode): duration, format, codec, bitrate, sample rate, channels, " +
+			"the title and artist tags, the title and artist an import would give it and where each comes from, and the quality issues the probe shows " +
+			"(no loudness or true peak). Nothing is stored or cached; it is not a media operation and runs beside one, at most two at a time. " +
+			"A path that is not a clean relative path or is hidden is refused per field (path, invalid), a file an import skips by its name " +
+			"per field (path, not_audio). 404 import_file_not_found when no file is at the path; 422 probe_failed when the file is not readable as audio " +
+			"(an import would skip it as unreadable); 503 media_tools_unavailable without ffprobe.",
+		Tags:   tags,
+		Errors: errorsWith(http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusServiceUnavailable),
+	}, func(ctx context.Context, in *importFileInfoInput) (*importFileInfoOutput, error) {
+		fi, err := svc.FileInfo(ctx, in.Path)
+		if err != nil {
+			return nil, err
+		}
+		return &importFileInfoOutput{Body: importFileInfo(fi)}, nil
 	})
 
 	register(api, log, huma.Operation{
@@ -164,4 +191,61 @@ func registerIngest(api huma.API, log *slog.Logger, svc Ingest) {
 
 func importCounts(c ingest.Counts) dto.ImportCounts {
 	return dto.ImportCounts{AudioFiles: c.AudioFiles, NewFiles: c.NewFiles}
+}
+
+func importFile(f ingest.FolderFile) dto.ImportFile {
+	item := dto.ImportFile{Path: f.Path, Size: f.Size, ModifiedAt: f.ModTime.UTC(), Status: string(f.Status)}
+	if f.TrackID != 0 {
+		item.TrackID = new(f.TrackID)
+	}
+	if t := f.Track; t != nil {
+		item.Track = &dto.ImportFileTrack{
+			ID: t.ID, Title: t.Title, Artist: optional(t.Artist), DurationMS: t.DurationMS, AirDurationMS: t.AirDurationMS,
+			Format: t.Format, Codec: t.Codec, Bitrate: t.Bitrate, SampleRate: t.SampleRate, Channels: t.Channels,
+			QualityIssues: issueCodes(t.QualityIssues), ReviewedAt: utc(t.ReviewedAt),
+		}
+	}
+	if f.Status == ingest.FileNew {
+		item.NameTitle, item.NameArtist = new(f.NameTitle), optional(f.NameArtist)
+	}
+	return item
+}
+
+func importFileInfo(fi ingest.FileInfo) dto.ImportFileInfo {
+	p := fi.Probe
+	out := dto.ImportFileInfo{
+		Path: fi.Path, Size: fi.Size, ModifiedAt: fi.ModTime.UTC(),
+		Format: p.Format, Codec: p.Codec, Bitrate: p.Bitrate, SampleRate: p.SampleRate, Channels: p.Channels,
+		Tags:  dto.ImportFileTags{Title: optional(p.Title), Artist: optional(p.Artist)},
+		Title: fi.Names.Title, TitleSource: string(fi.Names.TitleSource),
+		Artist: optional(fi.Names.Artist), ArtistSource: string(fi.Names.ArtistSource),
+		Issues: issueCodes(fi.Issues),
+	}
+	if p.DurationMS != nil {
+		out.DurationMS = *p.DurationMS
+	}
+	return out
+}
+
+// optional is nil for an empty text.
+func optional(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func utc(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	return new(t.UTC())
+}
+
+func issueCodes(issues []library.QualityIssue) []string {
+	out := make([]string, len(issues))
+	for i, c := range issues {
+		out[i] = string(c)
+	}
+	return out
 }

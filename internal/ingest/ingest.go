@@ -36,6 +36,12 @@ var (
 	ErrRunning = errors.New("another media operation is running")
 	// ErrToolsUnavailable: ffmpeg or ffprobe is not installed.
 	ErrToolsUnavailable = errors.New("ffmpeg or ffprobe is not available")
+	// ErrFileNotFound: no regular file is at the path under the media root
+	// (FileInfo).
+	ErrFileNotFound = errors.New("no such file in the media folder")
+	// ErrProbeFailed: ffprobe could not read the file as audio (FileInfo):
+	// it failed, timed out, or found no audio stream or no duration.
+	ErrProbeFailed = errors.New("the file is not readable as audio")
 )
 
 // Track is a library track as the analysis sees it.
@@ -96,6 +102,9 @@ type Store interface {
 	// TrackPaths maps the file path of every track under folder ("" for
 	// every track) to the track.
 	TrackPaths(ctx context.Context, folder string) (map[string]uint64, error)
+	// TrackSummaries returns the tracks under folder ("" for every track)
+	// with what the import listing shows of them, in no order.
+	TrackSummaries(ctx context.Context, folder string) ([]TrackSummary, error)
 	// TrackByPath returns the track of the file path.
 	TrackByPath(ctx context.Context, path string) (id uint64, ok bool, err error)
 	// EnsureArtist returns the artist with the name, ignoring case, and
@@ -137,6 +146,7 @@ type Files interface {
 	Walk(ctx context.Context, dir string, limit int) ([]media.File, bool, error)
 	Tree(ctx context.Context, dir string, limit int) (media.Tree, error)
 	IsDir(rel string) (bool, error)
+	Stat(rel string) (media.File, error)
 	Checksum(ctx context.Context, rel string) (string, error)
 	Commit(tmp, dst string) error
 	Remove(rel string) error
@@ -217,6 +227,8 @@ type Service struct {
 	queue   chan job
 	// decodes holds a token per waveform decode running (waveformDecodes).
 	decodes chan struct{}
+	// probes holds a token per file-info probe running (fileInfoProbes).
+	probes chan struct{}
 }
 
 // NewService returns the service. log is the root logger; now is the
@@ -228,6 +240,7 @@ func NewService(tx TxRunner, store Store, uses FileUses, files Files, prober Pro
 		tx: tx, store: store, uses: uses, files: files, prober: prober, ff: ff, ops: ops, settings: settings,
 		log: logging.For(log, logging.ComponentMedia), now: now,
 		queue: make(chan job, 1), decodes: make(chan struct{}, waveformDecodes),
+		probes: make(chan struct{}, fileInfoProbes),
 	}
 }
 

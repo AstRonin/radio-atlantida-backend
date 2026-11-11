@@ -254,7 +254,7 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
 		"/api/outages",
 		"/api/live/session", "/api/live/status", "/api/broadcast/status", "/api/air-window",
-		"/api/import", "/api/import/folders", "/api/import/files", "/api/tracks/analyse", "/api/tracks/transcode",
+		"/api/import", "/api/import/folders", "/api/import/files", "/api/import/file-info", "/api/tracks/analyse", "/api/tracks/transcode",
 		"/api/tracks/delete", "/api/tracks/review", "/api/tracks/rename",
 		"/api/tracks/{id}/cue", "/api/tracks/{id}/waveform",
 	} {

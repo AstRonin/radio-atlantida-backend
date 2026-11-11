@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
 	"github.com/AstRonin/radio-atlantida-backend/internal/validation"
 )
@@ -70,6 +72,36 @@ type FolderFile struct {
 	// TrackID is the track of the file (in_library) or of its copy
 	// (original); 0 otherwise.
 	TrackID uint64
+	// Track is the track of TrackID as the database has it; nil for a new
+	// or not_audio file. For an original it describes the copy, not this
+	// file.
+	Track *TrackSummary
+	// NameTitle and NameArtist are the title and the artist an import
+	// reads from the file name (fileNames), for a new file only; the tags,
+	// when the file has them, win at the import. NameArtist is empty when
+	// the name gives none.
+	NameTitle  string
+	NameArtist string
+}
+
+// TrackSummary is what the import listing shows of a track: read from the
+// database, never from the file.
+type TrackSummary struct {
+	ID       uint64
+	FilePath string
+	Title    string
+	// Artist is the artist's name; empty for a track without one.
+	Artist        string
+	DurationMS    *int
+	AirDurationMS *int
+	Format        *string
+	Codec         *string
+	// Bitrate is in bits per second.
+	Bitrate       *int
+	SampleRate    *int
+	Channels      *int
+	QualityIssues []library.QualityIssue
+	ReviewedAt    *time.Time
 }
 
 // FolderFiles are the files of a folder and its subfolders.
@@ -143,14 +175,43 @@ func (s *Service) Files(ctx context.Context, folder string) (FolderFiles, error)
 	if err != nil {
 		return FolderFiles{}, fmt.Errorf("list folder: %w", err)
 	}
-	idx, err := s.libraryIndex(ctx, folder)
+	// One read gives both the statuses and the track facts; Folders and the
+	// import read only the paths (TrackPaths).
+	tracks, err := s.trackSummaries(ctx, folder)
 	if err != nil {
 		return FolderFiles{}, err
 	}
+	paths := make(map[string]uint64, len(tracks))
+	for id, t := range tracks {
+		paths[t.FilePath] = id
+	}
+	idx := newLibraryIndex(paths)
 	out := FolderFiles{Folder: folder, Files: make([]FolderFile, len(files)), More: more}
 	for i, f := range files {
 		st, id := idx.status(f.Path)
-		out.Files[i] = FolderFile{File: f, Status: st, TrackID: id}
+		ff := FolderFile{File: f, Status: st, TrackID: id}
+		switch st {
+		case FileInLibrary, FileOriginal:
+			ff.Track = tracks[id]
+		case FileNew:
+			ff.NameTitle, ff.NameArtist = fileNames(f.Path)
+		}
+		out.Files[i] = ff
+	}
+	return out, nil
+}
+
+// trackSummaries reads the tracks under folder ("" for every track) by ID.
+func (s *Service) trackSummaries(ctx context.Context, folder string) (map[uint64]*TrackSummary, error) {
+	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	ts, err := s.store.TrackSummaries(ctx, folder)
+	if err != nil {
+		return nil, fmt.Errorf("read tracks of the folder: %w", err)
+	}
+	out := make(map[uint64]*TrackSummary, len(ts))
+	for i := range ts {
+		out[ts[i].ID] = &ts[i]
 	}
 	return out, nil
 }

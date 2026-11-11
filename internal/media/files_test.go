@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +68,28 @@ func TestChecksum(t *testing.T) {
 	require.Equal(t, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", sum)
 	_, err = New(root).Checksum(t.Context(), "b.mp3")
 	require.ErrorIs(t, err, ErrFileNotFound)
+}
+
+func TestStat(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write(t, root, "music/a.mp3", "abc")
+	outside := filepath.Join(t.TempDir(), "o.mp3")
+	require.NoError(t, os.WriteFile(outside, []byte("o"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "music", "link.mp3")))
+	lib := New(root)
+
+	f, err := lib.Stat("music/a.mp3")
+	require.NoError(t, err)
+	require.Equal(t, "music/a.mp3", f.Path)
+	require.Equal(t, int64(3), f.Size)
+	require.Equal(t, time.UTC, f.ModTime.Location())
+	for _, rel := range []string{"music/b.mp3", "music", "music/link.mp3"} {
+		_, err = lib.Stat(rel)
+		require.ErrorIs(t, err, ErrFileNotFound, rel)
+	}
+	_, err = lib.Stat("../a.mp3")
+	require.ErrorIs(t, err, ErrInvalidPath)
 }
 
 func TestTree(t *testing.T) {

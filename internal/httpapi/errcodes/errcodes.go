@@ -148,6 +148,13 @@ const (
 	// LogsUnavailable: Loki did not answer in time, so the log lines cannot
 	// be read now; the logs are still written to stdout.
 	LogsUnavailable Problem = "logs_unavailable"
+	// ImportFileNotFound: no regular file is at the path under the media
+	// root (GET /api/import/file-info).
+	ImportFileNotFound Problem = "import_file_not_found"
+	// ProbeFailed: ffprobe could not read the file as audio (it failed,
+	// timed out, or found no audio stream or no duration); an import would
+	// skip it as unreadable.
+	ProbeFailed Problem = "probe_failed"
 )
 
 // Problems lists every problem code, in declaration order.
@@ -171,6 +178,7 @@ func Problems() []Problem {
 		LiveSessionActive, LiveOfferInvalid, LiveUnavailable,
 		TrackOnAir, TrackNotAnalysed, WaveformUnavailable,
 		RangeTooLong, LogsUnavailable,
+		ImportFileNotFound, ProbeFailed,
 	}
 }
 
@@ -245,6 +253,9 @@ const (
 	// InsertSourceRequired: an insert names exactly one of track_id and
 	// playlist_id.
 	InsertSourceRequired Field = "insert_source_required"
+	// NotAudio: an import skips the file by its name: not an audio
+	// extension (mp3, m4a, aac, ogg, oga, flac, wav), or a temporary file.
+	NotAudio Field = "not_audio"
 )
 
 // Fields lists every field error code, in declaration order.
@@ -253,7 +264,7 @@ func Fields() []Field {
 		Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit,
 		Order, Blocked, InvalidCharacters, CueOrder, CueBeyondEnd, AirTooShort, FadesTooLong,
 		IntervalBeyondRetention, FillPlaylistRequired, FillWeightsPartial, ClockCountRequired, ClockCountNotAllowed,
-		FillWeightNotAllowed, InsertOffsetTaken, InsertSourceRequired,
+		FillWeightNotAllowed, InsertOffsetTaken, InsertSourceRequired, NotAudio,
 	}
 }
 

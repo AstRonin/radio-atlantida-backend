@@ -164,6 +164,23 @@ func fileOf(p string, d fs.DirEntry) (File, error) {
 	return File{Path: p, Size: info.Size(), ModTime: info.ModTime().UTC()}, nil
 }
 
+// Stat returns the regular file at rel with its size and modification
+// time. It resolves the path as Open does: an invalid path returns
+// ErrInvalidPath; a missing file, a directory, or a path that leaves the
+// root returns ErrFileNotFound.
+func (l *Library) Stat(rel string) (File, error) {
+	f, err := l.Open(rel)
+	if err != nil {
+		return File{}, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return File{}, fmt.Errorf("stat media file %s: %w", rel, err)
+	}
+	return File{Path: rel, Size: info.Size(), ModTime: info.ModTime().UTC()}, nil
+}
+
 // Checksum returns the SHA-256 of the file at rel, in hex (§8.7: a changed
 // file is detected by its checksum).
 func (l *Library) Checksum(ctx context.Context, rel string) (string, error) {

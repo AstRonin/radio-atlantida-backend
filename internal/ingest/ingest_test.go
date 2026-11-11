@@ -375,6 +375,66 @@ func TestFiles(t *testing.T) {
 	require.Equal(t, int64(2), got.Files[3].Size)
 }
 
+func TestFilesTrackSummaryAndNameGuess(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.store.artists[7] = "ABBA"
+	m := goodMP3()
+	f.store.tracks[1] = &storedTrack{
+		Track:    Track{ID: 1, FilePath: "music/rock/b.mp3", Measurements: m, Issues: []library.QualityIssue{library.IssueLoudness}},
+		NewTrack: NewTrack{Title: "Waterloo", ArtistID: new(uint64(7))},
+	}
+	f.store.tracks[2] = &storedTrack{
+		Track:    Track{ID: 2, FilePath: "music/rock/c.optimal.mp3", Measurements: m},
+		NewTrack: NewTrack{Title: "Copy"},
+	}
+	for _, p := range []string{
+		"music/rock/b.mp3", "music/rock/c.flac", "music/rock/c.optimal.mp3", "music/notes.txt",
+		"music/DJ Ann - Morning.mp3", "music/DJ Ann–Evening.ogg", "music/Morning.mp3", "music/Jay-Z - Song.mp3",
+	} {
+		f.files.put(p, p)
+	}
+
+	got, err := f.svc.Files(t.Context(), "music")
+	require.NoError(t, err)
+	byPath := map[string]FolderFile{}
+	for _, file := range got.Files {
+		byPath[file.Path] = file
+	}
+
+	inLib := byPath["music/rock/b.mp3"]
+	require.Equal(t, FileInLibrary, inLib.Status)
+	require.NotNil(t, inLib.Track)
+	require.Equal(t, uint64(1), inLib.Track.ID)
+	require.Equal(t, "Waterloo", inLib.Track.Title)
+	require.Equal(t, "ABBA", inLib.Track.Artist)
+	require.Equal(t, 180000, *inLib.Track.DurationMS)
+	require.Equal(t, []library.QualityIssue{library.IssueLoudness}, inLib.Track.QualityIssues)
+	require.Empty(t, inLib.NameTitle, "no guess for a known file")
+
+	orig := byPath["music/rock/c.flac"]
+	require.Equal(t, FileOriginal, orig.Status)
+	require.NotNil(t, orig.Track)
+	require.Equal(t, "music/rock/c.optimal.mp3", orig.Track.FilePath, "the copy's track")
+	require.Empty(t, orig.Track.Artist)
+
+	require.Nil(t, byPath["music/notes.txt"].Track)
+	require.Empty(t, byPath["music/notes.txt"].NameTitle, "nothing for not_audio")
+
+	for p, want := range map[string][2]string{
+		"music/DJ Ann - Morning.mp3": {"Morning", "DJ Ann"},
+		"music/DJ Ann–Evening.ogg":   {"Evening", "DJ Ann"},
+		"music/Morning.mp3":          {"Morning", ""},
+		"music/Jay-Z - Song.mp3":     {"Jay-Z - Song", ""},
+	} {
+		file := byPath[p]
+		require.Equal(t, FileNew, file.Status, p)
+		require.Nil(t, file.Track, p)
+		require.Equal(t, want[0], file.NameTitle, p)
+		require.Equal(t, want[1], file.NameArtist, p)
+	}
+}
+
 func TestOneOperationAtATime(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

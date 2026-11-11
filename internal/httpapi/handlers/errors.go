@@ -161,6 +161,8 @@ var refusals = []refusal{
 	{ingest.ErrRunning, http.StatusConflict, errcodes.MediaOperationRunning},
 	{ingest.ErrToolsUnavailable, http.StatusServiceUnavailable, errcodes.MediaToolsUnavailable},
 	{ingest.ErrWaveformUnavailable, http.StatusConflict, errcodes.WaveformUnavailable},
+	{ingest.ErrFileNotFound, http.StatusNotFound, errcodes.ImportFileNotFound},
+	{ingest.ErrProbeFailed, http.StatusUnprocessableEntity, errcodes.ProbeFailed},
 	{live.ErrSessionActive, http.StatusConflict, errcodes.LiveSessionActive},
 	{live.ErrUnavailable, http.StatusServiceUnavailable, errcodes.LiveUnavailable},
 	{logsearch.ErrRangeTooLong, http.StatusUnprocessableEntity, errcodes.RangeTooLong},
@@ -240,6 +242,7 @@ var validationRuleCodes = map[validation.Rule]errcodes.Field{
 	validation.FillWeightNotAllowed:    errcodes.FillWeightNotAllowed,
 	validation.InsertOffsetTaken:       errcodes.InsertOffsetTaken,
 	validation.InsertSourceRequired:    errcodes.InsertSourceRequired,
+	validation.NotAudio:                errcodes.NotAudio,
 }
 
 // settingRuleCodes maps the rules of a refused setting value to field codes.
