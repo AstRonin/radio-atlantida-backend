@@ -1,0 +1,82 @@
+# Runtime smoke test of the playout script (docs/deploy-prereqs-plan.md A9):
+# `make liquidsoap-smoke` (dev/liqsmoke/main.go drives it; CI job
+# liquidsoap). Image pins equal docker-compose.dev.yml (TestImagePins), except
+# the TLS proxy, which only this stack has.
+#
+# Published ports differ from the dev stack, so both can run at once; all
+# on 127.0.0.1. The stub backend runs on the host (go run), reached as
+# host.docker.internal.
+
+name: radio-liqsmoke
+
+services:
+  icecast:
+    image: libretime/icecast:2.4.4-alpine
+    environment:
+      ICECAST_SOURCE_PASSWORD: smoke-source
+      ICECAST_ADMIN_PASSWORD: smoke-admin
+      ICECAST_RELAY_PASSWORD: smoke-relay
+      ICECAST_HOSTNAME: localhost
+      ICECAST_MAX_SOURCES: "4"
+    ports:
+      - "127.0.0.1:18000:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/status-json.xsl"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # TLS in front of Icecast, as the production server accepts sources over
+  # TLS only (§8.8). The certificate comes from `liqsmoke -cert`.
+  tlsproxy:
+    image: nginxinc/nginx-unprivileged:1.29.8-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../../.dev/liqsmoke:/certs:ro
+    depends_on:
+      icecast:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8443"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  liquidsoap:
+    image: savonet/liquidsoap:v2.4.6
+    command: ["/etc/liquidsoap/radio.liq"]
+    environment:
+      TZ: UTC
+      ICECAST_SOURCE_PASSWORD: smoke-source
+      LIQUIDSOAP_CONTROL_USER: source
+      LIQUIDSOAP_CONTROL_PASSWORD: smoke-control
+      TELNET_PORT: "1234"
+      HARBOR_PORT: "8005"
+      JOURNAL_DIR: /journal
+      BACKEND_CALLBACK_URL: http://host.docker.internal:18090/api/playout/callback
+      BACKEND_EMERGENCY_URL: http://host.docker.internal:18090/api/playout/emergency/next
+      BACKEND_OUTPUT_URL: http://host.docker.internal:18090/api/playout/output
+      OUTPUT_STATE_FILE: /var/cache/liquidsoap/output.json
+      # The environment fallback points to a mount the test never expects.
+      ICECAST_HOST: icecast
+      ICECAST_PORT: "8000"
+      ICECAST_MOUNT: /smoke-env
+      ICECAST_TLS: "false"
+    ports:
+      - "127.0.0.1:11234:1234"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+      # The test CA is trusted like the system roots (the production server
+      # has a public certificate).
+      - ../../.dev/liqsmoke/ca.pem:/etc/ssl/certs/ca-certificates.crt:ro
+      - state:/var/cache/liquidsoap
+    tmpfs:
+      - /journal:uid=100,gid=101
+    depends_on:
+      icecast:
+        condition: service_healthy
+
+volumes:
+  state:

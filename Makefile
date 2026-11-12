@@ -5,13 +5,15 @@ GOLANGCI_LINT ?= golangci-lint
 AIR           ?= go run github.com/air-verse/air@v1.67.4
 REDOCLY       ?= npx --yes @redocly/cli@2.61.0
 COMPOSE       := $(DOCKER) compose -f docker-compose.dev.yml
+SMOKE         := $(DOCKER) compose -f dev/liqsmoke/compose.yml
+LIQUIDSOAP    := savonet/liquidsoap:v2.4.6
 BIN           := bin/backend
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 IMAGE         ?= radio-atlantida-backend:dev
 
 .PHONY: help run dev build test test-integration lint fmt vuln migrate openapi openapi-lint \
         image db-up db-down stack-up stack-down stack-logs media import-samples live-check env \
-        monitoring-up monitoring-down monitoring-reset
+        monitoring-up monitoring-down monitoring-reset liquidsoap-check liquidsoap-smoke
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -97,3 +99,12 @@ import-samples: ## Generate files with known quality issues into .dev/media/impo
 live-check: ## Go live through a running backend with a test tone (WebRTC, no browser)
 	dev/scripts/gen-live.sh ./.dev/live-check.ogg
 	go run ./dev/livecheck -file ./.dev/live-check.ogg
+
+liquidsoap-check: ## liquidsoap --check of dev/liquidsoap/radio.liq in the pinned image
+	$(DOCKER) run --rm -v "$(CURDIR)/dev/liquidsoap:/s:ro" --entrypoint liquidsoap $(LIQUIDSOAP) --check /s/radio.liq
+
+liquidsoap-smoke: liquidsoap-check ## Run the playout script against a test Icecast (plain and TLS) and switch its output at runtime
+	go run ./dev/liqsmoke -cert ./.dev/liqsmoke
+	go run ./dev/liqsmoke; status=$$?; \
+		if [ $$status -ne 0 ]; then $(SMOKE) logs --tail 50 liquidsoap; fi; \
+		$(SMOKE) down -v -t 1; exit $$status

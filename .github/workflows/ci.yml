@@ -74,6 +74,27 @@ jobs:
         # testcontainers-go uses the Docker engine of the runner.
         run: go test -race -tags integration ./...
 
+  liquidsoap:
+    # liquidsoap --check accepts scripts that fail only when an encoder
+    # starts, so the script also runs against a test Icecast, plain and
+    # behind a TLS proxy, and switches its output at runtime
+    # (docs/deploy-prereqs-plan.md A9). Image pins: docker-compose.dev.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: pinned image
+        run: |
+          image=$(docker compose -f docker-compose.dev.yml --env-file .env.example config --format json | jq -r .services.liquidsoap.image)
+          make=$(sed -n 's/^LIQUIDSOAP *:= *//p' Makefile)
+          if [ "$image" != "$make" ]; then
+            echo "docker-compose.dev.yml runs $image, Makefile LIQUIDSOAP is $make"; exit 1
+          fi
+      - name: liquidsoap --check and runtime smoke test
+        run: make liquidsoap-smoke
+
   openapi:
     runs-on: ubuntu-latest
     steps:
