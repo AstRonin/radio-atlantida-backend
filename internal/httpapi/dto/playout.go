@@ -21,6 +21,23 @@ type PlayoutCallbackBody struct {
 	SafetyOnAir *bool `json:"safety_on_air,omitempty" doc:"heartbeat: the safety tone is on air. Absent: unknown, nothing changes."`
 }
 
+// StreamOutputConfig is the stream output Liquidsoap applies (the stream.*
+// settings, §8.8): the same JSON object as the argument of the script's
+// output.set command. It holds no secret.
+type StreamOutputConfig struct {
+	Host         string `json:"host" doc:"Icecast server host (stream.icecast_host)."`
+	Port         int    `json:"port" minimum:"1" maximum:"65535" doc:"Icecast server port (stream.icecast_port)."`
+	Mount        string `json:"mount" doc:"Mount point, starting with / (stream.mount)."`
+	TLS          bool   `json:"tls" doc:"Connect over TLS (stream.icecast_tls)."`
+	Codec        string `json:"codec" enum:"mp3,aac,vorbis" doc:"stream.codec."`
+	BitrateKbps  int    `json:"bitrate_kbps" doc:"One of 64, 96, 128, 160, 192, 256, 320 (stream.bitrate_kbps)."`
+	SampleRateHz int    `json:"sample_rate_hz" doc:"One of 22050, 32000, 44100, 48000 (stream.sample_rate_hz)."`
+	Channels     int    `json:"channels" minimum:"1" maximum:"2" doc:"1 mono, 2 stereo (stream.channels)."`
+	Name         string `json:"name" doc:"Stream name sent to Icecast (stream.name)."`
+	Description  string `json:"description" doc:"stream.description; may be empty."`
+	Genre        string `json:"genre" doc:"stream.genre; may be empty."`
+}
+
 // PlayoutLink is the state of the Liquidsoap control link.
 type PlayoutLink struct {
 	Connected bool       `json:"connected"`

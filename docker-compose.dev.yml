@@ -10,9 +10,11 @@
 #
 # Startup configuration of every service is set here through `environment:`
 # (values from .env). The connection values the backend uses to reach Icecast
-# and Liquidsoap (host names, ports, mount, stream format) are admin settings
-# whose code defaults must match this file: NewRegistry in internal/settings,
-# checked by TestDefaultsMatchDevStack. Change both together.
+# and Liquidsoap (host names, ports, mount, TLS, stream format) are admin
+# settings whose code defaults must match this file: NewRegistry in
+# internal/settings, checked by TestDefaultsMatchDevStack. Change both
+# together. Liquidsoap's ICECAST_* values are only its fallback when neither
+# the backend nor its state file gives the output.
 #
 # All published ports are bound to 127.0.0.1 only.
 
@@ -61,6 +63,7 @@ services:
       ICECAST_HOST: icecast
       ICECAST_PORT: "8000"
       ICECAST_MOUNT: /radio
+      ICECAST_TLS: "false"
       ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:?set in .env}
       LIQUIDSOAP_CONTROL_USER: ${LIQUIDSOAP_CONTROL_USER:-source}
       LIQUIDSOAP_CONTROL_PASSWORD: ${LIQUIDSOAP_CONTROL_PASSWORD:?set in .env}
@@ -69,6 +72,14 @@ services:
       JOURNAL_DIR: /journal
       BACKEND_CALLBACK_URL: ${BACKEND_CALLBACK_URL:-http://host.docker.internal:8090/api/playout/callback}
       BACKEND_EMERGENCY_URL: ${BACKEND_EMERGENCY_URL:-http://host.docker.internal:8090/api/playout/emergency/next}
+      # The stream output at startup (§8.8); the backend corrects it with
+      # output.set as soon as its control link connects.
+      BACKEND_OUTPUT_URL: ${BACKEND_OUTPUT_URL:-http://host.docker.internal:8090/api/playout/output}
+      # The last output that connected, for a start without the backend. In
+      # the image's own directory: the container runs as user liquidsoap,
+      # and a new named volume takes the owner of the directory it mounts
+      # over (a directory the image lacks would be root's).
+      OUTPUT_STATE_FILE: /var/cache/liquidsoap/output.json
     # Published only so a backend running on the host can reach them in
     # development. In production they stay on the internal network (§8.9).
     ports:
@@ -80,6 +91,7 @@ services:
       - ${MEDIA_ROOT:?set in .env}:/media:ro
       - ${PLAYOUT_JOURNAL_ROOT:?set in .env}:/journal
       - ./dev/liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+      - liquidsoap-state:/var/cache/liquidsoap
     depends_on:
       icecast:
         condition: service_healthy
@@ -256,6 +268,7 @@ services:
 
 volumes:
   pgdata:
+  liquidsoap-state:
   grafana-data:
   loki-data:
   alloy-data:

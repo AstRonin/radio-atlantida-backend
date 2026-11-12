@@ -5,6 +5,7 @@ package httpapi_test
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -33,6 +34,7 @@ type fakeLiquidsoap struct {
 	queues map[string][]int
 	pushed map[string][]string
 	vars   map[string]string
+	output string
 	conns  []net.Conn
 }
 
@@ -109,8 +111,20 @@ func (f *fakeLiquidsoap) answer(cmd string) string {
 			rids = append(rids, strconv.Itoa(r))
 		}
 		return strings.Join(rids, " ") + "\n"
+	case name == "output.set":
+		if arg == f.output {
+			return "OK unchanged\n"
+		}
+		f.output = arg
+		return "OK applied\n"
 	}
 	return "ERROR: unknown command\n"
+}
+
+func (f *fakeLiquidsoap) streamOutput() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.output
 }
 
 func (f *fakeLiquidsoap) pushes(queue string) []string {
@@ -228,6 +242,18 @@ func TestPlayoutPushesAndLogs(t *testing.T) {
 	require.Equal(t, queue, st.Queued[0].Queue)
 	require.NotNil(t, st.LastCallbackAt)
 	require.InDelta(t, 1, *st.MusicGain, 0)
+
+	// The pusher sent the stream output; Liquidsoap's startup fetch gets
+	// the same object.
+	var out dto.StreamOutputConfig
+	f.ok(http.StatusOK, http.MethodGet, "/api/playout/output", nil, &out)
+	require.Equal(t, dto.StreamOutputConfig{
+		Host: "icecast", Port: 8000, Mount: "/radio", Codec: "mp3", BitrateKbps: 128, SampleRateHz: 44100, Channels: 2,
+		Name: "Radio Atlantida",
+	}, out)
+	raw, err := json.Marshal(out)
+	require.NoError(t, err)
+	require.JSONEq(t, string(raw), f.liquidsoap.streamOutput())
 
 	// It ends cut by a skip: truncated; a duplicate end changes nothing.
 	end := map[string]any{

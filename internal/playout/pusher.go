@@ -46,6 +46,13 @@ type pusherState struct {
 	shift int
 	// duck is the duck gain last set in Liquidsoap; -1: not set.
 	duck float64
+	// output is the output.set command Liquidsoap last accepted; empty:
+	// not sent on this connection.
+	output string
+	// outputErr and outputErrAt are the last refusal of output.set and
+	// when it was logged.
+	outputErr   string
+	outputErrAt time.Time
 	// lastWarn is when a failed pass was last logged.
 	lastWarn time.Time
 }
@@ -123,6 +130,9 @@ func (s *Service) pass(ctx context.Context) error {
 	if err := s.applyDuck(ctx, set); err != nil {
 		return err
 	}
+	if err := s.applyOutput(ctx, set); err != nil {
+		return err
+	}
 	for _, h := range hours {
 		if err := s.fill(ctx, h, now, set); err != nil {
 			return err
@@ -132,13 +142,14 @@ func (s *Service) pass(ctx context.Context) error {
 }
 
 // resync runs on a new control connection: Liquidsoap may have restarted
-// and lost its queues and variables. The variables are set again; the
+// and lost its queues and variables. The variables and the stream output
+// are set again (the script ignores an output equal to its own); the
 // queued items of an hour whose queue is empty go back to planned, so they
 // are pushed again. (If a start callback of the last queued item is in
 // flight at that moment, that item may play twice; a connection is new only
 // after a failure, so this is rare.)
 func (s *Service) resync(ctx context.Context, hours []time.Time, set Settings) error {
-	s.push.shift, s.push.duck = -1, -1
+	s.push.shift, s.push.duck, s.push.output = -1, -1, ""
 	s.mu.Lock()
 	if s.gain == nil {
 		s.gain = new(set.MusicGain)

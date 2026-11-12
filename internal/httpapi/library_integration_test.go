@@ -158,6 +158,10 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 		return playout.Settings{ // setting defaults
 			Location: stationTZ(t), Lookahead: 3, Prepush: 5 * time.Minute, FadeOutMS: 2500, MediaRoot: "/media",
 			MusicGain: 1, EmergencyPlaylistID: a.emergency.get(),
+			Output: playout.StreamOutput{
+				Host: "icecast", Port: 8000, Mount: "/radio", Codec: "mp3", BitrateKbps: 128, SampleRateHz: 44100, Channels: 2,
+				Name: "Radio Atlantida",
+			},
 		}, nil
 	}, hub, broadcastState, log, clock.now, rand.New(rand.NewPCG(1, 1))) //nolint:gosec // G404: emergency picks, not security
 	settingsSvc, err := settings.NewService(settings.NewRegistry(), settingsrepo.New(d), config.Secrets{}.IsSet(), log, time.Now)

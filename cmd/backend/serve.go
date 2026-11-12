@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -272,7 +273,21 @@ func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, outputs pla
 	// The pass reads the duck gain from the settings; wake it to apply a
 	// change at once.
 	settings.OnChange(svc, settings.LiquidsoapDuckGain, func(float64) { p.Wake() })
+	// The same for the stream output (§6.3: a reconnect, not a restart):
+	// the pass sends output.set when the settings differ from what
+	// Liquidsoap last accepted.
+	svc.Subscribe(wakeOnStreamChange(p.Wake))
 	return p
+}
+
+// wakeOnStreamChange returns a settings subscriber that calls wake when a
+// stream.* setting is saved.
+func wakeOnStreamChange(wake func()) func(settings.Change) {
+	return func(c settings.Change) {
+		if strings.HasPrefix(c.Key, string(settings.GroupStream)+".") {
+			wake()
+		}
+	}
 }
 
 // harborTarget reads where Liquidsoap's live input listens: the control
@@ -353,12 +368,60 @@ func playoutSettings(svc *settings.Service) playout.SettingsFunc {
 		if err != nil {
 			return playout.Settings{}, err
 		}
+		output, err := streamOutput(ctx, svc)
+		if err != nil {
+			return playout.Settings{}, err
+		}
 		return playout.Settings{
 			Location: loc, Lookahead: lookahead, Prepush: time.Duration(prepush) * time.Minute, FadeOutMS: fade,
 			MediaRoot: root, MusicGain: gain, DuckGain: duck, EmergencyPlaylistID: emergency,
-			HeartbeatTimeout: time.Duration(heartbeat) * time.Second,
+			HeartbeatTimeout: time.Duration(heartbeat) * time.Second, Output: output,
 		}, nil
 	}
+}
+
+// streamOutput reads the stream output settings (§8.8) that Liquidsoap
+// applies with output.set. The loudness target and HLS are not part of it
+// (not applied to the output).
+func streamOutput(ctx context.Context, svc *settings.Service) (playout.StreamOutput, error) {
+	var (
+		o   playout.StreamOutput
+		err error
+	)
+	strs := []struct {
+		key settings.Key[string]
+		dst *string
+	}{
+		{settings.StreamIcecastHost, &o.Host},
+		{settings.StreamMount, &o.Mount},
+		{settings.StreamCodec, &o.Codec},
+		{settings.StreamName, &o.Name},
+		{settings.StreamDescription, &o.Description},
+		{settings.StreamGenre, &o.Genre},
+	}
+	for _, f := range strs {
+		if *f.dst, err = settings.Value(ctx, svc, f.key); err != nil {
+			return playout.StreamOutput{}, err
+		}
+	}
+	ints := []struct {
+		key settings.Key[int]
+		dst *int
+	}{
+		{settings.StreamIcecastPort, &o.Port},
+		{settings.StreamBitrateKbps, &o.BitrateKbps},
+		{settings.StreamSampleRateHz, &o.SampleRateHz},
+		{settings.StreamChannels, &o.Channels},
+	}
+	for _, f := range ints {
+		if *f.dst, err = settings.Value(ctx, svc, f.key); err != nil {
+			return playout.StreamOutput{}, err
+		}
+	}
+	if o.TLS, err = settings.Value(ctx, svc, settings.StreamIcecastTLS); err != nil {
+		return playout.StreamOutput{}, err
+	}
+	return o, nil
 }
 
 // operationsRetentionDays keeps finished operations this many days. Until the
@@ -583,12 +646,16 @@ func outageSettings(svc *settings.Service) outage.SettingsFunc {
 		if err != nil {
 			return outage.Settings{}, err
 		}
+		useTLS, err := settings.Value(ctx, svc, settings.StreamIcecastTLS)
+		if err != nil {
+			return outage.Settings{}, err
+		}
 		return outage.Settings{
 			HeartbeatTimeout: time.Duration(timeout) * time.Second,
 			IcecastInterval:  time.Duration(interval) * time.Second,
 			FailedChecks:     checks,
 			Prepush:          time.Duration(prepush) * time.Minute,
-			Icecast:          outage.IcecastTarget{Host: host, Port: port, Mount: mount},
+			Icecast:          outage.IcecastTarget{Host: host, Port: port, Mount: mount, TLS: useTLS},
 		}, nil
 	}
 }

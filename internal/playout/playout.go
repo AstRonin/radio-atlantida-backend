@@ -181,6 +181,7 @@ type Store interface {
 
 // Control is the Liquidsoap control client (*liquidsoap.Client).
 type Control interface {
+	Command(ctx context.Context, cmd string) ([]string, error)
 	Push(ctx context.Context, queue, uri string) (int, error)
 	Queue(ctx context.Context, queue string) ([]int, error)
 	SetVar(ctx context.Context, name, value string) error
@@ -224,6 +225,9 @@ type Settings struct {
 	// HeartbeatTimeout: heartbeats silent this long reset the safety state
 	// (outage.heartbeat_timeout_seconds).
 	HeartbeatTimeout time.Duration
+	// Output is the stream output (stream.* settings), sent on every
+	// connect and when it changes.
+	Output StreamOutput
 }
 
 // SettingsFunc reads the settings.

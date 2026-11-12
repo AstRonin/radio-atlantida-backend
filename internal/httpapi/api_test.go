@@ -250,7 +250,7 @@ func TestOpenAPIDocument(t *testing.T) {
 		"/api/play-rules", "/api/play-rules/{id}", "/api/play-rules/{id}/targets",
 		"/api/clocks", "/api/clocks/{id}", "/api/track-plan", "/api/track-plan/rebuild",
 		"/api/track-plan/inserts", "/api/track-plan/inserts/{id}",
-		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/music-gain",
+		"/api/playout/callback", "/api/playout/emergency/next", "/api/playout/status", "/api/playout/output", "/api/playout/music-gain",
 		"/api/play-history", "/api/missed-items", "/api/missed-items/{id}/dismiss", "/api/missed-items/{id}/reschedule",
 		"/api/outages",
 		"/api/live/session", "/api/live/status", "/api/broadcast/status", "/api/air-window",

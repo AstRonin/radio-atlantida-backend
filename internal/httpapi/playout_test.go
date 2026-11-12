@@ -19,6 +19,7 @@ import (
 // fakePlayout returns a fixed status and records the callbacks.
 type fakePlayout struct {
 	status playout.Status
+	output playout.StreamOutput
 	events chan playout.Event
 }
 
@@ -30,6 +31,8 @@ func (f fakePlayout) Callback(_ context.Context, e playout.Event) error {
 func (fakePlayout) EmergencyNext(context.Context) (string, bool, error) { return "", false, nil }
 func (f fakePlayout) Status(context.Context) (playout.Status, error)    { return f.status, nil }
 func (fakePlayout) SetMusicGain(context.Context, float64) error         { return nil }
+
+func (f fakePlayout) Output(context.Context) (playout.StreamOutput, error) { return f.output, nil }
 
 func newPlayoutRouter(f fakePlayout) http.Handler {
 	return NewRouter(Deps{
@@ -68,6 +71,27 @@ func TestPlayoutStatusSafety(t *testing.T) {
 			require.Equal(t, tt.wantSince, got.SafetySince)
 		})
 	}
+}
+
+// The startup fetch of the Liquidsoap script: every field, always, in the
+// encoding of output.set.
+func TestPlayoutOutput(t *testing.T) {
+	t.Parallel()
+	o := playout.StreamOutput{
+		Host: "listen.example.org", Port: 8001, Mount: "/atlantida", TLS: true, Codec: "aac", BitrateKbps: 160,
+		SampleRateHz: 48000, Channels: 1, Name: "Radio Atlantida", Description: "", Genre: "Jazz",
+	}
+	rec := do(t, newPlayoutRouter(fakePlayout{output: o}), http.MethodGet, "/api/playout/output")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.JSONEq(t, `{"host":"listen.example.org","port":8001,"mount":"/atlantida","tls":true,"codec":"aac",
+		"bitrate_kbps":160,"sample_rate_hz":48000,"channels":1,"name":"Radio Atlantida","description":"","genre":"Jazz"}`,
+		rec.Body.String())
+	cmd, err := o.Command()
+	require.NoError(t, err)
+	arg, ok := strings.CutPrefix(cmd, "output.set ")
+	require.True(t, ok)
+	require.JSONEq(t, rec.Body.String(), arg, "the endpoint and the command carry the same object")
+	require.NotContains(t, strings.ToLower(rec.Body.String()), "password")
 }
 
 func TestPlayoutHeartbeatSafetyField(t *testing.T) {

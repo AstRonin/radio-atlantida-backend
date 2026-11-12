@@ -179,6 +179,10 @@ type fakeControl struct {
 	queues  map[string][]int
 	vars    map[string]string
 	nextRID int
+	// commands are the raw commands sent (output.set); reply answers them,
+	// "OK applied" when nil.
+	commands []string
+	reply    func(cmd string) []string
 }
 
 func newFakeControl() *fakeControl {
@@ -217,6 +221,17 @@ func (c *fakeControl) Ping(context.Context) error {
 		return errDown
 	}
 	return nil
+}
+
+func (c *fakeControl) Command(_ context.Context, cmd string) ([]string, error) {
+	if c.down {
+		return nil, errDown
+	}
+	c.commands = append(c.commands, cmd)
+	if c.reply != nil {
+		return c.reply(cmd), nil
+	}
+	return []string{"OK applied"}, nil
 }
 
 func (c *fakeControl) Generation() uint64      { return c.gen }

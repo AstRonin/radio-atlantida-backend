@@ -19,6 +19,7 @@ type Playout interface {
 	Callback(ctx context.Context, e playout.Event) error
 	EmergencyNext(ctx context.Context) (string, bool, error)
 	Status(ctx context.Context) (playout.Status, error)
+	Output(ctx context.Context) (playout.StreamOutput, error)
 	SetMusicGain(ctx context.Context, gain float64) error
 }
 
@@ -34,6 +35,10 @@ type emergencyNextOutput struct {
 
 type playoutStatusOutput struct {
 	Body dto.PlayoutStatus
+}
+
+type playoutOutputOutput struct {
+	Body dto.StreamOutputConfig
 }
 
 type musicGainInput struct {
@@ -103,6 +108,22 @@ func registerPlayout(api huma.API, log *slog.Logger, svc Playout) {
 			return nil, err
 		}
 		return &playoutStatusOutput{Body: playoutStatusDTO(st)}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "get-playout-output",
+		Method:      http.MethodGet,
+		Path:        "/api/playout/output",
+		Summary:     "Get the stream output",
+		Description: "Called by Liquidsoap at startup (§8.8): the stream output of the stream.* settings, saved or default, as the script's output.set command takes it. The source password is not included; it stays in Liquidsoap's environment.",
+		Tags:        tags,
+		Errors:      errorsWith(),
+	}, func(ctx context.Context, _ *struct{}) (*playoutOutputOutput, error) {
+		o, err := svc.Output(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &playoutOutputOutput{Body: dto.StreamOutputConfig(o)}, nil
 	})
 
 	register(api, log, huma.Operation{
