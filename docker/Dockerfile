@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Keep GO_VERSION equal to the go directive in go.mod.
-ARG GO_VERSION=1.27.2
+ARG GO_VERSION=1.27.4
 
 FROM golang:${GO_VERSION}-trixie AS build
 # The release version (the tag without the leading v); `backend version`
