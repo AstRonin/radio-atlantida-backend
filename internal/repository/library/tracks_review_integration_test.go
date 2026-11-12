@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
@@ -205,6 +206,9 @@ func TestRenameTracks(t *testing.T) {
 	require.NotNil(t, f.reviewedAt(ctx, upper))
 }
 
+// lockNotAvailable is the SQLSTATE of a lock wait that hit lock_timeout.
+const lockNotAvailable = "55P03"
+
 func TestRenameLocksTheRows(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -216,10 +220,22 @@ func TestRenameLocksTheRows(t *testing.T) {
 		require.Equal(t, map[uint64]string{id: "Locked"}, titles)
 
 		// Another session cannot change the row until the transaction ends.
-		lctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
-		defer cancel()
-		_, uerr := f.d.Pool.Exec(lctx, `UPDATE tracks SET title = 'Other' WHERE id = $1`, id)
-		require.Error(t, uerr)
+		// The server gives up on the lock (lock_timeout) and aborts that
+		// session's transaction, so its UPDATE can never run later. A
+		// client-side context timeout would not do: pgx cancels the
+		// statement asynchronously, and the UPDATE, still waiting on the
+		// server, could take the lock after the commit below and overwrite
+		// the title.
+		other, err := f.d.Pool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() { _ = other.Rollback(ctx) }()
+		_, err = other.Exec(ctx, `SET LOCAL lock_timeout = '200ms'`)
+		require.NoError(t, err)
+		_, uerr := other.Exec(ctx, `UPDATE tracks SET title = 'Other' WHERE id = $1`, id)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, uerr, &pgErr)
+		require.Equal(t, lockNotAvailable, pgErr.Code, "the UPDATE waits on the row lock")
+		require.NoError(t, other.Rollback(ctx))
 		return f.tracks.WithTx(tx).SetTitles(ctx, map[uint64]string{id: `Quote "and" 'apostrophe' \ slash`})
 	})
 	require.NoError(t, err)
