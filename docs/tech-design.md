@@ -1,7 +1,7 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-23)
-Last updated: 2026-11-10
+Status: Draft (v7-24)
+Last updated: 2026-11-12
 
 ## 1. Overview
 
@@ -30,16 +30,17 @@ The system is developed in three Git repositories. Each repository has one purpo
 |------------|----------|----------|
 | `radio-atlantida-backend` | Go backend: REST API, WebSocket hub, clock/grid/rotation engine, outage detector, WebRTC live voice bridge, Liquidsoap control client, track preview audio endpoint (§6.6), play log writer, reconciliation job, retention job, versioned migrations (`.up.sql`), OpenAPI specification generation (§6.4) | Builds the `radio-atlantida-backend` image (§9.2) |
 | `radio-atlantida-frontend` | Angular management panel, static help texts (§6.1), validation (§6.2), settings pages (§6.3), played-tracks list with missed items, track player (§6.6), TypeScript client generated from the backend OpenAPI specification (§6.4) | Builds the `radio-atlantida-frontend` image (§9.2) |
-| `radio-atlantida-deploy` | `docker-compose.yml`, `.env.example`, `update.bat`, `update.ps1`, `config/` (Liquidsoap script and Icecast configuration for the test stack), `README.md` | Runs the stack on the production Windows host. Contains no application code (§9.2) |
+| `radio-atlantida-deploy` | `docker-compose.yml`, `.env.example`, `release.env`, `install.bat`/`install.ps1` (host setup), `update.bat` and `bin/radioctl` (update tool), `config/` (the production Liquidsoap script and the Grafana, Loki, and Alloy configuration, copied from the backend's `dev/` at the pinned tag), `README.md` | Runs the stack on the production Windows host. Contains no application code and no Icecast (§9.2) |
 
 Rules for using the code:
 
 - The repositories are hosted on GitHub under the account `AstRonin` (for example, https://github.com/AstRonin/radio-atlantida-backend). Container images are published to GitHub Container Registry under the lowercase owner name, `ghcr.io/astronin/`, which is the form the registry requires.
 - Each repository has its own GitHub Actions workflow that builds and pushes its image on tagged releases (§9.2).
-- The backend and the frontend are released together under one version tag. The OpenAPI specification produced by the backend at that tag is the input for the frontend client build, so a frontend build always matches the backend it runs against.
-- The deploy repository refers to application images by tag only (`IMAGE_TAG`). It never builds application code.
+- The backend and the frontend are released with their own version tags (v7-24). The OpenAPI specification attached to a backend release is the input for the frontend client build. A frontend runs against any backend of the same MAJOR.MINOR version, so a frontend-only or backend-only fix does not force a release of the other (§9.2).
+- Each release tag is a multi-arch image for `linux/amd64` and `linux/arm64` (v7-24, §9.2).
+- The deploy repository refers to application images by tag and the digest of their multi-arch manifest list (`BACKEND_TAG`, `FRONTEND_TAG` and their digests in `release.env`). It never builds application code.
 - Database migrations live in `radio-atlantida-backend` and are shipped inside the `radio-atlantida-backend` image. The deploy repository does not contain migration files.
-- Liquidsoap scripts and Icecast configuration that are part of the test stack are kept in `radio-atlantida-deploy/config/`. Production stream settings are stored in the database through the admin panel (§6.3, §8.8) and are not kept in any repository.
+- The development Liquidsoap script and the Icecast test container are part of the backend's dev stack. The production Liquidsoap script in `radio-atlantida-deploy/config/` is the dev script at the pinned backend tag plus a reviewed patch (v7-24). Production stream settings are stored in the database through the admin panel (§6.3, §8.8) and are not kept in any repository; the production Icecast is an external server.
 
 ## 2. Architecture
 
@@ -93,7 +94,7 @@ Responsibilities:
 | Database          | PostgreSQL                                | Relational core |
 | DB access         | GORM for admin CRUD; pgx for hot paths    | See §5 and §5.1 |
 | Playout           | Liquidsoap                                | Linux container |
-| Stream server     | Icecast                                   | Test instance in Docker; production server configured in the admin panel |
+| Stream server     | Icecast                                   | Test instance in Docker (development only); production: an external server configured in the admin panel (§8.8) |
 | Audio tooling     | ffmpeg                                    | Transcoding and quality analysis on import |
 | Containers        | Docker and Docker Compose                 | Linux containers, one compose file. Deployment repository: `radio-atlantida-deploy` |
 
@@ -323,6 +324,7 @@ Playlist types are data in the `playlist_types` table, not entries in the `setti
 **Applying changes**
 
 - Each setting states whether it takes effect immediately (for example, music gain or log level) or needs a reconnect (for example, Icecast host or mount point). Changing the stream server briefly interrupts the stream.
+- A reconnect is not a restart (v7-24). When a stream output setting is saved, the backend sends the new output to Liquidsoap over the control link; the script replaces its Icecast output and leaves the playout sources and queues alone, so only the connection to the server is renewed (a gap of a few seconds, §8.8).
 - Changes that affect air are logged with a UTC timestamp (§12).
 
 **Secrets**
@@ -585,7 +587,7 @@ An outage is a period when the station's audio did not reach listeners, for exam
 **Outage detection**
 
 - The outage detector runs in the backend and watches three signals:
-  1. **Icecast state**: the backend checks the mount point on the Icecast server at the configured interval (§6.3). Liquidsoap also reports its output connection state through its callbacks (§8.3).
+  1. **Icecast state**: the backend checks the mount point on the Icecast server at the configured interval (§6.3), by reading its `/status-json.xsl` over HTTP, or HTTPS when the server uses TLS (§8.8). Liquidsoap also reports its output connection state through its callbacks (§8.3).
   2. **Liquidsoap callbacks**: track start and end events. If no callback arrives within the heartbeat timeout while the station should be on air, the detector treats the playout as stalled.
   3. **Liquidsoap control link**: the backend's connection to the control interface (§8.1). Loss of this link for longer than the heartbeat timeout is treated as an outage while planned items are due: Liquidsoap keeps streaming (its queue, then the emergency source), but planned items cannot be pushed, so they become missed and the manager can reschedule them (decided 2026-10-14, v7-13).
 - Liquidsoap sends a heartbeat callback every 5 seconds, so a stalled playout is told apart from a long track (v7-13). The heartbeat also carries the optional `safety_on_air`: true when the source before the safety tone is not ready. The backend keeps this in memory: two true reports in a row (about 10 seconds) turn the state on, so a short gap between tracks is not reported, one false report turns it off, a heartbeat without the field changes nothing, and the state is reset when the heartbeat is silent beyond the timeout.
@@ -770,14 +772,22 @@ Audio files are about 800 files and must not be copied into Docker images or vol
 
 All Icecast and output parameters are settings, not code, so they can be changed per server without a rebuild. The manager edits them in the admin panel (§6.3). Fields include:
 
-- Icecast host, port, mount point, admin and source credentials (source password from environment, not committed);
+- Icecast host, port, mount point, whether the server uses TLS, admin and source credentials (source password from environment, not committed);
 - codec (for example MP3, AAC, or Ogg Vorbis), bitrate, sample rate, channels;
 - loudness target and limiter settings used by Liquidsoap;
 - stream name, description, and genre metadata;
 - the charset of the mount. Icecast 2.4 stores and serves the metadata of an MP3 stream in the mount's `<charset>`, ISO-8859-1 by default, so a title in Cyrillic or Armenian shows as `*` until the mount has `<charset>UTF-8</charset>`; Liquidsoap sends UTF-8 (v7-21, `docs/phase-21-plan.md` §7). This is Icecast configuration, not a backend setting;
 - HLS output on or off, if used later.
 
-The Docker Icecast service is a test server. Its connection is entered in the admin panel like any other setting, and switching to the production server is a settings change, not a code or file change. Only the Icecast source password stays in the environment.
+The Docker Icecast service is a test server of the dev stack. Production streams to an external Icecast server; switching servers is a settings change, not a code or file change. Only the Icecast source password stays in the environment.
+
+**Applying output settings at runtime (v7-24, deploy plan §5.2).** The script registers a control command that takes the output as JSON (host, port, mount, TLS, codec, bitrate, sample rate, channels, name, description, genre). If it differs from the running output, the script shuts the Icecast output down and creates a new one on the same source; the queues, the fallback, and the journal are not touched. The backend sends it when a stream setting is saved and on every new control connection; at startup Liquidsoap fetches it from the backend (`GET /api/playout/output`), falling back to the last applied output and then to the defaults. Checked with `savonet/liquidsoap:v2.4.6`: bitrate, sample rate, channels, mount, and codec (MP3, Vorbis, AAC) all change at runtime; on the same mount the stream pauses about 4 s, because Icecast releases the mount only after the old connection closes. The MP3 encoder needs its stereo flag as a literal, so the script has one encoder branch per codec and channel count, and the script is tested by running it, not only by `liquidsoap --check`.
+
+**TLS.** Liquidsoap 2.4.6 streams to an Icecast server over TLS with `transport=http.transport.ssl()` (checked against a TLS proxy in front of the test Icecast). The backend's mount check reads the status page over HTTPS when TLS is on.
+
+**Metadata charset (checked 2026-11-12, Icecast 2.4.4).** Liquidsoap already sends the `charset` parameter with every metadata update (its `encoding`, UTF-8 by default), and Icecast converts the title from that charset to the mount's charset, so with the default ISO-8859-1 mount a Cyrillic or Armenian title becomes `*` for listeners and on the status page. The charset parameter alone cannot fix it. Declaring `encoding="ISO-8859-1"` makes Icecast store the UTF-8 bytes unchanged: listeners' players then show the title correctly, but Icecast's own status page shows it garbled. The correct fix stays `<charset>UTF-8</charset>` on the mount, set by the server owner. The script sends UTF-8 (the default `encoding`); until the owner changes the mount, non-Latin titles show as `*`, which is accepted. `encoding="ISO-8859-1"` is a documented fallback only.
+
+**Production server (v7-24).** The station streams to `https://listen.teploe.net:8001/atlantida` (Icecast 2.4.4). Port 8001 accepts TLS only; listeners are also served over plain HTTP on port 8100. The server already relays other mounts in MP3 and AAC. The first install proposes MP3, 160 kbps, 44100 Hz, stereo, as the current stream on the mount uses; it stays a panel setting. The switch from the current source on the mount is a manual step (deploy plan runbook).
 
 ### 8.9 Control interface security
 
@@ -799,7 +809,7 @@ Services in a single `docker-compose.yml` (kept in `radio-atlantida-deploy`):
 - `backend`: Go backend (image `radio-atlantida-backend`, built from `radio-atlantida-backend`).
 - `db`: PostgreSQL with a named volume for database data.
 - `liquidsoap`: Liquidsoap image (Linux), media directory mounted read-only, and a bind mount of `PLAYOUT_JOURNAL_ROOT` for the playout journal (see §7.1).
-- `icecast`: test stream server with default configuration.
+- `icecast`: test stream server with default configuration, in the dev stack only. The production compose has no Icecast container: it streams to an external server (§8.8, v7-24).
 - `frontend`: Angular build served by a static server (image `radio-atlantida-frontend`, built from `radio-atlantida-frontend`).
 - `proxy` (optional): reverse proxy for the panel and API.
 - `grafana` (optional, `monitoring` switch): a live view of the database (§10.3) and log search (§10.4) for the operator. With it, `grafana-role`: a one-shot job that keeps the read-only database role of Grafana in step with `.env` and exits.
@@ -811,17 +821,18 @@ Guidelines:
 - Each service has its own image; no secrets are baked into images.
 - Configuration comes from environment variables and `.env` files that are not committed, limited to the database connection, secrets, and host paths. All other settings are edited in the admin panel (see §6.3).
 - Media files are never inside a container image or a named volume (see §8.7).
-- Health checks are defined for `db`, `backend`, `liquidsoap`, `grafana`, and `alloy`. `loki` has none: its image is distroless (only the `loki` binary, no shell or HTTP client) and `loki` has no health subcommand. Nothing waits for it to be healthy: the backend keeps writing stdout and retries its pushes, Alloy retries its pushes, and Grafana's data source answers once Loki is ready.
+- Health checks are defined for `db`, `backend`, `frontend`, `liquidsoap`, `grafana`, and `alloy`. The one-shot jobs `migrate` and `grafana-role` disable the server health check of their images. `loki` has none: its image is distroless (only the `loki` binary, no shell or HTTP client) and `loki` has no health subcommand. Nothing waits for it to be healthy: the backend keeps writing stdout and retries its pushes, Alloy retries its pushes, and Grafana's data source answers once Loki is ready.
 - The backend writes no log files and has no log directory. Its log goes to stdout and is pushed to Loki (§10.1), so it does not depend on a file inside a container.
 - The playout journal directory (`PLAYOUT_JOURNAL_ROOT`) is on the host. `liquidsoap` writes to it read-write, and `backend` mounts the same directory read-only for reconciliation (§7.1). It survives container recreation and is included in the backup set (§10).
-- Services communicate over an internal Docker network. Only the panel port, the Icecast listener port, and the Grafana port are published to the host. The Grafana port is always bound to `127.0.0.1` (§10.3). `alloy` is not published. `loki` is not published in production; in development it is bound to `127.0.0.1:3100` (§10.4).
+- Services communicate over an internal Docker network. In production only the panel port, the live voice UDP port of the backend (8189/udp, §8.4), and the Grafana port are published (§10, §10.3; v7-24). The panel and Grafana are bound to `127.0.0.1`; the UDP port is bound to `127.0.0.1` in WSL's mirrored networking mode and to the WSL VM's own address space in NAT mode, where the VM is reachable from the Windows host only (§9.1). No listener port is published: listeners connect to the external Icecast server. `alloy` is not published. `loki` is not published in production; in development it is bound to `127.0.0.1:3100` (§10.4).
 
 ### 9.1 Development and runtime platforms
 
 - **Development**: macOS. Docker Desktop runs the Linux containers.
-- **Runtime**: Windows 10 or 11 PC on SSD storage, running Docker Desktop. The Docker engine inside is Linux (WSL2 backend), so all containers are Linux containers.
+- **Runtime** (v7-24, deploy plan §6): a Windows 10 PC (21H2, build 19044, or later, with the Microsoft Store WSL) on SSD storage; Windows 11 works the same way and is recommended later. Windows 10 reached end of support on 14 October 2025: the station's machine is most likely Windows 10 Home without paid Extended Security Updates, so it gets no more security fixes (and no update-driven reboots); the station accepts this for now because it exposes no inbound port, and the machine is not used for email or browsing. The installer sets the active hours over the broadcast day and uses no edition-specific update policy. Docker Engine and the Compose plugin run inside a dedicated WSL2 distribution (`radio-atlantida`, Ubuntu LTS, systemd enabled), installed by `install.bat`; Docker Desktop is not used. A Windows scheduled task of a dedicated local account starts the distribution at boot without a sign-in and keeps it running; systemd starts Docker, and Docker restarts the containers (`restart: unless-stopped`). The network mode follows the Windows build. On Windows 10 (NAT mode), WSL's localhost forwarding makes the panel and Grafana, published on `127.0.0.1` inside WSL, reachable at `127.0.0.1` on Windows; it does not forward UDP, so the live voice port is published in the VM and the browser reaches it at the VM's address, which changes at every boot: a boot unit writes it to `LIVE_PUBLIC_IPS` and recreates the backend when it changed. On Windows 11 22H2 or later the installer chooses mirrored mode, where `127.0.0.1` works for TCP and UDP and `LIVE_PUBLIC_IPS` is `127.0.0.1`. The panel is always opened at `http://127.0.0.1`, a secure context, so the microphone works without HTTPS.
 - Because development is on macOS and runtime is on Windows, the `MEDIA_ROOT` and `PLAYOUT_JOURNAL_ROOT` paths are set per machine in `.env`. Paths in the database stay relative (§8.7).
-- Bind-mounted files from the Windows filesystem are accessed through the WSL2 layer. Read performance is adequate for playout.
+- The media directory is the station's existing Windows folder of tracks, seen in WSL through the drive mount (`/mnt/d/...`) with a fixed owner, group, and group write, so the backend can write fixed files and Liquidsoap reads them; the import works in place and nothing watches the folder (§8.7), so the drive mount's slower access and missing file notifications do not matter for it. A Defender exclusion keeps scans away from files on air. The playout journal, the backups, and the deploy repository live on the distribution's own ext4 file system (`/srv/radio/...`, `/opt/radio-atlantida/deploy`) for speed, real `fsync`, and permissions.
+- The database is a named volume of that Docker Engine (on the distribution's disk), never a bind mount from the Windows filesystem. Data moves one way only, production to development, by restoring a dump; there is no replication (v7-24).
 - File paths and line endings are checked in the build pipeline because they differ between macOS and Windows.
 
 ### 9.2 Deployment and Updates
@@ -831,83 +842,89 @@ The production machine runs the stack from the **radio-atlantida-deploy** reposi
 **Repositories and images**
 
 - `radio-atlantida-backend` (Go) and `radio-atlantida-frontend` (Angular) are built by CI (GitHub Actions) on tagged releases and pushed to GitHub Container Registry as `ghcr.io/astronin/radio-atlantida-backend:<tag>` and `ghcr.io/astronin/radio-atlantida-frontend:<tag>`.
-- Both images are built from the same tag, so a release is one version number for the whole system. The OpenAPI specification and the generated TypeScript client are part of that same tag (§6.4).
+- Each image has its own release tag (v7-24). Each tag is one multi-arch manifest list for `linux/amd64` (the production target) and `linux/arm64` (the developer's Mac), so Docker pulls the right architecture; the deploy repository pins the manifest list's digest. A frontend runs against any backend of the same MAJOR.MINOR version; the frontend client is generated from the OpenAPI specification of a backend release of that MAJOR.MINOR (§6.4).
 - Images are private. The production machine logs in with a read-only token (`read:packages`) stored in `.env`.
-- **Implemented in Phase 13 (`docs/phase-13-plan.md`).** The Git tag is `vX.Y.Z`; the image tag and the version are `X.Y.Z` (no `latest`, never overwritten). The release workflow runs the full CI, builds `linux/amd64`, and attaches the `openapi.json` produced by the shipped image to the GitHub release `vX.Y.Z`; the frontend copies it into its snapshot. `backend version` prints the version.
+- **Implemented in Phase 13 (`docs/phase-13-plan.md`).** The Git tag is `vX.Y.Z`; the image tag and the version are `X.Y.Z` (no `latest`, never overwritten). The release workflow runs the full CI, builds `linux/amd64` (multi-arch with `linux/arm64` from v7-24), and attaches the `openapi.json` produced by the shipped image to the GitHub release `vX.Y.Z`; the frontend copies it into its snapshot. `backend version` prints the version.
 
 **Deploy repository contents (`radio-atlantida-deploy`)**
 
-- `docker-compose.yml`: services `backend`, `migrate`, `db`, `liquidsoap`, `icecast`, `frontend`, the core services `loki` and `alloy` (§10.4), and the monitoring services `grafana-role` and `grafana` (§10.3).
+- `docker-compose.yml`: services `backend`, `migrate`, `db`, `liquidsoap`, `frontend`, the core services `loki` and `alloy` (§10.4), and the monitoring services `grafana-role` and `grafana` (§10.3). No `icecast` (v7-24).
 - `.env.example`: the template for the machine's `.env`. The real `.env` is not committed.
-- `IMAGE_TAG`: the release tag in use, for example `1.4.2`.
+- `release.env`: the release to install, `BACKEND_TAG`, `FRONTEND_TAG`, and their image digests (v7-24).
 - `update.bat`: the entry point the manager runs on double-click or from a terminal.
-- `update.ps1`: the update logic in PowerShell, called by `update.bat`.
-- `config/`: Liquidsoap script, Icecast configuration, Grafana provisioning (role script, data sources, dashboards; §10.3, §10.4), and the Loki and Alloy configuration (§10.4).
+- `install.bat` → `install.ps1`: the one-time host setup (WSL2, the distribution, Docker Engine, the boot task, host settings) and the first configuration of the stack (v7-24).
+- `bin/radioctl`: the update logic, a bash script that runs inside the distribution; `update.bat` only calls it through `wsl.exe`.
+- `config/`: the production Liquidsoap script, Grafana provisioning (role script, data sources, dashboards; §10.3, §10.4), and the Loki and Alloy configuration (§10.4), copies of the backend's `dev/` files at the pinned tag.
 - `backups/`: database dumps, not committed.
 - `logs/`: update run logs, not committed.
 - `README.md`: a short description of the steps above.
 
-The Compose file references images by tag, for example `image: ghcr.io/astronin/radio-atlantida-backend:${IMAGE_TAG}`.
+The Compose file references images by tag and digest, for example `image: ghcr.io/astronin/radio-atlantida-backend:${BACKEND_TAG}@${BACKEND_DIGEST}`.
 
 **Migrations**
 
 - The `radio-atlantida-backend` image contains the migration files (from `radio-atlantida-backend`) and the `migrate` subcommand (golang-migrate library). The same image is used for both the server and the migration.
-- The Compose service `migrate` runs `backend migrate up` once and exits. The `backend` service starts only after it completes successfully (`depends_on: condition: service_completed_successfully`).
+- The Compose service `migrate` runs `backend migrate up` once and exits. On a first start the `backend` service starts only after it completes successfully (`depends_on: condition: service_completed_successfully`). On an update the migration runs while the previous backend is still running, and the backend is replaced after it (v7-24).
 - Migrations use the expand and contract approach: add new columns or tables first, switch the code, and remove old columns in a later release. This keeps the previous version of the API working against the new schema, so a code rollback does not break the database.
 - The v7-6 changes (`broadcast_outages`, the `missed` status, the new `play_log` columns) are added as a single expand migration. The previous code ignores the new columns and the new status values, so it still works after rollback.
 - The v7-7 changes (the rename of categories to playlists, `playlist_types`, `clock_element_playlists`, removed in v7-23) follow the same rule. The expand migration creates `playlist_types`, `playlists`, `track_playlists`, and `clock_element_playlists`, seeds the four system types, and copies the data from the old category tables (`categories`, `track_categories`, and `clock_elements.category_id`, which becomes one `clock_element_playlists` row per element). The old tables and columns are left in place and are removed by a contract migration in a later release. Until then, the previous code keeps working against the old tables.
 - The v7-8 changes (`play_rules`, `track_play_rules`, `playlist_play_rules`) use the same approach. The expand migration creates the new tables and copies each row of `daypart_rules` into a `play_rules` row (time window and weekdays) with a matching target row (a track or a playlist; the old `jingle` target is copied as a track). `daypart_rules` stays in place until a contract migration in a later release.
 - The v7-9 filler columns were added as an expand migration with nullable columns. The v7-23 migration (`docs/phase-23-plan.md` §3.1) is an exception to expand and contract: it deletes clocks, the grid, the plan, and the filler and separation tables in one step, because no release had aired (development data only).
+- **Release 1.0.0 is the baseline** (v7-24). No release below it is installed. From 1.0.0 on, a release's migrations are expand-only and safe to run while the previous release runs; the migration connection gives up on a lock after 10 seconds instead of stalling the running service. A contract migration (dropping what an older release used) comes no earlier than the release after the one that stopped using it, is reviewed, and is marked in the release notes.
+- **Downgrade guard** (v7-24, deploy plan §9.4). The table `schema_compat` holds one row, `min_app_version`: the oldest release that works with the schema. A contract migration raises it to the release that stopped using what it drops. `backend serve` refuses to start when its version is below it, and `backend migrate check` reports it. `migrate up` with an older binary does nothing (the schema is newer), so a downgrade within the guard changes only the images.
 
 **Forward-only migrations (no rollback)**
 
 - Migrations are forward-only. Each migration has only an `.up.sql` file. No `.down.sql` files are written, and no command or script runs `migrate down`.
 - Rolling back schema changes in PostgreSQL is unreliable: data may already have been transformed, objects dropped, or a migration partly applied. The project does not rely on down migrations.
-- If a migration fails, the recovery procedure is:
-  1. Restore the database from the dump made for this update, seconds before the migration ran (§9.2, step 7), using `update.bat restore`. This also clears a "dirty" migration state, so no down migration is needed.
-  2. Restore the previous code tag (`update.bat rollback`).
-  3. Fix the problem, write a new forward migration, release it, and apply it through the normal update.
-- Because the dump is taken right before `migrate`, the data lost by a restore is only what was written between the dump and the restore. The restore decision is manual.
+- A failed migration is undone automatically, and broadcasting continues on the running release; the operator makes no decision (v7-24, deploy plan §7.3 step 7):
+  - Each migration file runs in one implicit transaction (golang-migrate sends it as one simple-protocol query), so a failure, a lock timeout included, rolls back the whole file. `backend migrate up` then resets the version to the last applied migration, so the database is not left "dirty", and exits with a distinct code ("rolled back, schema unchanged at version N"). Migrations applied earlier in the same run stay; they are expand-only, so the running release works with them. The update tool aborts, keeps the running images, and tells the operator that the update was undone.
+  - A statement that cannot run in a transaction (`CREATE INDEX CONCURRENTLY`) is the only statement of a file marked non-transactional; files with explicit transaction control are rejected in the backend's CI. If such a file fails, or the outcome is unknown, the database is "dirty": the update tool restores the dump made seconds before the migration, restarts the running release, and reports the same way. The data written between the dump and the restore is lost (minutes); the play log of that window is rebuilt from the playout journal (§7.1).
+  - The developer fixes the problem in a new release with a new forward migration.
+- `update.bat restore` remains for a manual restore of a recorded dump, with a typed confirmation.
 - Destructive migrations (dropping data) are reviewed before release and are never shipped in the same release as the code that stops using the data.
 
-**The update script (`update.bat` → `update.ps1`, in `radio-atlantida-deploy`)**
+**The update script (`update.bat` → `bin/radioctl` inside WSL, in `radio-atlantida-deploy`)**
 
-Usage:
+Usage (v7-24; the details are in the deploy plan §6):
 
-- `update.bat`: update to the tag in `IMAGE_TAG` (or the latest tag from the deploy repository, if set).
-- `update.bat 1.4.3`: update to a specific tag.
-- `update.bat rollback`: return to the previous tag recorded before the last update.
-- `update.bat restore`: restore the database from the dump recorded for the last update (`pg_restore --clean`). The script asks for confirmation and shows the dump file name and its UTC time first.
+- `update.bat`: install the release named in `release.env`.
+- `update.bat <backend tag> [<frontend tag>]`: install any release from 1.0.0 on, newer or older. The frontend tag defaults to the backend tag. Both images must exist and have the same MAJOR.MINOR.
+- `update.bat rollback`: install the release that ran before the last update.
+- `update.bat restore`: restore the database from the dump recorded for the last update (`pg_restore --clean`). The script stops the backend, shows the dump file name and its UTC time, and asks for confirmation first.
+- `update.bat maintenance`: apply changes that need a restart of `liquidsoap` or `db` (a new image or a changed script), after confirmation.
+- `update.bat backup`, `update.bat restore-drill`: the daily dump and the monthly restore test (§10).
 
-Steps, in order:
+Steps of an update, in order:
 
-1. **Preflight**: check that Docker Desktop is running and that the Docker engine responds. If not, stop with a message. The script does not install or upgrade Docker Desktop, because that installer is manual. When monitoring is enabled in `.env` (§10.3), its passwords must be set; otherwise the script stops before any change and names the missing variable.
-2. **Live check**: query the API for the live status. If a broadcast is on air, the script asks for confirmation before continuing. If an outage is open (§7.1), the script stops and reports it.
-3. **Fetch the deploy repository**: `git pull` (or a zip download if Git is not installed). Show what changed.
-4. **Record the current tag** in `state.json` so rollback knows where to return.
-5. **Login to the registry** with the token from `.env` (`docker login ghcr.io`), if not already logged in.
-6. **Pull the images**: `docker compose pull`.
-7. **Backup the database (mandatory)**: `docker compose exec db pg_dump -Fc` into `backups/db-YYYY-MM-DDTHHMMSSZ.dump`. The file name uses the UTC time (§10.2). A dump is made on every update, including updates without migrations, and the script has no flag to skip it. If the dump fails, the update stops. The dump path is saved in `state.json` for this run, so a restore uses exactly this dump. The script keeps the last 14 dumps and deletes older ones.
-8. **Migrate**: `docker compose run --rm migrate`. If it fails, the script stops, does not start the new `backend`, and reports the error.
-9. **Restart services**: `docker compose up -d`. Compose recreates only containers whose image or configuration changed, so `liquidsoap` and `icecast` keep running if their images did not change. When monitoring is enabled, the monitoring services are started after that in a separate call (§10.3).
-10. **Health check**: wait for the healthchecks of `db`, `backend`, and `liquidsoap` to pass, with a timeout. Grafana is not part of this check: a failure of the monitoring services is reported as a warning and never triggers step 11, because monitoring does not affect the air.
-11. **On failure**: set `IMAGE_TAG` back to the recorded previous tag, run `docker compose up -d`, and report the error. Migrations are not rolled back, and the script never runs down migrations. Because of the expand and contract rule, the previous code still works with the new schema. If the migration itself failed, the database is restored with `update.bat restore`, using the dump recorded for this run (see "Forward-only migrations" above).
-12. **Log the run**: write the steps, the tags, and the result to `logs/update-YYYY-MM-DDTHHMMSSZ.log` (UTC).
+1. **Preflight**: the Docker Engine in the distribution responds; installing or upgrading the engine is a step of `install.bat`, not of an update. When monitoring is enabled in `.env` (§10.3), its passwords must be set.
+2. **Fetch the deploy repository**: `git pull --ff-only` inside the distribution. Show what changed.
+3. **Release check**: log in to the registry with the token from `.env`; both images of the target exist and match their digests; the backend and frontend versions are compatible, and the backend is not older than the Liquidsoap script requires. For an older target, the database's `min_app_version` must not be above it; otherwise the script refuses and offers to restore the dump taken before the update that crossed it.
+4. **Air check**: an open outage (§7.1) stops the update; live voice on air, or an unknown state, asks for confirmation; the backend must have its control link and at least two items queued in Liquidsoap; the script waits while the next hour is being pushed (`playout.prepush_minutes` before the hour).
+5. **Pull the images** and record their digests in `state.json`.
+6. **Backup the database (mandatory)**: `pg_dump -Fc` into a file named with the UTC time (§10.2). A dump is made on every update, and the script has no flag to skip it. If the dump fails, the update stops. The dump is recorded for this run in `state.json`.
+7. **Migrate** while the previous backend runs (newer targets only). If it fails, the update is undone automatically as described under "Forward-only migrations" (a rolled-back migration needs nothing more; a dirty database is restored from this run's dump), the previous release keeps broadcasting, and the operator gets a plain message to send the log to the developer.
+8. **Replace the backend** (`up -d --no-deps backend`, with a stop grace period of 30 seconds for its drain), then wait for it: ready, control link connected, items queued. Then the frontend, then Loki, Alloy, and Grafana; a monitoring failure is only a warning.
+9. **On failure** after the backend was replaced (health gate): reinstall the previous release by digest automatically and report with the same plain message. Migrations are not rolled back; the previous release works with the new schema (expand and contract).
+10. **Report pending maintenance**: a new Liquidsoap or PostgreSQL image or a changed Liquidsoap script is recorded and applied only by `update.bat maintenance`.
+11. **Log the run** to `logs/update-YYYY-MM-DDTHHMMSSZ.log` (UTC).
+
+Two backends never run side by side (no blue/green): there is one pusher to Liquidsoap, one live voice UDP port, and the playout and safety state live in the backend's memory.
 
 **Effect on air**
 
 - Restarting `backend` interrupts the WebRTC voice session and the WebSocket connection of the panel. It does not stop playout, because Liquidsoap keeps the planned queue (§12). The playout journal records what aired during the restart, and reconciliation runs afterwards (§7.1). The restart is recorded as an outage with `component = backend` if the stream is affected.
-- Restarting `liquidsoap` or `icecast` interrupts the stream. The script restarts them only when their images or configuration changed, and the live check in step 2 warns before that. Such a restart is detected as an outage, and the items planned during it are marked missed unless the journal confirms them.
+- Restarting `liquidsoap` interrupts the stream. It happens only in `update.bat maintenance`, after confirmation, in a window the manager chooses. Such a restart is detected as an outage, and the items planned during it are marked missed unless the journal confirms them. A change of the stream output settings needs no restart (§8.8).
 
 ## 10. Operational Requirements
 
-- Access control: none in the panel by design (single operator). The API and control ports must therefore be reachable only from localhost or a trusted private network. Firewall rules on the Windows host enforce this.
+- Access control: none in the panel by design (single operator). The API and control ports must therefore be reachable only from localhost or a trusted private network. In production the panel and live voice are reachable from the station machine only (v7-24, §9); access from the LAN, with HTTPS and firewall rules, is a possible later step.
 - Time synchronization via NTP on the host, because clock start times depend on it.
 - Time and timezones: all stored times are UTC; the panel displays them in the selected timezone. See §10.2.
 - Fallback content available if the engine or database is unavailable.
 - Logging: structured logs in the backend; Liquidsoap logs to a file or stdout.
 - Monitoring: an optional Grafana shows the live state of the database (§10.3) and searches the application logs and the playout journal (§10.4).
-- Backups: daily PostgreSQL dumps, a copy of the media directory kept outside the machine that runs the stack (the media directory itself is not duplicated inside Docker), and a copy of the playout journal directory with the database dumps.
+- Backups (v7-24): on the machine that runs the stack, a PostgreSQL dump before every update and a daily dump with a copy of the playout journal (a systemd timer in the distribution runs `radioctl backup`, and the newest set is also copied to a folder on the Windows drive, so a damaged or removed distribution does not take the backups with it); 14 daily and 14 update dumps are kept, and the dumps needed to undo a contract migration are kept longer (§9.2); a restore into a scratch database is tested monthly. The recovery point is 24 hours. There is no off-site copy: a loss of the machine's disk loses the database, the dumps, the journal, and the media directory together. A copy of the media directory outside the machine is the operator's responsibility.
 
 ### 10.1 Logging and diagnostics
 
@@ -987,10 +1004,10 @@ Steps, in order:
 **Service**
 
 - `grafana`: the official open source image, pinned to an exact tag like every infrastructure image. One named volume for Grafana's own state; it holds nothing that cannot be rebuilt from the provisioning files.
-- Published only on `127.0.0.1` (port from `.env`, default 3000), like the panel (deploy plan §8.1). The address is not configurable, so Grafana cannot be exposed to the LAN by mistake.
+- Published only on `127.0.0.1` (port from `.env`, default 3000), like the panel (deploy plan §10.1). The address is not configurable, so Grafana cannot be exposed to the LAN by mistake.
 - Monitoring is optional and enabled in `.env` (`MONITORING_ENABLED`), so it can be switched off to save memory on the production machine. In the dev stack it is the compose profile `monitoring`.
 - The machine may be offline: update checks, usage reporting, and the news feed are switched off.
-- No other service depends on `grafana`. Its failure never affects playout, the backend, or an update (§9.2, step 10).
+- No other service depends on `grafana`. Its failure never affects playout, the backend, or an update (§9.2, step 8).
 
 **Panel link**
 
@@ -1040,7 +1057,7 @@ Steps, in order:
 **Retention and files**
 
 - Loki keeps 10 days (`retention_period: 240h` in its configuration, which is deploy configuration, not an admin setting), for the backend's log and the journal. For the journal, lines up to 10 days old are accepted, so a first start or a long stop of the collector loads the files still on disk.
-- The journal files are on the Windows file system through the WSL2 layer, where file change notifications are not reliable. Alloy polls the folder, so new lines, the daily journal file switch, and the deletion of old files are seen without notifications.
+- Alloy polls the journal folder (kept from the time the journal lived on the Windows file system, where file change notifications were not reliable; since v7-24 it is on the distribution's ext4 file system), so new lines, the daily journal file switch, and the deletion of old files are seen without notifications.
 - Loki's and Alloy's volumes are not backed up. The journal can be rebuilt from its files on the host while they exist. The backend's log is kept only in Loki and on stdout; it is not backed up (a decision of 2026-10-29: the log is short-lived, 10 days, and not worth a backup).
 
 **Configuration as files**
@@ -1055,8 +1072,8 @@ The open questions from the previous version are closed. The decisions are recor
 2. **Separation is a play rule** (v7-23). The `separation_rules` table is removed; its values became the play rule "Music rotation" (track and artist intervals) attached to the music playlists (§7.3).
 3. **Play log volume.** No partitioning. A nightly `DELETE` of aired rows older than 10 days is sufficient for the expected volume, which PostgreSQL handles easily (§4.1). Open missed items are exempt from this deletion.
 4. **Live voice latency budget.** Target of at most 1 second from microphone to air. The system runs locally on one machine with local Docker (§8.4).
-5. **Production Icecast details.** Entered in the admin panel and stored in the database, like all other output settings. Nothing is set in code or files (§8.8, §6.3).
-6. **Windows host.** Windows 10 or 11 with Docker Desktop (WSL2 backend), SSD storage. No separate performance test is required before going live (§9.1).
+5. **Production Icecast details.** Entered in the admin panel and stored in the database, like all other output settings. Nothing is set in code or files (§8.8, §6.3). The production server is external (no Icecast container in production), reached over TLS; its mount needs `<charset>UTF-8</charset>` for non-Latin titles (v7-24).
+6. **Windows host.** Windows 10 (19044 or later, Store WSL) or Windows 11, SSD storage, Docker Engine in a dedicated WSL2 distribution set up by `install.bat`, started at boot without a sign-in (v7-24; Docker Desktop was dropped because it runs only in a signed-in user session). No separate performance test is required before going live (§9.1).
 7. **Host paths.** `MEDIA_ROOT` and `PLAYOUT_JOURNAL_ROOT` are set once in the Compose `.env` file and never change. They are not editable in the UI (§6.3, §3.1).
 8. **Viper.** Removed. Runtime configuration lives in the admin settings, and no YAML profile is used (§3.1).
 9. **Source repositories.** Three repositories: `radio-atlantida-backend`, `radio-atlantida-frontend`, `radio-atlantida-deploy`. Their roles and release coupling are described in §1.1.
@@ -1083,6 +1100,13 @@ The open questions from the previous version are closed. The decisions are recor
 29. **Database monitoring is a live view.** An optional Grafana reads PostgreSQL's statistics views directly through a read-only role, with a login, bound to localhost. No metrics history, no Prometheus, and no backend changes; a metrics history can be added later without backend changes (§10.3, decided 2026-10-15).
 30. **Log search in Grafana.** Loki stores the playout journal, collected by Grafana Alloy from its file on the host, and the backend's application log, which the backend pushes to Loki (changed on 2026-10-29 from collection of the daily files by Alloy; see `docs/logs-loki-plan.md`). Loki keeps 10 days. No alerts in this version (§10.4, decided 2026-10-15).
 31. **Cue points, never trimming.** The manager cuts the edges of a track (applause, talk, noise) by a cue in and cue out point with fades, edited on a waveform in the panel; the file is not changed, Liquidsoap plays only that part, and the planner fits the track by its length on air. Plan items keep the cut they were planned with; a changed cut rebuilds the future hours that hold the track (§4, §6.4, §7, §8.1, §8.5, decided 2026-10-16).
+32. **Stream output applied at runtime** (v7-24). A stream setting change replaces Liquidsoap's Icecast output over the control link; the container is not restarted, and only the connection to the server is renewed (§6.3, §8.8).
+33. **Separate release tags and any-release install** (v7-24). Backend and frontend have their own tags, compatible within one MAJOR.MINOR. The deploy repository names a release in `release.env` with digests, and `update.bat <tag>` installs any release from 1.0.0 on; a downgrade is refused when the schema's `min_app_version` is above the target (§1.1, §9.2).
+34. **Liquidsoap restarts only in maintenance** (v7-24). A normal update replaces the backend and the frontend one by one and never restarts `liquidsoap` or `db`; those changes wait for `update.bat maintenance` (§9.2).
+35. **Backups stay on the machine** (v7-24). Daily and pre-update dumps with the journal, 24-hour recovery point, monthly restore test, no off-site copy; the risk of a disk loss is accepted (§10).
+36. **Automated host install** (v7-24). `install.bat` makes a Windows 10 or 11 machine ready: WSL2, a pinned Ubuntu LTS distribution, Docker Engine with pinned versions, a dedicated local account whose scheduled task keeps the distribution running from boot, host power and update settings, and the first configuration of the stack. It chooses NAT or mirrored networking from the Windows build, is idempotent, and resumes after the reboot it needs (§9.1, §9.2).
+37. **Multi-arch images** (v7-24). Backend and frontend tags are manifest lists for amd64 and arm64; production runs amd64, the developer's Mac runs the same release natively on arm64 (§1.1, §9.2).
+38. **Media stays in the Windows folder** (v7-24). The existing Windows folder of tracks is the media root, through WSL's drive mount; copying it into the distribution is the fallback (§9.1).
 
 ## 12. Non-functional Requirements
 
