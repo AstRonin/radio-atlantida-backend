@@ -90,6 +90,7 @@ func TestDefaultsMatchDevStack(t *testing.T) {
 	devStack := map[string]any{
 		"stream.icecast_host":     "icecast",      // service icecast
 		"stream.icecast_port":     8000,           // icecast ports, liquidsoap ICECAST_PORT
+		"stream.icecast_tls":      false,          // liquidsoap ICECAST_TLS, plain icecast service
 		"stream.mount":            "/radio",       // liquidsoap ICECAST_MOUNT
 		"stream.codec":            "mp3",          // dev/liquidsoap/radio.liq output
 		"stream.bitrate_kbps":     128,            // dev/liquidsoap/radio.liq output
@@ -260,6 +261,7 @@ func TestSetRefusals(t *testing.T) {
 		{"stream.icecast_port", `0`, settings.RuleRange},
 		{"stream.icecast_port", `65536`, settings.RuleRange},
 		{"stream.hls_enabled", `"yes"`, settings.RuleType},
+		{"stream.icecast_tls", `"true"`, settings.RuleType},
 		{"rotation.lookahead_items", `4`, settings.RuleRange},
 		{"rotation.plan_horizon_days", `0`, settings.RuleRange},
 		{"rotation.plan_horizon_days", `184`, settings.RuleRange},

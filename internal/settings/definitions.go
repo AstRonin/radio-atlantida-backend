@@ -102,6 +102,7 @@ var (
 
 	StreamIcecastHost  = Key[string]{"stream.icecast_host"}
 	StreamIcecastPort  = Key[int]{"stream.icecast_port"}
+	StreamIcecastTLS   = Key[bool]{"stream.icecast_tls"}
 	StreamMount        = Key[string]{"stream.mount"}
 	StreamCodec        = Key[string]{"stream.codec"}
 	StreamBitrateKbps  = Key[int]{"stream.bitrate_kbps"}
@@ -187,16 +188,19 @@ func NewRegistry() *Registry {
 	// Stream output (Icecast, §8.8).
 	r.add(stringDef(StreamIcecastHost, "Icecast server host name or IP address.", "icecast", 1, 253, validHost), ApplyReconnect, true)
 	r.add(intDef(StreamIcecastPort, "Icecast server port.", "", 8000, 1, 65535), ApplyReconnect, true)
+	// Off by default: the dev stack's Icecast is plain HTTP. The production
+	// server accepts sources over TLS only (§8.8).
+	r.add(boolDef(StreamIcecastTLS, "Connect to the Icecast server over TLS (HTTPS).", false), ApplyReconnect, true)
 	r.add(stringDef(StreamMount, "Icecast mount point, starting with /.", "/radio", 2, 100, validMount), ApplyReconnect, true)
 	r.add(enumStringDef(StreamCodec, "Stream codec.", "mp3", "mp3", "aac", "vorbis"), ApplyReconnect, true)
 	r.add(enumIntDef(StreamBitrateKbps, "Stream bitrate.", "kbps", 128, 64, 96, 128, 160, 192, 256, 320), ApplyReconnect, true)
 	r.add(enumIntDef(StreamSampleRateHz, "Stream sample rate.", "Hz", 44100, 22050, 32000, 44100, 48000), ApplyReconnect, true)
 	r.add(enumIntDef(StreamChannels, "Stream channels: 1 mono, 2 stereo.", "", 2, 1, 2), ApplyReconnect, true)
-	r.add(numberDef(StreamLoudnessLUFS, "Loudness target of the output.", "LUFS", -16, -30, -5), ApplyReconnect, true)
+	r.add(numberDef(StreamLoudnessLUFS, "Loudness target of the tracks: the import checks and Fix loudness use it; the stream output is not normalised.", "LUFS", -16, -30, -5), ApplyReconnect, true)
 	r.add(stringDef(StreamName, "Stream name sent to Icecast.", "Radio Atlantida", 0, 200, nil), ApplyReconnect, true)
 	r.add(stringDef(StreamDescription, "Stream description sent to Icecast.", "", 0, 500, nil), ApplyReconnect, true)
 	r.add(stringDef(StreamGenre, "Stream genre sent to Icecast.", "", 0, 100, nil), ApplyReconnect, true)
-	r.add(boolDef(StreamHLSEnabled, "HLS output on or off.", false), ApplyReconnect, true)
+	r.add(boolDef(StreamHLSEnabled, "Reserved: HLS output is not implemented yet; this value has no effect.", false), ApplyReconnect, true)
 	r.addSecret(SecretIcecastSourcePassword, GroupStream, "ICECAST_SOURCE_PASSWORD", "Icecast source password.")
 
 	// Liquidsoap (§8).

@@ -24,11 +24,15 @@ const (
 )
 
 // IcecastTarget is the mount the check looks for (settings
-// stream.icecast_host, stream.icecast_port, stream.mount).
+// stream.icecast_host, stream.icecast_port, stream.mount,
+// stream.icecast_tls).
 type IcecastTarget struct {
 	Host  string
 	Port  int
 	Mount string
+	// TLS reads the status page over HTTPS, as the source connects
+	// (§8.8). The certificate is verified with the client's roots.
+	TLS bool
 }
 
 // errMountMissing: Icecast answers, but no source streams to the mount.
@@ -49,7 +53,11 @@ func NewIcecastChecker(client *http.Client) *IcecastChecker {
 func (c *IcecastChecker) Check(ctx context.Context, t IcecastTarget) error {
 	ctx, cancel := context.WithTimeout(ctx, icecastTimeout)
 	defer cancel()
-	u := url.URL{Scheme: "http", Host: net.JoinHostPort(t.Host, strconv.Itoa(t.Port)), Path: "/status-json.xsl"}
+	scheme := "http"
+	if t.TLS {
+		scheme = "https"
+	}
+	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(t.Host, strconv.Itoa(t.Port)), Path: "/status-json.xsl"}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return fmt.Errorf("icecast status request: %w", err)

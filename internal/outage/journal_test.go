@@ -93,6 +93,9 @@ func TestHasMount(t *testing.T) {
 		{"several", `{"icestats":{"source":[{"listenurl":"http://x:8000/other"},{"listenurl":"http://x:8000/radio"}]}}`, true},
 		{"other mount", `{"icestats":{"source":{"listenurl":"http://x:8000/radio2"}}}`, false},
 		{"no source", `{"icestats":{"admin":"a@b"}}`, false},
+		// The production server advertises its listener port (8100), not
+		// the TLS port the check reads: the match is by path only.
+		{"other port", `{"icestats":{"source":{"listenurl":"http://listen.example:8100/radio"}}}`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,6 +125,27 @@ func TestIcecastChecker(t *testing.T) {
 	require.ErrorIs(t, err, errMountMissing)
 	srv.Close()
 	require.Error(t, c.Check(t.Context(), IcecastTarget{Host: host, Port: port, Mount: "/radio"}))
+}
+
+func TestIcecastCheckerTLS(t *testing.T) {
+	t.Parallel()
+	body := `{"icestats":{"source":{"listenurl":"http://listen.example:8100/radio"}}}`
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/status-json.xsl", r.URL.Path)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	host, port := splitHostPort(t, srv.Listener.Addr().String())
+
+	// The server's client trusts its certificate.
+	c := NewIcecastChecker(srv.Client())
+	require.NoError(t, c.Check(t.Context(), IcecastTarget{Host: host, Port: port, Mount: "/radio", TLS: true}))
+	// Plain HTTP to a TLS port fails.
+	require.Error(t, c.Check(t.Context(), IcecastTarget{Host: host, Port: port, Mount: "/radio"}))
+
+	// A client without the test CA refuses the certificate.
+	plain := NewIcecastChecker(&http.Client{})
+	require.Error(t, plain.Check(t.Context(), IcecastTarget{Host: host, Port: port, Mount: "/radio", TLS: true}))
 }
 
 func splitHostPort(t *testing.T, addr string) (string, int) {
