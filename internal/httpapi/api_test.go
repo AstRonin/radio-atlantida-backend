@@ -260,6 +260,7 @@ func TestOpenAPIDocument(t *testing.T) {
 	} {
 		require.Contains(t, doc.Paths, p)
 	}
+	require.Contains(t, doc.Paths["/api/settings"], "patch", "set-settings (docs/deploy-prereqs-plan.md A11)")
 	require.NotContains(t, doc.Paths, "/api/import/inbox", "replaced by the folders (docs/phase-18-plan.md)")
 	require.NotContains(t, doc.Paths, "/api/logs/files", "replaced by /api/logs, the Loki search (docs/logs-loki-plan.md §4.2)")
 	require.NotContains(t, doc.Paths, "/api/logs/files/{name}")

@@ -236,6 +236,10 @@ const (
 	// log keeps aired history (retention.play_log_days), or the retention
 	// would become shorter than an existing interval.
 	IntervalBeyondRetention Field = "interval_beyond_retention"
+	// EncoderLimit: the stream codec, channels, sample rate, and bitrate
+	// together make a format the Liquidsoap encoder cannot start (Vorbis
+	// above a bitrate per sample rate and channels).
+	EncoderLimit Field = "encoder_limit"
 	// FillPlaylistRequired: a clock needs at least one playlist whose
 	// placement rule is fill.
 	FillPlaylistRequired Field = "fill_playlist_required"
@@ -264,7 +268,7 @@ func Fields() []Field {
 		Required, UnknownField, Type, Range, Length, Pattern, Format, Enum, Unique, Invalid, Taken, UnknownID, Overlap, DoesNotFit,
 		Order, Blocked, InvalidCharacters, CueOrder, CueBeyondEnd, AirTooShort, FadesTooLong,
 		IntervalBeyondRetention, FillPlaylistRequired, FillWeightsPartial, ClockCountRequired, ClockCountNotAllowed,
-		FillWeightNotAllowed, InsertOffsetTaken, InsertSourceRequired, NotAudio,
+		FillWeightNotAllowed, InsertOffsetTaken, InsertSourceRequired, NotAudio, EncoderLimit,
 	}
 }
 

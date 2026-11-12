@@ -70,17 +70,30 @@ func (s *Store) Get(ctx context.Context, key string) (settings.Stored, error) {
 	return r.stored(), nil
 }
 
-// Upsert saves the value of key and returns the stored row.
-func (s *Store) Upsert(ctx context.Context, st settings.Stored) (settings.Stored, error) {
-	r := row{Key: st.Key, Value: st.Value, UpdatedAt: st.UpdatedAt.UTC()}
+// UpsertMany saves the values and returns the stored rows. It is one
+// multi-row INSERT ... ON CONFLICT statement, which PostgreSQL runs as one
+// implicit transaction: the batch is saved whole or not at all, and a
+// concurrent reader never sees half of it.
+func (s *Store) UpsertMany(ctx context.Context, sts []settings.Stored) ([]settings.Stored, error) {
+	if len(sts) == 0 {
+		return []settings.Stored{}, nil
+	}
+	rows := make([]row, len(sts))
+	for i, st := range sts {
+		rows[i] = row{Key: st.Key, Value: st.Value, UpdatedAt: st.UpdatedAt.UTC()}
+	}
 	err := s.g.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
 		}).
-		Create(&r).Error
+		CreateInBatches(&rows, len(rows)).Error
 	if err != nil {
-		return settings.Stored{}, fmt.Errorf("upsert setting %s: %w", st.Key, err)
+		return nil, fmt.Errorf("upsert settings: %w", err)
 	}
-	return r.stored(), nil
+	out := make([]settings.Stored, len(rows))
+	for i, r := range rows {
+		out[i] = r.stored()
+	}
+	return out, nil
 }

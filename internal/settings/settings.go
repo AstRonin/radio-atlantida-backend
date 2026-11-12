@@ -10,11 +10,14 @@
 package settings
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +53,10 @@ const (
 	// RuleIntervalBeyondRetention: the play log retention would become
 	// shorter than an interval of a play rule.
 	RuleIntervalBeyondRetention Rule = "interval_beyond_retention"
+	// RuleEncoderLimit: the stream codec, channels, sample rate, and
+	// bitrate together make a format the encoder cannot start
+	// (internal/streamformat).
+	RuleEncoderLimit Rule = "encoder_limit"
 )
 
 // InvalidValueError refuses a value that fails the definition of its key.
@@ -61,6 +68,21 @@ type InvalidValueError struct {
 
 func (e *InvalidValueError) Error() string {
 	return fmt.Sprintf("invalid value for setting %s: %s", e.Key, e.Message)
+}
+
+// InvalidValuesError refuses a batch (SetMany): one refusal per refused
+// key, known keys in registry order, then unknown keys in key order.
+// Nothing of the batch was saved.
+type InvalidValuesError struct {
+	Errors []*InvalidValueError
+}
+
+func (e *InvalidValuesError) Error() string {
+	msgs := make([]string, len(e.Errors))
+	for i, ive := range e.Errors {
+		msgs[i] = ive.Error()
+	}
+	return strings.Join(msgs, "; ")
 }
 
 // Stored is a saved value.
@@ -76,8 +98,9 @@ type Store interface {
 	List(ctx context.Context) ([]Stored, error)
 	// Get returns the saved value of key, or ErrNotFound if none is saved.
 	Get(ctx context.Context, key string) (Stored, error)
-	// Upsert saves the value of key.
-	Upsert(ctx context.Context, s Stored) (Stored, error)
+	// UpsertMany saves the values in one statement, all or none, and
+	// returns the stored rows.
+	UpsertMany(ctx context.Context, s []Stored) ([]Stored, error)
 }
 
 // Setting is the current state of one setting.
@@ -110,7 +133,10 @@ const dbTimeout = 5 * time.Second
 
 // Service reads and saves settings.
 //
-// The registry is fixed at construction; subs is guarded by mu.
+// The registry is fixed at construction; subs, guards, and checks are
+// guarded by mu. saveMu serializes the saves (Set, SetMany), so the checks
+// of one save and its write see the same saved values within the process
+// (one backend per database), and subscribers get the saves in order.
 type Service struct {
 	reg        *Registry
 	store      Store
@@ -118,9 +144,18 @@ type Service struct {
 	log        *slog.Logger
 	now        func() time.Time
 
+	saveMu sync.Mutex
+
 	mu     sync.RWMutex
-	subs   []func(Change)
+	subs   []func([]Change)
 	guards map[string][]func(ctx context.Context, v any) error
+	checks []check
+}
+
+// check is a cross-key rule (Check).
+type check struct {
+	keys []string
+	fn   func(ctx context.Context, v View) error
 }
 
 // NewService returns the service. secretsSet tells, by environment variable
@@ -141,10 +176,11 @@ func NewService(reg *Registry, store Store, secretsSet map[string]bool, log *slo
 	}, nil
 }
 
-// Subscribe registers fn for every saved change. fn runs in the goroutine
-// that saved the value, after it is stored, so it must return quickly and
-// must not call Set.
-func (s *Service) Subscribe(fn func(Change)) {
+// Subscribe registers fn for every save: one call per save, after the
+// write, with every saved key in registry order (one element for Set). fn
+// runs in the goroutine that saved the values, while the next save waits,
+// so it must return quickly and must not call Set or SetMany.
+func (s *Service) Subscribe(fn func([]Change)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subs = append(s.subs, fn)
@@ -186,52 +222,176 @@ func (s *Service) Get(ctx context.Context, key string) (Setting, error) {
 }
 
 // Set validates and saves the value of key, logs the change, and notifies
-// the subscribers.
+// the subscribers. It is SetMany with one key, so the cross-key checks see
+// the saved values with this one on top. An unknown key returns
+// ErrNotFound, a secret ErrNotEditable, and a refused value an
+// *InvalidValueError.
 func (s *Service) Set(ctx context.Context, key string, raw json.RawMessage) (Setting, error) {
-	d, err := s.editable(key)
+	if _, err := s.editable(key); err != nil {
+		return Setting{}, err
+	}
+	saved, err := s.SetMany(ctx, map[string]json.RawMessage{key: raw})
+	var refused *InvalidValuesError
+	if errors.As(err, &refused) && len(refused.Errors) > 0 {
+		return Setting{}, refused.Errors[0]
+	}
 	if err != nil {
 		return Setting{}, err
 	}
-	v, err := d.parse(raw)
-	if err != nil {
-		return Setting{}, err
-	}
-	if err = s.guard(ctx, key, v); err != nil {
-		return Setting{}, err
-	}
-	canonical, err := json.Marshal(v)
-	if err != nil {
-		return Setting{}, fmt.Errorf("encode setting %s: %w", key, err)
+	return saved[0], nil
+}
+
+// SetMany validates a batch of values and saves it all or nothing (§6.3).
+// Every value is checked by its own rules and its guards, and the cross-key
+// checks (Check) run against the merged view: the saved values with the
+// batch on top, so the result does not depend on the order of the keys.
+// Any refusal returns an *InvalidValuesError with every refusal (an
+// unknown key or a secret is one, RuleUnknownField) and saves nothing.
+// Otherwise the batch is written in one statement, each change is logged,
+// and the subscribers are notified once. The saved settings are returned in
+// registry order.
+func (s *Service) SetMany(ctx context.Context, values map[string]json.RawMessage) ([]Setting, error) {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
+	var refused []*InvalidValueError
+	parsed := make(map[string]any, len(values))
+	for key, raw := range values {
+		d, err := s.editable(key)
+		if err != nil {
+			msg := "no setting has this key"
+			if errors.Is(err, ErrNotEditable) {
+				msg = "the setting is a secret: set it in the environment and restart the service"
+			}
+			refused = append(refused, &InvalidValueError{Key: key, Rule: RuleUnknownField, Message: msg})
+			continue
+		}
+		v, err := d.parse(raw)
+		var ive *InvalidValueError
+		if errors.As(err, &ive) {
+			refused = append(refused, ive)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		parsed[key] = v
 	}
 
+	for key, v := range parsed {
+		if err := s.guard(ctx, key, v); err != nil {
+			var ive *InvalidValueError
+			if !errors.As(err, &ive) {
+				return nil, err
+			}
+			refused = append(refused, ive)
+		}
+	}
+
+	failed := make(map[string]bool, len(refused))
+	for _, ive := range refused {
+		failed[ive.Key] = true
+	}
+	more, err := s.check(ctx, parsed, failed)
+	if err != nil {
+		return nil, err
+	}
+	refused = append(refused, more...)
+	if len(refused) > 0 {
+		return nil, &InvalidValuesError{Errors: s.sortRefusals(refused)}
+	}
+	if len(parsed) == 0 {
+		return []Setting{}, nil
+	}
+	return s.write(ctx, parsed)
+}
+
+// write saves the parsed batch, logs each change, and notifies the
+// subscribers once. The caller holds saveMu.
+func (s *Service) write(ctx context.Context, parsed map[string]any) ([]Setting, error) {
 	at := s.now().UTC()
+	defs := make([]*Definition, 0, len(parsed))
+	rows := make([]Stored, 0, len(parsed))
+	for _, d := range s.reg.Settings() {
+		v, ok := parsed[d.Key]
+		if !ok {
+			continue
+		}
+		canonical, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("encode setting %s: %w", d.Key, err)
+		}
+		defs = append(defs, d)
+		rows = append(rows, Stored{Key: d.Key, Value: canonical, UpdatedAt: at})
+	}
+
 	sctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	st, err := s.store.Upsert(sctx, Stored{Key: key, Value: canonical, UpdatedAt: at})
+	stored, err := s.store.UpsertMany(sctx, rows)
 	if err != nil {
-		return Setting{}, fmt.Errorf("save setting %s: %w", key, err)
+		keys := make([]string, len(rows))
+		for i, r := range rows {
+			keys[i] = r.Key
+		}
+		return nil, fmt.Errorf("save setting %s: %w", strings.Join(keys, ", "), err)
+	}
+	updatedAt := make(map[string]time.Time, len(stored))
+	for _, st := range stored {
+		updatedAt[st.Key] = st.UpdatedAt.UTC()
 	}
 
-	// Air-affecting changes are recorded with their UTC time (§6.3, §12);
-	// the others are logged the same way, so the log tells the whole story.
-	s.log.InfoContext(ctx, "setting changed",
-		"key", key,
-		"value", json.RawMessage(canonical),
-		"apply", string(d.Apply),
-		"affects_air", d.AffectsAir,
-		"changed_at", at.Format(time.RFC3339Nano),
-	)
+	out := make([]Setting, len(defs))
+	changes := make([]Change, len(defs))
+	for i, d := range defs {
+		v := parsed[d.Key]
+		// Air-affecting changes are recorded with their UTC time (§6.3,
+		// §12); the others are logged the same way, so the log tells the
+		// whole story.
+		s.log.InfoContext(ctx, "setting changed",
+			"key", d.Key,
+			"value", rows[i].Value,
+			"apply", string(d.Apply),
+			"affects_air", d.AffectsAir,
+			"changed_at", at.Format(time.RFC3339Nano),
+		)
+		updated, ok := updatedAt[d.Key]
+		if !ok {
+			updated = at
+		}
+		out[i] = Setting{Definition: d, Value: v, UpdatedAt: &updated}
+		changes[i] = Change{Key: d.Key, Value: v, Apply: d.Apply, AffectsAir: d.AffectsAir, At: at}
+	}
 
 	s.mu.RLock()
 	subs := s.subs
 	s.mu.RUnlock()
-	change := Change{Key: key, Value: v, Apply: d.Apply, AffectsAir: d.AffectsAir, At: at}
 	for _, fn := range subs {
-		fn(change)
+		fn(changes)
 	}
+	return out, nil
+}
 
-	updated := st.UpdatedAt.UTC()
-	return Setting{Definition: d, Value: v, UpdatedAt: &updated}, nil
+// sortRefusals orders refusals by the registry, then unknown keys by key.
+func (s *Service) sortRefusals(refused []*InvalidValueError) []*InvalidValueError {
+	pos := map[string]int{}
+	for i, d := range s.reg.Settings() {
+		pos[d.Key] = i
+	}
+	slices.SortStableFunc(refused, func(a, b *InvalidValueError) int {
+		pa, okA := pos[a.Key]
+		pb, okB := pos[b.Key]
+		switch {
+		case okA && okB:
+			return cmp.Compare(pa, pb)
+		case okA:
+			return -1
+		case okB:
+			return 1
+		default:
+			return strings.Compare(a.Key, b.Key)
+		}
+	})
+	return refused
 }
 
 // Secrets reports which secrets are set in the environment, in registry
@@ -264,15 +424,17 @@ func Value[T any](ctx context.Context, s *Service, k Key[T]) (T, error) {
 	return v, nil
 }
 
-// OnChange subscribes fn to the saved values of one typed key. The rules of
-// Subscribe apply.
+// OnChange subscribes fn to the saved values of one typed key: it runs
+// once for a save that carries the key. The rules of Subscribe apply.
 func OnChange[T any](s *Service, k Key[T], fn func(T)) {
-	s.Subscribe(func(c Change) {
-		if c.Key != k.name {
-			return
-		}
-		if v, ok := c.Value.(T); ok {
-			fn(v)
+	s.Subscribe(func(changes []Change) {
+		for _, c := range changes {
+			if c.Key != k.name {
+				continue
+			}
+			if v, ok := c.Value.(T); ok {
+				fn(v)
+			}
 		}
 	})
 }
@@ -296,8 +458,126 @@ func Guard[T any](s *Service, k Key[T], fn func(ctx context.Context, v T) error)
 	})
 }
 
-// Refuse returns the refusal of a value of key, for a guard.
+// Refuse returns the refusal of a value of key, for a guard or a check.
+// A check that refuses several keys joins the refusals with errors.Join.
 func Refuse(key string, rule Rule, msg string) error { return invalid(key, rule, msg) }
+
+// View is the merged state a cross-key check sees: the saved values (or
+// the defaults) with the values of the batch on top.
+type View struct {
+	values  map[string]any
+	changed map[string]bool
+}
+
+// Changed reports whether the batch carries key.
+func (v View) Changed(key string) bool { return v.changed[key] }
+
+// ViewValue returns the value of a typed key in the view: the batch value,
+// else the saved one, else the default.
+func ViewValue[T any](v View, k Key[T]) (T, error) {
+	var zero T
+	raw, ok := v.values[k.name]
+	if !ok {
+		return zero, fmt.Errorf("setting %s is not in the view", k.name)
+	}
+	tv, ok := raw.(T)
+	if !ok {
+		return zero, fmt.Errorf("setting %s holds %T, not %T", k.name, raw, zero)
+	}
+	return tv, nil
+}
+
+// Check registers a cross-key rule: fn runs once per save whose batch
+// carries any of keys, against the merged view (View), so a combination is
+// judged as it will be saved, whatever the order of the fields. It is
+// skipped when one of keys was already refused by its own rules or a
+// guard. fn refuses with Refuse, once per changed key it blames (several
+// joined with errors.Join); any other error fails the save. Guard stays for
+// checks against data outside the settings.
+func Check(s *Service, keys []string, fn func(ctx context.Context, v View) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checks = append(s.checks, check{keys: slices.Clone(keys), fn: fn})
+}
+
+// check runs the cross-key checks that the batch touches. failed holds the
+// keys already refused. The caller holds saveMu.
+func (s *Service) check(ctx context.Context, parsed map[string]any, failed map[string]bool) ([]*InvalidValueError, error) {
+	s.mu.RLock()
+	checks := s.checks
+	s.mu.RUnlock()
+	var run []check
+	for _, c := range checks {
+		touched, blocked := false, false
+		for _, k := range c.keys {
+			if _, ok := parsed[k]; ok {
+				touched = true
+			}
+			if failed[k] {
+				blocked = true
+			}
+		}
+		if touched && !blocked {
+			run = append(run, c)
+		}
+	}
+	if len(run) == 0 {
+		return nil, nil
+	}
+
+	view, err := s.view(ctx, parsed)
+	if err != nil {
+		return nil, err
+	}
+	var refused []*InvalidValueError
+	for _, c := range run {
+		cctx, cancel := context.WithTimeout(ctx, dbTimeout)
+		err := c.fn(cctx, view)
+		cancel()
+		if err == nil {
+			continue
+		}
+		errs := []error{err}
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			errs = joined.Unwrap()
+		}
+		for _, e := range errs {
+			var ive *InvalidValueError
+			if !errors.As(e, &ive) {
+				return nil, err
+			}
+			refused = append(refused, ive)
+		}
+	}
+	return refused, nil
+}
+
+// view reads the saved values once and puts the batch on top.
+func (s *Service) view(ctx context.Context, parsed map[string]any) (View, error) {
+	lctx, cancel := context.WithTimeout(ctx, dbTimeout)
+	defer cancel()
+	stored, err := s.store.List(lctx)
+	if err != nil {
+		return View{}, fmt.Errorf("list settings: %w", err)
+	}
+	saved := make(map[string]Stored, len(stored))
+	for _, st := range stored {
+		saved[st.Key] = st
+	}
+	v := View{values: map[string]any{}, changed: map[string]bool{}}
+	for _, d := range s.reg.Settings() {
+		if st, ok := saved[d.Key]; ok {
+			v.values[d.Key] = s.fromStored(ctx, d, st).Value
+		} else {
+			v.values[d.Key] = d.Default
+		}
+	}
+	for k, val := range parsed {
+		v.values[k] = val
+		v.changed[k] = true
+	}
+	return v, nil
+}
 
 func (s *Service) guard(ctx context.Context, key string, v any) error {
 	s.mu.RLock()

@@ -70,9 +70,11 @@ Every other setting (station timezone, stream output, Liquidsoap, rotation, outa
 curl localhost:8090/api/settings                       # every key: value, default, is_default, limits, apply
 curl -X PUT localhost:8090/api/settings/liquidsoap.fade_out_ms \
      -H 'Content-Type: application/json' -d '{"value": 2700}'
+curl -X PATCH localhost:8090/api/settings \
+     -H 'Content-Type: application/json' -d '{"values": {"stream.sample_rate_hz": 44100, "stream.bitrate_kbps": 192}}'
 ```
 
-A refused value returns `422` with a field error on `value`. Every saved change is logged at INFO with its UTC time.
+`PATCH /api/settings` saves several keys all or nothing (the panel saves this way); a refusal returns `422` with one field error per refused key on `values.<key>` and saves nothing. `PUT /api/settings/{key}` saves one key; a refused value returns `422` with a field error on `value`. A stream format the encoder cannot start is refused with `encoder_limit`. Every saved change is logged at INFO with its UTC time.
 
 ### Library
 

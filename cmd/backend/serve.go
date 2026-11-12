@@ -51,6 +51,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/retention"
 	"github.com/AstRonin/radio-atlantida-backend/internal/rotation"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
+	"github.com/AstRonin/radio-atlantida-backend/internal/streamformat"
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
@@ -146,6 +147,7 @@ func serve(ctx context.Context) error {
 	}
 	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool), intervalLimit(settingsSvc))
 	guardRetention(settingsSvc, playRulesSvc)
+	checkEncoderLimits(settingsSvc)
 	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
 	clocksSvc := clocks.NewService(database, clocksrepo.New(database), clocksrepo.NewCheck(database.Pool),
 		gridSvc, clockSettings(settingsSvc), time.Now)
@@ -305,12 +307,16 @@ func newPlayout(database *db.DB, svc *settings.Service, hub *ws.Hub, outputs pla
 	return p
 }
 
-// wakeOnStreamChange returns a settings subscriber that calls wake when a
-// stream.* setting is saved.
-func wakeOnStreamChange(wake func()) func(settings.Change) {
-	return func(c settings.Change) {
-		if strings.HasPrefix(c.Key, string(settings.GroupStream)+".") {
-			wake()
+// wakeOnStreamChange returns a settings subscriber that calls wake once
+// for a save that carries any stream.* setting, so a batch of several
+// stream settings gives one pass and one output.set.
+func wakeOnStreamChange(wake func()) func([]settings.Change) {
+	return func(changes []settings.Change) {
+		for _, c := range changes {
+			if strings.HasPrefix(c.Key, string(settings.GroupStream)+".") {
+				wake()
+				return
+			}
 		}
 	}
 }
@@ -504,6 +510,52 @@ func guardRetention(svc *settings.Service, rules *playrules.Service) {
 		}
 		return nil
 	})
+}
+
+// streamFormatKeys are the settings that make the stream format.
+var streamFormatKeys = []string{
+	settings.StreamCodec.Name(), settings.StreamBitrateKbps.Name(),
+	settings.StreamSampleRateHz.Name(), settings.StreamChannels.Name(),
+}
+
+// checkEncoderLimits refuses a stream format the encoder cannot start
+// (internal/streamformat, design §6.3, §8.8), judged on the combination as
+// it will be saved: the batch over the saved values. Each changed format
+// key is refused, so the panel shows the message on the fields the
+// manager changed.
+func checkEncoderLimits(svc *settings.Service) {
+	settings.Check(svc, streamFormatKeys, encoderLimitCheck)
+}
+
+func encoderLimitCheck(_ context.Context, v settings.View) error {
+	codec, err := settings.ViewValue(v, settings.StreamCodec)
+	if err != nil {
+		return err
+	}
+	channels, err := settings.ViewValue(v, settings.StreamChannels)
+	if err != nil {
+		return err
+	}
+	rate, err := settings.ViewValue(v, settings.StreamSampleRateHz)
+	if err != nil {
+		return err
+	}
+	kbps, err := settings.ViewValue(v, settings.StreamBitrateKbps)
+	if err != nil {
+		return err
+	}
+	l := streamformat.Check(codec, channels, rate, kbps)
+	if l == nil {
+		return nil
+	}
+	msg := fmt.Sprintf("%s; the bitrate is %d kbps.", l, kbps)
+	var refused []error
+	for _, key := range streamFormatKeys {
+		if v.Changed(key) {
+			refused = append(refused, settings.Refuse(key, settings.RuleEncoderLimit, msg))
+		}
+	}
+	return errors.Join(refused...)
 }
 
 // forwardAlerts pushes ERROR log entries to the panels as error.alert events

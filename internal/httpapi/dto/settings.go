@@ -32,6 +32,11 @@ type SetSetting struct {
 	Value any `json:"value" required:"true" doc:"New value; its type and limits are those of the setting (GET /api/settings)."`
 }
 
+// SetSettings is the body of PATCH /api/settings.
+type SetSettings struct {
+	Values map[string]any `json:"values" required:"true" minProperties:"1" maxProperties:"200" doc:"New values by setting key (the keys of GET /api/settings, as in PUT /api/settings/{key}). Saved all or nothing; keys left out keep their values."`
+}
+
 // SecretStatus says whether a secret is set. The value is never returned.
 type SecretStatus struct {
 	Name        string `json:"name" doc:"Environment variable that holds the secret."`

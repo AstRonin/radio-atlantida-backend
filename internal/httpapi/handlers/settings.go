@@ -17,6 +17,7 @@ import (
 type Settings interface {
 	List(ctx context.Context) ([]settings.Setting, error)
 	Set(ctx context.Context, key string, value json.RawMessage) (settings.Setting, error)
+	SetMany(ctx context.Context, values map[string]json.RawMessage) ([]settings.Setting, error)
 	Secrets() []settings.SecretStatus
 }
 
@@ -27,6 +28,10 @@ type settingListOutput struct {
 type setSettingInput struct {
 	Key  string `path:"key" maxLength:"100" doc:"Setting key, for example liquidsoap.fade_out_ms."`
 	Body dto.SetSetting
+}
+
+type setSettingsInput struct {
+	Body dto.SetSettings
 }
 
 type settingOutput struct {
@@ -63,7 +68,7 @@ func registerSettings(api huma.API, log *slog.Logger, svc Settings) {
 		Method:      http.MethodPut,
 		Path:        "/api/settings/{key}",
 		Summary:     "Save a setting",
-		Description: "Validates and saves one value. A refused value returns a field error on value. Secrets cannot be set here (setting_not_editable): they live in the environment.",
+		Description: "Validates and saves one value; the same as PATCH /api/settings with one key, so a stream format key is also checked against the saved values (encoder_limit). A refused value returns a field error on value. Secrets cannot be set here (setting_not_editable): they live in the environment.",
 		Tags:        []string{"Settings"},
 		Errors:      append([]int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity}, commonErrors...),
 	}, func(ctx context.Context, in *setSettingInput) (*settingOutput, error) {
@@ -76,6 +81,34 @@ func registerSettings(api huma.API, log *slog.Logger, svc Settings) {
 			return nil, err
 		}
 		return &settingOutput{Body: settingDTO(s)}, nil
+	})
+
+	register(api, log, huma.Operation{
+		OperationID: "set-settings",
+		Method:      http.MethodPatch,
+		Path:        "/api/settings",
+		Summary:     "Save several settings",
+		Description: "Validates a batch of values and saves it all or nothing, with one change notification, so a change of several stream settings gives one reconnect. Each value is checked by the rules of its key, and the cross-key rules (the stream encoder limits, encoder_limit) against the saved values with the batch on top, whatever the order of the keys. Any refusal returns 422 validation_failed with one field error per refused key on values.<key> and saves nothing; an unknown key or a secret is unknown_field. Returns the saved settings in the order of GET /api/settings.",
+		Tags:        []string{"Settings"},
+		Errors:      errorsWith(http.StatusUnprocessableEntity),
+	}, func(ctx context.Context, in *setSettingsInput) (*settingListOutput, error) {
+		values := make(map[string]json.RawMessage, len(in.Body.Values))
+		for key, v := range in.Body.Values {
+			raw, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("encode setting value %s: %w", key, err)
+			}
+			values[key] = raw
+		}
+		saved, err := svc.SetMany(ctx, values)
+		if err != nil {
+			return nil, err
+		}
+		out := &settingListOutput{Body: dto.SettingList{Items: make([]dto.Setting, 0, len(saved))}}
+		for _, s := range saved {
+			out.Body.Items = append(out.Body.Items, settingDTO(s))
+		}
+		return out, nil
 	})
 
 	register(api, log, huma.Operation{

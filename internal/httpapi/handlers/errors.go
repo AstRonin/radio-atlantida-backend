@@ -39,6 +39,7 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 	var (
 		p              *dto.Problem
 		invalidSetting *settings.InvalidValueError
+		invalidBatch   *settings.InvalidValuesError
 		invalid        *validation.Error
 		libraryInUse   *library.InUseError
 		ruleInUse      *playrules.InUseError
@@ -105,6 +106,13 @@ func problemFor(ctx context.Context, log *slog.Logger, err error) *dto.Problem {
 	case errors.Is(err, settings.ErrNotEditable):
 		p = dto.NewProblem(http.StatusConflict, errcodes.SettingNotEditable,
 			"the setting is a secret: set it in the environment and restart the service")
+	case errors.As(err, &invalidBatch):
+		p = dto.NewProblem(http.StatusUnprocessableEntity, errcodes.ValidationFailed, "")
+		for _, ive := range invalidBatch.Errors {
+			p.Errors = append(p.Errors, dto.FieldError{
+				Field: "values." + ive.Key, Code: settingRuleCodes[ive.Rule], Message: ive.Message,
+			})
+		}
 	case errors.As(err, &invalidSetting):
 		p = dto.NewProblem(http.StatusUnprocessableEntity, errcodes.ValidationFailed, "")
 		p.Errors = []dto.FieldError{{Field: "value", Code: settingRuleCodes[invalidSetting.Rule], Message: invalidSetting.Message}}
@@ -257,6 +265,7 @@ var settingRuleCodes = map[settings.Rule]errcodes.Field{
 	settings.RuleInvalid:      errcodes.Invalid,
 
 	settings.RuleIntervalBeyondRetention: errcodes.IntervalBeyondRetention,
+	settings.RuleEncoderLimit:            errcodes.EncoderLimit,
 }
 
 // NewHumaError builds the problem for errors raised by huma itself: request

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,8 @@ type fakeStore struct {
 	mu   sync.Mutex
 	rows map[string]settings.Stored
 	err  error
+	// upserts counts the UpsertMany calls.
+	upserts int
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{rows: map[string]settings.Stored{}} }
@@ -54,14 +57,17 @@ func (f *fakeStore) Get(_ context.Context, key string) (settings.Stored, error) 
 	return r, nil
 }
 
-func (f *fakeStore) Upsert(_ context.Context, s settings.Stored) (settings.Stored, error) {
+func (f *fakeStore) UpsertMany(_ context.Context, sts []settings.Stored) ([]settings.Stored, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.upserts++
 	if f.err != nil {
-		return settings.Stored{}, f.err
+		return nil, f.err
 	}
-	f.rows[s.Key] = s
-	return s, nil
+	for _, s := range sts {
+		f.rows[s.Key] = s
+	}
+	return sts, nil
 }
 
 // allSecretsSet reports every secret of the configuration as set.
@@ -202,7 +208,10 @@ func TestSetSavesLogsAndNotifies(t *testing.T) {
 	var got []int
 	settings.OnChange(svc, settings.LiquidsoapFadeOutMS, func(v int) { got = append(got, v) })
 	var changes []settings.Change
-	svc.Subscribe(func(c settings.Change) { changes = append(changes, c) })
+	svc.Subscribe(func(cs []settings.Change) {
+		require.Len(t, cs, 1, "Set notifies once with one key")
+		changes = append(changes, cs...)
+	})
 
 	s, err := svc.Set(t.Context(), "liquidsoap.fade_out_ms", json.RawMessage(`2700.0`))
 	require.NoError(t, err)
@@ -469,4 +478,227 @@ func TestRotationFullPassSettingsDefaults(t *testing.T) {
 		require.Equal(t, b[0], *d.Minimum, key)
 		require.Equal(t, b[1], *d.Maximum, key)
 	}
+}
+
+// refuseStreamBitrate registers a check that refuses a bitrate above 128
+// kbps on every changed key it watches, and counts its runs.
+func refuseStreamBitrate(svc *settings.Service, runs *int) {
+	keys := []string{settings.StreamCodec.Name(), settings.StreamBitrateKbps.Name()}
+	settings.Check(svc, keys, func(_ context.Context, v settings.View) error {
+		*runs++
+		kbps, err := settings.ViewValue(v, settings.StreamBitrateKbps)
+		if err != nil {
+			return err
+		}
+		if kbps <= 128 {
+			return nil
+		}
+		var refused []error
+		for _, k := range keys {
+			if v.Changed(k) {
+				refused = append(refused, settings.Refuse(k, settings.RuleEncoderLimit, "too high"))
+			}
+		}
+		return errors.Join(refused...)
+	})
+}
+
+// One bad field means nothing is saved, and every refusal comes back at
+// once: own rules, guards, cross-key checks, unknown keys, and secrets.
+func TestSetManyCollectsEveryRefusal(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	svc, logs := newService(t, store)
+	runs := 0
+	refuseStreamBitrate(svc, &runs)
+	settings.Guard(svc, settings.RetentionPlayLogDays, func(context.Context, int) error {
+		return settings.Refuse(settings.RetentionPlayLogDays.Name(), settings.RuleIntervalBeyondRetention, "a play rule needs more")
+	})
+	notified := 0
+	svc.Subscribe(func([]settings.Change) { notified++ })
+
+	_, err := svc.SetMany(t.Context(), map[string]json.RawMessage{
+		"station.name":                       json.RawMessage(`"Fine"`),
+		"liquidsoap.fade_out_ms":             json.RawMessage(`1500`),
+		"stream.bitrate_kbps":                json.RawMessage(`192`),
+		"retention.play_log_days":            json.RawMessage(`30`),
+		"no.such_key":                        json.RawMessage(`1`),
+		settings.SecretIcecastSourcePassword: json.RawMessage(`"hunter2"`),
+	})
+	var ive *settings.InvalidValuesError
+	require.ErrorAs(t, err, &ive)
+	type refusal struct {
+		key  string
+		rule settings.Rule
+	}
+	var got []refusal
+	for _, e := range ive.Errors {
+		got = append(got, refusal{e.Key, e.Rule})
+	}
+	require.Equal(t, []refusal{
+		{"stream.bitrate_kbps", settings.RuleEncoderLimit},
+		{"liquidsoap.fade_out_ms", settings.RuleRange},
+		{"retention.play_log_days", settings.RuleIntervalBeyondRetention},
+		{"no.such_key", settings.RuleUnknownField},
+		{settings.SecretIcecastSourcePassword, settings.RuleUnknownField},
+	}, got, "registry order, then unknown keys by key")
+	require.Contains(t, ive.Errors[4].Message, "secret")
+	require.Equal(t, 1, runs)
+	require.Zero(t, store.upserts, "nothing written")
+	require.Empty(t, store.rows)
+	require.Zero(t, notified)
+	require.NotContains(t, logs.String(), "setting changed")
+	require.NotContains(t, logs.String(), "hunter2")
+}
+
+// A check whose key failed its own rules is skipped: it would judge the
+// saved value instead of the one the manager typed.
+func TestSetManySkipsCheckOfRefusedKey(t *testing.T) {
+	t.Parallel()
+	svc, _ := newService(t, newFakeStore())
+	runs := 0
+	refuseStreamBitrate(svc, &runs)
+	_, err := svc.SetMany(t.Context(), map[string]json.RawMessage{
+		"stream.codec":        json.RawMessage(`"flac"`),
+		"stream.bitrate_kbps": json.RawMessage(`192`),
+	})
+	var ive *settings.InvalidValuesError
+	require.ErrorAs(t, err, &ive)
+	require.Len(t, ive.Errors, 1)
+	require.Equal(t, settings.RuleEnum, ive.Errors[0].Rule)
+	require.Zero(t, runs)
+
+	// A check that touches no key of the batch does not run either.
+	_, err = svc.SetMany(t.Context(), map[string]json.RawMessage{"station.name": json.RawMessage(`"X"`)})
+	require.NoError(t, err)
+	require.Zero(t, runs)
+}
+
+// A check that fails for another reason fails the save with its error.
+func TestSetManyCheckError(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	svc, _ := newService(t, store)
+	settings.Check(svc, []string{"station.name"}, func(context.Context, settings.View) error {
+		return errors.New("lookup failed")
+	})
+	_, err := svc.SetMany(t.Context(), map[string]json.RawMessage{"station.name": json.RawMessage(`"X"`)})
+	require.ErrorContains(t, err, "lookup failed")
+	var ive *settings.InvalidValuesError
+	require.NotErrorAs(t, err, &ive)
+	require.Zero(t, store.upserts)
+}
+
+// A valid batch is written in one call, logged per key, and notified once
+// with every key in registry order.
+func TestSetManySavesAndNotifiesOnce(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	svc, logs := newService(t, store)
+	var calls [][]settings.Change
+	svc.Subscribe(func(cs []settings.Change) { calls = append(calls, cs) })
+	var gains []float64
+	settings.OnChange(svc, settings.LiquidsoapMusicGain, func(v float64) { gains = append(gains, v) })
+
+	saved, err := svc.SetMany(t.Context(), map[string]json.RawMessage{
+		"stream.bitrate_kbps":   json.RawMessage(`192`),
+		"liquidsoap.music_gain": json.RawMessage(`0.5`),
+		"stream.codec":          json.RawMessage(`"vorbis"`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, store.upserts)
+	require.Len(t, store.rows, 3)
+
+	keys := func(n int, key func(int) string) []string {
+		out := make([]string, n)
+		for i := range n {
+			out[i] = key(i)
+		}
+		return out
+	}
+	want := []string{"stream.codec", "stream.bitrate_kbps", "liquidsoap.music_gain"}
+	require.Equal(t, want, keys(len(saved), func(i int) string { return saved[i].Definition.Key }), "registry order")
+	require.Len(t, calls, 1, "one notification")
+	require.Equal(t, want, keys(len(calls[0]), func(i int) string { return calls[0][i].Key }))
+	for _, c := range calls[0] {
+		require.Equal(t, t0, c.At)
+	}
+	require.Equal(t, []float64{0.5}, gains)
+	require.Equal(t, 192, saved[1].Value)
+	require.Equal(t, t0, *saved[1].UpdatedAt)
+	require.Equal(t, 3, strings.Count(logs.String(), `"msg":"setting changed"`))
+}
+
+// The view holds the batch over the saved values over the defaults.
+func TestViewValue(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	store.rows["stream.codec"] = settings.Stored{Key: "stream.codec", Value: json.RawMessage(`"aac"`), UpdatedAt: t0}
+	store.rows["stream.channels"] = settings.Stored{Key: "stream.channels", Value: json.RawMessage(`1`), UpdatedAt: t0}
+	svc, _ := newService(t, store)
+	type seen struct {
+		codec                  string
+		channels, rate, kbps   int
+		codecChanged, chChange bool
+	}
+	var got seen
+	settings.Check(svc, []string{"stream.channels"}, func(_ context.Context, v settings.View) error {
+		var err error
+		got.codec, err = settings.ViewValue(v, settings.StreamCodec)
+		require.NoError(t, err)
+		got.channels, err = settings.ViewValue(v, settings.StreamChannels)
+		require.NoError(t, err)
+		got.rate, err = settings.ViewValue(v, settings.StreamSampleRateHz)
+		require.NoError(t, err)
+		got.kbps, err = settings.ViewValue(v, settings.StreamBitrateKbps)
+		require.NoError(t, err)
+		got.codecChanged, got.chChange = v.Changed("stream.codec"), v.Changed("stream.channels")
+		return nil
+	})
+	_, err := svc.SetMany(t.Context(), map[string]json.RawMessage{
+		"stream.channels":     json.RawMessage(`2`),
+		"stream.bitrate_kbps": json.RawMessage(`256`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, seen{codec: "aac", channels: 2, rate: 44100, kbps: 256, chChange: true}, got)
+}
+
+// An empty batch saves nothing and notifies nobody.
+func TestSetManyEmpty(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	svc, _ := newService(t, store)
+	notified := 0
+	svc.Subscribe(func([]settings.Change) { notified++ })
+	saved, err := svc.SetMany(t.Context(), nil)
+	require.NoError(t, err)
+	require.Empty(t, saved)
+	require.Zero(t, store.upserts)
+	require.Zero(t, notified)
+}
+
+// Saves run one at a time: concurrent batches never interleave their
+// checks and writes, and each is notified once.
+func TestSetManyConcurrent(t *testing.T) {
+	t.Parallel()
+	svc, _ := newService(t, newFakeStore())
+	var mu sync.Mutex
+	notified := 0
+	svc.Subscribe(func([]settings.Change) {
+		mu.Lock()
+		notified++
+		mu.Unlock()
+	})
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			_, err := svc.SetMany(t.Context(), map[string]json.RawMessage{
+				"rotation.min_gap_ms": json.RawMessage(strconv.Itoa(1000 + i)),
+				"station.name":        json.RawMessage(`"X"`),
+			})
+			require.NoError(t, err)
+		})
+	}
+	wg.Wait()
+	require.Equal(t, 20, notified)
 }
