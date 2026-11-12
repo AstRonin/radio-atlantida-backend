@@ -1,8 +1,10 @@
 name: release
 
-# A tag vX.Y.Z publishes ghcr.io/astronin/radio-atlantida-backend:X.Y.Z and
-# the GitHub release vX.Y.Z with the openapi.json of that image
-# (docs/phase-13-plan.md). The deploy repository refers to X.Y.Z only.
+# A tag vX.Y.Z publishes ghcr.io/astronin/radio-atlantida-backend:X.Y.Z, one
+# manifest list for linux/amd64 and linux/arm64, and the GitHub release vX.Y.Z
+# with the openapi.json of that image (docs/phase-13-plan.md,
+# docs/deploy-prereqs-plan.md B6, C2). The deploy repository refers to X.Y.Z
+# and pins the manifest list digest.
 on:
   push:
     tags: ["v*"]
@@ -21,8 +23,12 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     outputs:
       version: ${{ steps.tag.outputs.version }}
+      created: ${{ steps.tag.outputs.created }}
       migrations: ${{ steps.migrations.outputs.migrations }}
     steps:
       - name: tag is vX.Y.Z
@@ -34,6 +40,8 @@ jobs:
             echo "::error::tag $tag is not vX.Y.Z; nothing is released"; exit 1
           fi
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          # One creation time for the images of both platforms.
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -58,67 +66,178 @@ jobs:
             echo "::error::the message of $GITHUB_REF_NAME needs exactly one line 'migrations: none|expand|contract', got: '$lines'"; exit 1
           fi
           echo "migrations=${lines#migrations: }" >> "$GITHUB_OUTPUT"
+      - name: log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: image tag is not taken
+        # A released tag is never overwritten; a fix gets a new patch version.
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+            echo "::error::$IMAGE:$VERSION already exists"; exit 1
+          fi
 
   ci:
     needs: check
     uses: ./.github/workflows/ci.yml
 
+  # Each platform is built and smoke tested natively (the runtime stage
+  # installs ffmpeg with apt, which would need QEMU on one runner), then pushed
+  # by digest only; the manifest job joins the two digests under the tag
+  # (docs/deploy-prereqs-plan.md C2, C4).
   image:
     needs: [check, ci]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    name: image (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      CREATED: ${{ needs.check.outputs.created }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: builder
+        # A docker-container builder can push by digest; no build attestations.
+        run: docker buildx create --name release --driver docker-container --use
+      - name: build
+        run: |
+          docker buildx build -f docker/Dockerfile --platform "$PLATFORM" \
+            --provenance=false --sbom=false \
+            --build-arg VERSION="$VERSION" \
+            --build-arg REVISION="$GITHUB_SHA" \
+            --build-arg CREATED="$CREATED" \
+            --load -t "$IMAGE:$VERSION" .
+      - name: smoke test and specification from the image
+        # The attached openapi.json is the contract of the shipped binary.
+        run: |
+          got=$(docker inspect -f '{{ .Os }}/{{ .Architecture }}' "$IMAGE:$VERSION")
+          if [ "$got" != "$PLATFORM" ]; then
+            echo "::error::image is built for $got, want $PLATFORM"; exit 1
+          fi
+          got=$(docker run --rm "$IMAGE:$VERSION" version)
+          if [ "$got" != "$VERSION" ]; then
+            echo "::error::image reports version $got, want $VERSION"; exit 1
+          fi
+          docker run --rm "$IMAGE:$VERSION" migrate target-compat
+          docker run --rm "$IMAGE:$VERSION" openapi > "openapi-${{ matrix.arch }}.json"
+          jq -e --arg v "$VERSION" '.info.version == $v' "openapi-${{ matrix.arch }}.json"
+      - name: push by digest
+        # The same build from the builder's cache, pushed without a tag.
+        run: |
+          docker buildx build -f docker/Dockerfile --platform "$PLATFORM" \
+            --provenance=false --sbom=false \
+            --build-arg VERSION="$VERSION" \
+            --build-arg REVISION="$GITHUB_SHA" \
+            --build-arg CREATED="$CREATED" \
+            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file metadata.json .
+          digest=$(jq -r '."containerimage.digest"' metadata.json)
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::no image digest in the build metadata: $digest"; exit 1
+          fi
+          echo "$PLATFORM: $IMAGE@$digest"
+          mkdir -p digests
+          touch "digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi-${{ matrix.arch }}
+          path: openapi-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    needs: [check, image]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     env:
       VERSION: ${{ needs.check.outputs.version }}
+    outputs:
+      digest: ${{ steps.list.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: openapi-*
+          merge-multiple: true
+      - name: both platforms ship the same specification
+        run: |
+          if ! cmp openapi-amd64.json openapi-arm64.json; then
+            echo "::error::the openapi of the arm64 image differs from the amd64 one"; exit 1
+          fi
       - name: log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: image tag is not taken
-        # A released tag is never overwritten; a fix gets a new patch version.
+      - name: image tag is still not taken
         run: |
-          if docker manifest inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
             echo "::error::$IMAGE:$VERSION already exists"; exit 1
           fi
-      - name: build
+      - name: manifest list
+        id: list
         run: |
-          docker build -f docker/Dockerfile -t "$IMAGE:$VERSION" \
-            --build-arg VERSION="$VERSION" \
-            --build-arg REVISION="$GITHUB_SHA" \
-            --build-arg CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
-      - name: specification from the image
-        # The attached openapi.json is the contract of the shipped binary.
-        run: |
-          got=$(docker run --rm "$IMAGE:$VERSION" version)
-          if [ "$got" != "$VERSION" ]; then
-            echo "::error::image reports version $got, want $VERSION"; exit 1
+          refs=()
+          for f in digests/*; do refs+=("$IMAGE@sha256:$(basename "$f")"); done
+          if [ "${#refs[@]}" -ne 2 ]; then
+            echo "::error::want 2 platform digests, got ${#refs[@]}: ${refs[*]}"; exit 1
           fi
-          docker run --rm "$IMAGE:$VERSION" openapi > openapi.json
-          jq -e --arg v "$VERSION" '.info.version == $v' openapi.json
-      - name: push
-        run: docker push "$IMAGE:$VERSION"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: openapi
-          path: openapi.json
+          docker buildx imagetools create -t "$IMAGE:$VERSION" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          got=$(docker buildx imagetools inspect --raw "$IMAGE:$VERSION" |
+            jq -r '[.manifests[].platform | "\(.os)/\(.architecture)"] | sort | join(" ")')
+          if [ "$got" != "linux/amd64 linux/arm64" ]; then
+            echo "::error::$IMAGE:$VERSION lists platforms '$got', want 'linux/amd64 linux/arm64'"; exit 1
+          fi
+          digest=$(docker buildx imagetools inspect --format '{{ json .Manifest }}' "$IMAGE:$VERSION" | jq -r .digest)
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::no manifest list digest for $IMAGE:$VERSION: $digest"; exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Manifest list: $IMAGE:$VERSION@$digest"
+          echo "BACKEND_TAG=$VERSION, digest \`$digest\` (for release.env)" >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    needs: [check, image]
+    needs: [check, manifest]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: openapi
+          name: openapi-amd64
       - name: GitHub release with openapi.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.check.outputs.version }}
           MIGRATIONS: ${{ needs.check.outputs.migrations }}
+          DIGEST: ${{ needs.manifest.outputs.digest }}
         run: |
+          mv openapi-amd64.json openapi.json
           gh release create "$GITHUB_REF_NAME" openapi.json \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
             --title "$GITHUB_REF_NAME" \
-            --notes "Migrations: $MIGRATIONS. Image: \`$IMAGE:$VERSION\`. Frontend: \`npm run api:sync -- openapi.json\`."
+            --notes "Migrations: $MIGRATIONS. Image: \`$IMAGE:$VERSION\` (\`linux/amd64\`, \`linux/arm64\`), manifest list digest \`$DIGEST\`. Frontend: \`npm run api:sync -- openapi.json\`."

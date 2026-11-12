@@ -3,7 +3,12 @@
 # Keep GO_VERSION equal to the go directive in go.mod.
 ARG GO_VERSION=1.27.4
 
-FROM golang:${GO_VERSION}-trixie AS build
+# The build stage runs on the builder's own platform and cross-compiles for
+# the target (CGO is off), so a multi-platform build needs no emulation for
+# Go; the runtime stage is built per platform (docs/deploy-prereqs-plan.md C1).
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-trixie AS build
+ARG TARGETOS
+ARG TARGETARCH
 # The release version (the tag without the leading v); `backend version`
 # and the OpenAPI document report it.
 ARG VERSION=dev
@@ -13,7 +18,7 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/backend ./cmd/backend
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/backend ./cmd/backend
 
 FROM debian:trixie-20261005-slim
 ARG VERSION=dev
