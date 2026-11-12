@@ -38,9 +38,9 @@ docker compose -f docker-compose.dev.yml --profile app up --build
 
 Migrations live in `internal/migrations` as `NNNN_name.up.sql`, are embedded in the binary, and are forward-only: there are no down files and no `migrate down`. An applied migration is never edited; a fix is a new migration (expand and contract, §9.2 of `docs/tech-design.md`).
 
-- `backend migrate up` needs only `DATABASE_URL`. It logs each applied version and exits non-zero on failure.
-- A database newer than the binary (after a rollback to an earlier release) is accepted with a warning, so the older `backend` still starts.
-- A "dirty" state means a migration failed part-way. Restore the pre-update dump (`update.bat restore` in production; in development, recreate the `pgdata` volume) and ship a fixed migration.
+- `backend migrate up` needs only `DATABASE_URL`. It logs each applied version and exits non-zero on failure: `4` when a migration failed and PostgreSQL rolled it back (the version is reset, the database is clean), `5` when the database is dirty, `1` when nothing was changed. Every file runs in one transaction; the rules are in `CLAUDE.md` (PostgreSQL and SQL).
+- A database newer than the binary (after a rollback to an earlier release) is accepted with a warning, so the older `backend` still starts, unless the schema's `min_app_version` (table `schema_compat`) is above the binary's version: then `backend serve` refuses to start. `backend migrate check` prints the compatibility as JSON (exit `3` when incompatible).
+- A "dirty" state means a non-transactional migration failed part-way, or the outcome is unknown. In production the deploy tool restores the pre-update dump by itself; in development, recreate the `pgdata` volume. Then ship a fixed migration.
 
 ### Host names for `make run`
 

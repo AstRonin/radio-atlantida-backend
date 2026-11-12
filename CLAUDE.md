@@ -12,13 +12,13 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 - **Live voice**: WebRTC from the browser through a Go bridge into a Liquidsoap harbor input, mixed over music.
 - **Outages**: detected automatically (Icecast mount, callbacks heartbeat, control link while items are due); items that did not air are marked *missed*, kept until the manager reschedules or dismisses them; after backend downtime the journal is reconciled.
 - **Users**: one manager in an Angular panel. **No authentication** by design — the API listens on localhost or a private network only.
-- **Runs on**: Docker Desktop on a Windows 10/11 PC (Linux containers); development on macOS. Media files live on the host under `MEDIA_ROOT`, never in images.
+- **Runs on**: Docker Engine in a dedicated WSL2 distribution on a Windows 10/11 PC, no Docker Desktop (tech-design v7-24 §9.1); development on macOS. Media files live on the host under `MEDIA_ROOT`, never in images.
 
 ## Required reading at the start of every session
 
 1. `docs/base.md` — the product requirements (the goal; keep later features in mind so early code does not block them).
 2. `docs/tech-design.md` — the technical design. **It is the authority** on how things are built.
-3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort), `docs/phase-21-plan.md` for Phase 21 (on-air titles, reviewed mark, bulk rename), `docs/phase-22-plan.md` for Phase 22 (track cue points, waveform, usage marks), `docs/phase-23-plan.md` for Phase 23 (playlist placement rules, clock inserts, no filler, separation in play rules).
+3. The current phase plan — `docs/backend-init-plan.md` for Phases 1–6, `docs/phase-7-plan.md` for Phase 7 (clocks and grid), `docs/phase-8-plan.md` for Phase 8 (rotation engine), `docs/phase-9-plan.md` for Phase 9 (Liquidsoap integration), `docs/phase-10-plan.md` for Phase 10 (outages and missed items), `docs/phase-11-plan.md` for Phase 11 (import, quality analysis, transcoding), `docs/phase-12-plan.md` for Phase 12 (live voice), `docs/phase-13-plan.md` for Phase 13 (release pipeline), `docs/phase-14-plan.md` for Phase 14 (database monitoring with Grafana), `docs/phase-15-plan.md` for Phase 15 (log search with Loki), `docs/phase-16-plan.md` for Phase 16 (broadcast status), `docs/phase-17-plan.md` for Phase 17 (air window), `docs/phase-18-plan.md` for Phase 18 (import in place), `docs/phase-19-plan.md` for Phase 19 (bulk track delete), `docs/phase-20-plan.md` for Phase 20 (track list pages and sort), `docs/phase-21-plan.md` for Phase 21 (on-air titles, reviewed mark, bulk rename), `docs/phase-22-plan.md` for Phase 22 (track cue points, waveform, usage marks), `docs/phase-23-plan.md` for Phase 23 (playlist placement rules, clock inserts, no filler, separation in play rules), `docs/deploy-prereqs-plan.md` for the deploy prerequisites (runtime stream output, TLS, migration recovery, downgrade guard, multi-arch release).
 
 **If the code, the design, and the requirements disagree, stop and ask.**
 
@@ -50,9 +50,15 @@ Radio Atlantida is a radio automation system. This repository is its Go backend.
 | `make db-up` / `make db-down` | Only PostgreSQL |
 | `docker compose -f docker-compose.dev.yml --profile app up --build` | Stack plus the backend container |
 
-Binary: `backend serve` | `backend migrate up` (no `down`, ever) | `backend openapi` | `backend version`.
+Binary: `backend serve` | `backend migrate up` (no `down`, ever) | `backend migrate check` | `backend migrate target-compat` | `backend openapi` | `backend version`.
 
-Release: push a tag `vX.Y.Z` from `main`. `.github/workflows/release.yml` runs the whole CI, pushes `ghcr.io/astronin/radio-atlantida-backend:X.Y.Z` (never overwrites, no `latest`) and creates the GitHub release with that image's `openapi.json`.
+- `backend migrate up` exits `0` applied or nothing to do, `1` nothing changed (for example the database is unreachable), `4` a migration failed and was rolled back (the version is reset, the schema is clean at the previous version; log line `migration rolled back` with `version_failed`, `schema_version`, `sqlstate`), `5` the database is dirty (a marked non-transactional file failed, the outcome is unknown, or it was dirty already; log line `database dirty`; the deploy tool restores the pre-update dump). Files applied earlier in the same run stay applied.
+- `backend migrate check` prints one JSON object, `{"schema_version":22,"dirty":false,"min_app_version":"1.0.0","binary_version":"1.0.0","compatible":true}`, and exits `0` when compatible, `3` when the binary is below `min_app_version`. A build that is not a release (`dev`, a `git describe` string) is always compatible.
+- `backend migrate target-compat` prints `migrations.TargetMinAppVersion`, the `min_app_version` the image's newest migration sets; the deploy tool stops a running release below it before migrating.
+- `backend serve` refuses to start (exit `3`, ERROR "database schema needs at least X; this backend is Y") when its version is below `min_app_version`; started without the database, it checks at the first successful connection.
+- Exit code `2` is always a usage error.
+
+Release: push an annotated tag `vX.Y.Z` from `main` whose message has exactly one line `migrations: none|expand|contract` (`git tag -a v1.0.0 -m "migrations: expand"`; `contract` when a migration raises `min_app_version`). `.github/workflows/release.yml` refuses any other tag, runs the whole CI, builds and smoke tests `linux/amd64` and `linux/arm64` natively (runners `ubuntu-24.04` and `ubuntu-24.04-arm`), pushes each by digest, joins them as one manifest list `ghcr.io/astronin/radio-atlantida-backend:X.Y.Z` (never overwrites, no `latest`; the deploy repository pins its digest, printed in the job summary and the release notes), and creates the GitHub release with the `openapi.json` of the amd64 image (the arm64 one must be byte-equal) and the line "Migrations: <value>".
 
 ## Layout
 
@@ -65,7 +71,7 @@ internal/
   db/                 pgx pool (UTC session, timeouts), GORM on the same pool, DB.WithTx (one Tx for pgx and GORM), ConstraintError, CollectOne/CollectAll
   dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)
   architecture/       architecture test: SQL and driver imports only in the allowed packages; handlers and jobs never import repositories
-  migrations/         embedded NNNN_name.up.sql + runner (golang-migrate)
+  migrations/         embedded NNNN_name.up.sql + runner (golang-migrate; resets the version after a rolled-back file), lint of transaction-unsafe files (lint_test.go), schema_compat downgrade guard (compat.go: Compat, TargetMinAppVersion)
   httpapi/            chi router, middleware, health, huma API (api.go: OpenAPI, event schemas)
     errcodes/         stable problem and field error codes (never renamed; published as enums)
     dto/              request/response bodies, Problem (RFC 9457)
@@ -102,7 +108,7 @@ internal/
     ingest/                                        (pgx: imported tracks, track paths under a folder, analysis columns with the cue reset, artist find-or-create, busy check, waveforms)
   live/               live voice bridge: WebRTC (pion) on one UDP port, one session at a time (takeover), Opus relayed unchanged as Ogg/Opus to the Liquidsoap harbor (Icecast SOURCE); states and live.state events; no SQL
 api/                  generated openapi.json (not committed, not hand-edited)
-docker/Dockerfile     multi-stage; runtime Debian slim + ffmpeg, non-root
+docker/Dockerfile     multi-stage; Go cross-compiles on $BUILDPLATFORM, runtime Debian slim + ffmpeg per platform (amd64, arm64), non-root
 docker-compose.dev.yml  dev/test stack only (production compose is in radio-atlantida-deploy)
 dev/liquidsoap/radio.liq  minimal dev playout script (keep in step with deploy's production script)
 dev/scripts/gen-media.sh  test audio generator
@@ -178,13 +184,18 @@ docs/                 requirements, design, phase plans
 - `snake_case`, plural tables. `bigint GENERATED ALWAYS AS IDENTITY` keys, `timestamptz`, `text` (not `varchar(n)` unless a real rule), `jsonb` only for optional settings, `boolean NOT NULL DEFAULT ...`. Enum-like columns are `text` + `CHECK`, not PG enums.
 - Index every FK column used in joins or in-use checks. No speculative indexes.
 - Short transactions; no network calls inside. `READ COMMITTED`; `SELECT ... FOR UPDATE` for read-then-change; `FOR UPDATE SKIP LOCKED` for job claims. Singleton jobs take an advisory lock. Large deletes in batches. Every query has a context deadline (connections also set `statement_timeout`, `idle_in_transaction_session_timeout`).
-- Migrations: forward-only `.up.sql`, one logical change per file, never edit an applied one. Expand and contract. `CREATE INDEX CONCURRENTLY` in its own migration. Migrations seed only system rows; test data lives in fixtures.
+- Migrations: forward-only `.up.sql`, one logical change per file, never edit an applied one. Migrations seed only system rows; test data lives in fixtures. Rules (`docs/deploy-prereqs-plan.md` B5, B7; header of `internal/migrations/migrations.go`):
+  - Every file runs in one implicit transaction (golang-migrate sends it as one simple-protocol query), so a failure, including the migration connection's 10 s lock timeout, rolls the whole file back and `migrate up` exits `4`.
+  - No explicit transaction control (`BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `PREPARE TRANSACTION`); `DO $$ … $$` bodies are fine. `internal/migrations/lint_test.go` enforces it.
+  - A statement that cannot run in a transaction (`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX … CONCURRENTLY`, `VACUUM`, `CREATE DATABASE`, `ALTER SYSTEM`) is the only statement of a file whose first line is `-- migrate: non-transactional`. Its failure leaves the database dirty (exit `5`, dump restore), so review it with care.
+  - From 1.0.0 every migration is expand-only and safe while the previous release runs against it (the deploy tool migrates with the old backend on air).
+  - A contract migration (or any migration an older release cannot work with: a changed meaning of a column, a new `NOT NULL` without default that old code does not write) ends with `UPDATE schema_compat SET min_app_version = '<oldest compatible release>', set_by_migration = <n>, updated_at = now() WHERE id = 1;`, raises `migrations.TargetMinAppVersion` to the same value (a test compares them), is tagged `migrations: contract`, and comes no earlier than the release after the one that stopped using what it drops.
 - **A schema change is applied, not only written.** When a change adds a migration (new or changed columns, tables, constraints, indexes), apply it to the dev database before running or checking anything: `make migrate` (or `docker compose -f docker-compose.dev.yml --profile app up --build`, whose `migrate` service runs first), then `make test-integration`. Every phase plan that changes the schema says so in its work, order of work, and "Done when".
 - GORM: `SkipDefaultTransaction: true`, `TranslateError: true`, no auto-migrate, `Omit(clause.Associations)` unless intended. pgx: `pgx.CollectRows`/`RowToStructByName`; `pgx.Batch`/`CopyFrom` for bulk.
 
 ## Dev stack notes
 
-- Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `grafana/grafana:13.2.3` (the OSS edition; `grafana/grafana-oss` is no longer published), `grafana/loki:3.7.8`, `grafana/alloy:v1.20.1`, `golang:1.27.2-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
+- Pinned images: `postgres:17.11`, `libretime/icecast:2.4.4-alpine`, `savonet/liquidsoap:v2.4.6`, `linuxserver/ffmpeg:9.0-cli-ls84` (media script), `grafana/grafana:13.2.3` (the OSS edition; `grafana/grafana-oss` is no longer published), `grafana/loki:3.7.8`, `grafana/alloy:v1.20.1`, `golang:1.27.4-trixie` / `debian:trixie-20261005-slim` (Dockerfile).
 - All ports are published on `127.0.0.1` only. Stream: `http://127.0.0.1:8000/radio`. Liquidsoap telnet `127.0.0.1:1234` (`hour_0.push /media/<file>`, `var.set music_gain = 0.2`), harbor `127.0.0.1:8005` (mount `live`).
 - Liquidsoap has two hour queues, `hour_0` and `hour_1` (`hour_<p>.push <uri>`, `hour_<p>.queue`); a time switch plays the queue of the current station hour, using `hour_shift` set by the backend. Requests carry `liq_cue_in`/`liq_cue_out` and `liq_fade_in`/`liq_fade_out`; in Liquidsoap 2.4 `fade.out` must be `track_sensitive=true` (the default fades once and silences the source for good), and the fade in is the script's own `cue_fade_in` (see `docs/phase-22-plan.md` §10). Behind it, `request.dynamic` asks `BACKEND_EMERGENCY_URL` for emergency tracks, then a safety tone.
 - Liquidsoap writes the journal to `$PLAYOUT_JOURNAL_ROOT/journal-YYYY-MM-DD.jsonl` (`.dev/journal` in dev; one JSON line per track `start`/`end` and per Icecast `output` change, UTC; files older than 10 days deleted by the script) and POSTs the same line to `BACKEND_CALLBACK_URL` (`/api/playout/callback`). It also POSTs a `heartbeat` every 5 s (not journaled); without it the outage detector opens a `liquidsoap_callback` outage.
