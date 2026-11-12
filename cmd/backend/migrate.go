@@ -98,13 +98,20 @@ func incompatible(st migrations.Status, binary string) error {
 
 // checkSchema is the startup guard of `backend serve`: it reads the schema
 // compatibility once. checked is false when the database could not be read;
-// the error is errIncompatible (logged) when this binary may not run.
+// the error is errIncompatible (logged) when this binary may not run. A
+// dirty database does not stop serve (developer decision 2026-11-12): it
+// is only logged at ERROR; the deploy tool, which saw `migrate up` exit 5,
+// restores the pre-update dump.
 func checkSchema(ctx context.Context, read compatReader, binary string, log *slog.Logger) (checked bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, compatTimeout)
 	defer cancel()
 	st, err := read(ctx)
 	if err != nil {
 		return false, err
+	}
+	if st.Dirty {
+		log.Error(fmt.Sprintf("database dirty at schema version %d: a migration failed part-way; serving anyway", st.SchemaVersion),
+			"schema_version", st.SchemaVersion, "version", binary)
 	}
 	if !st.Compatible(binary) {
 		err := incompatible(st, binary)

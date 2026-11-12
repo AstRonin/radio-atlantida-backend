@@ -99,6 +99,14 @@ func TestCheckSchema(t *testing.T) {
 	require.True(t, checked)
 	require.NoError(t, err)
 
+	// A dirty database is logged at ERROR, but serve starts.
+	logs.Reset()
+	checked, err = checkSchema(t.Context(), fixedCompat(migrations.Status{SchemaVersion: 22, Dirty: true, MinAppVersion: "1.0.0"}), "1.0.0", log)
+	require.True(t, checked)
+	require.NoError(t, err)
+	require.Contains(t, logs.String(), `"level":"ERROR"`)
+	require.Contains(t, logs.String(), "database dirty at schema version 22")
+
 	checked, err = checkSchema(t.Context(), func(context.Context) (migrations.Status, error) {
 		return migrations.Status{}, errors.New("connection refused")
 	}, "1.4.0", log)
