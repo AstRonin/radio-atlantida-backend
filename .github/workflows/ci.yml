@@ -92,8 +92,16 @@ jobs:
           if [ "$image" != "$make" ]; then
             echo "docker-compose.dev.yml runs $image, Makefile LIQUIDSOAP is $make"; exit 1
           fi
+      # On failure the make target prints `docker compose ps -a` and the logs
+      # of every smoke service before removing the stack.
       - name: liquidsoap --check and runtime smoke test
         run: make liquidsoap-smoke
+      - name: smoke diagnostics
+        if: failure()
+        run: |
+          id
+          ls -la .dev .dev/liqsmoke || true
+          docker compose version
 
   openapi:
     runs-on: ubuntu-latest

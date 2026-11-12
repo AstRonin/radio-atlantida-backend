@@ -17,8 +17,17 @@ import (
 // writeCerts writes a throwaway CA (ca.pem) and a certificate for host
 // signed by it (cert.pem, key.pem) into dir, for the TLS proxy of the test
 // stack. Nothing else trusts them.
+//
+// The directory is bind-mounted into the TLS proxy, whose unprivileged user
+// (uid 101) differs from the host user. Docker Desktop on macOS ignores host
+// modes on bind mounts; Linux (CI) does not, so the directory must be 0755
+// and the files 0644, the key included: a throwaway test key.
 func writeCerts(dir, host string) error {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: read by another uid in a container, test certificates only
+		return err
+	}
+	// MkdirAll keeps the mode of an existing directory (an earlier 0750 run).
+	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: as above
 		return err
 	}
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

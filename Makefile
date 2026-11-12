@@ -106,5 +106,5 @@ liquidsoap-check: ## liquidsoap --check of dev/liquidsoap/radio.liq in the pinne
 liquidsoap-smoke: liquidsoap-check ## Run the playout script against a test Icecast (plain and TLS) and switch its output at runtime
 	go run ./dev/liqsmoke -cert ./.dev/liqsmoke
 	go run ./dev/liqsmoke; status=$$?; \
-		if [ $$status -ne 0 ]; then $(SMOKE) logs --tail 50 liquidsoap; fi; \
+		if [ $$status -ne 0 ]; then $(SMOKE) ps -a; $(SMOKE) logs --no-color --tail 100; fi; \
 		$(SMOKE) down -v -t 1; exit $$status
