@@ -1,7 +1,7 @@
 # Plan — Deploy Prerequisites: Runtime Stream Output, TLS, Migration Recovery and Downgrade Guard, Multi-arch Release (radio-atlantida-backend)
 
-Status: Approved scope (deploy plan and tech-design v7-24, 2026-11-12); not started
-Based on: `docs/tech-design.md` v7-24 (§1.1, §6.3, §7.1, §8.1, §8.5, §8.8, §9, §9.2, §11 items 32–38), `radio-atlantida-docs/deploy/docs/deploy-init-plan.md` (§5 Phase D3, §6 Phase D4, §7.3, §10, §12 cross-repo tasks B1–B10), frontend `docs/deploy-prereqs-plan.md` (F1–F4)
+Status: Approved scope (deploy plan and tech-design v7-24, 2026-11-12). Phase A done (commits 6b270a5, e2b9178, 7214870; see §2.3; dev check A10 passed 2026-11-12) except step A11 (decided 2026-11-12, rewritten 2026-11-12 as a batch save); Phases B, C, D open.
+Based on: `docs/tech-design.md` v7-25 (§1.1, §6.3, §7.1, §8.1, §8.5, §8.8, §9, §9.2, §11 items 32–38), `radio-atlantida-docs/deploy/docs/deploy-init-plan.md` (§5 Phase D3, §6 Phase D4, §7.3, §10, §12 cross-repo tasks B1–B10, B12), frontend `docs/deploy-prereqs-plan.md` (F1–F4)
 Last updated: 2026-11-12
 
 ## 1. Goal
@@ -14,7 +14,7 @@ The deploy repository (`radio-atlantida-deploy`) can only finish its phases D3 a
 - undoes a failed migration by itself, so the deploy tool can keep the running release on air without asking the operator anything;
 - publishes its image for `linux/amd64` (production) and `linux/arm64` (the developer's Mac) under one tag.
 
-This plan covers the deploy plan's cross-repo tasks B1, B2, B3, B4 (resolved as a `CLAUDE.md` update to 1.27.4, step D1), B5, B6, B7 (required: automatic recovery of a failed migration), B8 (decided), B9, and B10. B11 is not planned (§7).
+This plan covers the deploy plan's cross-repo tasks B1, B2, B3, B4 (resolved as a `CLAUDE.md` update to 1.27.4, step D1), B5, B6, B7 (required: automatic recovery of a failed migration), B8 (decided), B9, B10, and B12 (encoder limits at save, A11). B11 is not planned (§7).
 
 **Precondition:** the uncommitted working-tree change (`docker/Dockerfile` `GO_VERSION=1.27.4`, `go.mod`) is committed first; it is not part of this plan.
 
@@ -24,15 +24,16 @@ This plan covers the deploy plan's cross-repo tasks B1, B2, B3, B4 (resolved as 
 2. **One telnet command, JSON argument.** `output.set <json>` on the control port. The script parses it with `json.parse`, so no setting value ever becomes script code. The source password stays in Liquidsoap's environment and is never sent.
 3. **Idempotent.** An `output.set` equal to the running output answers `OK unchanged` and does nothing, so the backend can send it after every reconnect without interrupting the stream.
 4. **Shut down, then create.** On the same mount Icecast refuses the new source (403) until the old one has gone; the script shuts the old output down first and retries the new one after 1 s.
-5. **Startup without the backend.** Liquidsoap reads its first output from `GET /api/playout/output`, falling back to the last applied config in a state file, then to its environment (`ICECAST_HOST`, ...), then to defaults equal to the settings defaults. The backend's push corrects it as soon as the control link connects.
-6. **TLS is a setting**, `stream.icecast_tls` (bool, default `false` so the dev stack's Icecast keeps working; reconnect; affects air). It selects `transport=http.transport.ssl()` in the script and `https` in the outage detector's mount check.
-7. **`--check` is not enough.** `liquidsoap --check` accepts a script that fails at runtime (a non-literal `%mp3(stereo=…)`), so CI runs the script against a test Icecast.
+5. **Startup without the backend.** Liquidsoap reads its first output from `GET /api/playout/output`, falling back to the last output that connected (a state file, written on connect, not on `output.set`), then to its environment (`ICECAST_HOST`, ...), then to defaults equal to the settings defaults. The backend's push corrects it as soon as the control link connects.
+6. **TLS is a setting**, `stream.icecast_tls` (bool, default `false` so the dev stack's Icecast keeps working; reconnect; affects air). It selects `transport=http.transport.tls()` in the script (not `ssl()`, §2.3) and `https` in the outage detector's mount check.
+7. **`--check` is not enough.** `liquidsoap --check` accepts a script that fails at runtime (a non-literal `%mp3(stereo=…)`, an encoder over its limit), so CI runs the script against a test Icecast.
 8. **B5, minimal option.** Nothing new is implemented. `stream.loudness_target_lufs` stays: the import and Fix loudness use it (`cmd/backend/serve.go:622`); its description says it is not applied to the output. `stream.hls_enabled` stays as a reserved setting whose description says "not applied yet". No code reads either for the output.
 9. **`schema_compat` ships in 1.0.0** (the baseline), so every release from 1.0.0 has the table; a missing table still counts as `1.0.0` for safety.
 10. **A failed migration never leaves the operator a decision** (B7, required). A failed transactional migration is rolled back by PostgreSQL; `backend migrate up` resets golang-migrate's version so the database is clean, and exits with code 4. A database left dirty exits with code 5, and the deploy tool restores the pre-update dump by itself (deploy plan §7.3 step 7).
 11. **No release grouping.** Each migration file is its own unit. Files applied earlier in the same run stay applied: they are expand-only, so the running release works with them. Applying one release's files as one unit would need one transaction across files (golang-migrate commits per file, and a non-transactional file cannot join a transaction) or undoing committed files (which forward-only migrations do not allow); both are worse than "the schema is at version N, compatible with the running release".
 12. **B8 decided:** annotated release tags with a line `migrations: none|expand|contract`.
 13. **Multi-arch by native runners** (`ubuntu-24.04` and `ubuntu-24.04-arm`; the repository is public, so both are free): the runtime stage runs `apt-get install ffmpeg`, which would need QEMU on one runner. One manifest list per tag; the deploy repository pins its digest.
+14. **Encoder limits are refused at save** (2026-11-12, recommended by the main agent; the developer may override). Besides the script's refusal, the backend refuses to save a `stream.*` value that makes a combination over the encoder limits (§2.3), with a 4xx and a clear message on the field, so the panel shows the error at save time (A11). **Batch save** (developer decision, 2026-11-12): saving several `stream.*` fields one by one gives order-dependent refusals, so settings are saved as a batch, checked against the merged result and written all or nothing, with one change notification (A11).
 
 ### 2.1 Verified with `savonet/liquidsoap:v2.4.6` (2026-11-11/12)
 
@@ -42,7 +43,7 @@ Throwaway containers, test scripts kept in the session scratchpad (`liqtest/rt.l
 - Changed at runtime on one source: mp3 128/44100/stereo → mp3 192/48000/mono (new mount) → `%vorbis.cbr` 128 → `%fdkaac` 128 → mp3 320 on the same mount. Icecast reported every format. Gap on the same mount: about 4 s (first connect 403, retry after the default 3 s).
 - `bitrate` and `samplerate` may be runtime values; `%mp3(stereo=…)` must be the literal `true` or `false` (runtime error otherwise, not caught by `--check`); a mono encoder needs a mono source (`mean(s)`).
 - Output ids repeat on every switch (`out_mp3`, `out_mp3.1`, ...): create outputs with `register_telnet=false`.
-- `transport=http.transport.ssl()` (and `http.transport.tls()`) pass `--check`; a source connection through a TLS proxy to the test Icecast connected and streamed; `http.get` over HTTPS to the production status page returned 200 (the Let's Encrypt chain is trusted in the image).
+- `transport=http.transport.ssl()` and `http.transport.tls()` both pass `--check`; a source connection through a TLS proxy to the test Icecast connected and streamed; `http.get` over HTTPS to the production status page returned 200 (the Let's Encrypt chain is trusted in the image). Corrected in §2.3: `ssl()` rejects public chains, so the script uses `tls()`.
 - `on_error` is a source method in 2.4.6 (`out.on_error(synchronous=…, fun (restart_in, err) -> restart_in(1.))`); the argument form is deprecated.
 - Metadata charset: Liquidsoap already sends `charset=UTF-8`; Icecast 2.4.4 converts to the mount's charset (ISO-8859-1 by default). No script change; the server owner sets the mount charset (design §8.8).
 
@@ -59,11 +60,24 @@ Throwaway containers, test scripts kept in the session scratchpad (`liqtest/rt.l
 - Found while checking: golang-migrate's `database.Error` has no `Unwrap`, so `errors.As(err, &*pgconn.PgError)` does not reach the server error; the runner must `errors.As(err, &database.Error{})` and type-assert `OrigErr`. Its message also contains the whole migration SQL, which the log line should shorten.
 - Found while checking: a contract migration in a run that skips releases (running release below the new `min_app_version`) would break the running backend even though the migration succeeded; B7 adds `backend migrate target-compat` so the deploy tool can stop the old backend first in that case.
 
+### 2.3 Found in Phase A (2026-11-12, commits 6b270a5, e2b9178, 7214870)
+
+Deviations from the steps below, as implemented:
+
+- **TLS: `http.transport.tls()`, not `ssl()`.** In the 2.4.6 image `http.transport.ssl()` rejects public certificate chains, Let's Encrypt included ("unable to get local issuer certificate"). `tls()` verifies the server against the system roots (`radio.liq` `make_output`). The smoke test's TLS proxy uses a throwaway CA mounted over the image's `ca-certificates.crt`.
+- **State file path:** `/var/cache/liquidsoap/output.json` (`OUTPUT_STATE_FILE`) on the volume `liquidsoap-state` mounted at `/var/cache/liquidsoap`, not `/var/lib/radio`. The container runs as user `liquidsoap`; a new named volume takes the owner of the directory it is mounted over, and over a directory the image lacks it is root's. The script's built-in default is still `/var/lib/radio/output.json` (`radio.liq:60`; fixed in A11); the compose file sets the variable. Environment: `BACKEND_OUTPUT_URL`, `OUTPUT_STATE_FILE`, `ICECAST_TLS`.
+- **State written on connect.** The script saves the output in `on_connect`, not when it accepts `output.set`, so an output that crashes Liquidsoap never becomes the startup output. A failed write is logged at INFO ("output state not saved").
+- **Encoder limits.** Some Vorbis combinations make Liquidsoap exit when the output starts: mono 22050 Hz above 64 kbps, mono 32000 Hz above 160, mono 44100/48000 Hz above 192, stereo 22050 Hz above 160. The script refuses them with `ERROR <codec> with <n> channel(s) at <rate> Hz allows at most <max> kbps` (`ENCODER_LIMITS`, kept in step with `dev/liqsmoke/limits.go`). AAC uses `%fdkaac(aot="mpeg4_aac_lc", …)`: the default HE-AAC v2 fails on a mono source.
+- **Smoke test covers all four sample rates** (22050, 32000, 44100, 48000 Hz) for every codec × channels, at 64 and 320 kbps and on both sides of every limit (`testBitrates`), plain and over TLS.
+- **Strict `json.parse`.** The output is parsed into a typed record in which every field is required (unknown fields are ignored), not a record with defaults; a missing field answers `ERROR invalid output: …`.
+
 ## 3. Phases and steps
 
 Steps are in dependency order. **D3** / **D4** marks the deploy phase a step blocks.
 
-### Phase A — Runtime stream output and TLS (blocks deploy D3; A1 and A2 also block D4)
+### Phase A — Runtime stream output and TLS (blocks deploy D3; A1 and A2 also block D4) — done except A11
+
+A1, A2, A8: commit 6b270a5. A3–A7: e2b9178. A9 and the Liquidsoap notes of D1: 7214870. The step texts below are the plan; §2.3 lists where the implementation differs.
 
 **A1. Setting `stream.icecast_tls` (B6, blocks D3 and D4).**
 - `internal/settings/definitions.go`: key `StreamIcecastTLS = Key[bool]{"stream.icecast_tls"}` next to `StreamIcecastPort` (`:104`); `r.add(boolDef(StreamIcecastTLS, "Connect to the Icecast server over TLS (HTTPS).", false), ApplyReconnect, true)` after `:189`.
@@ -84,12 +98,12 @@ Steps are in dependency order. **D3** / **D4** marks the deploy phase a step blo
 
 **A4. Script: `output.set`, startup fetch, codec × channels, TLS (B1, blocks D3).** `dev/liquidsoap/radio.liq`, replacing the fixed output (`:344-356`):
 - Keep `radio` (`:342`) as the one source of every output.
-- `make_output(cfg)`: one branch per codec and channel count — `%mp3(bitrate=br, samplerate=sr, stereo=true)` / `stereo=false` on `mean(radio)`, `%vorbis.cbr(bitrate=br, samplerate=sr, channels=2)` / `channels=1` on `mean(radio)`, `%fdkaac(bitrate=br, samplerate=sr, channels=2)` / `channels=1` on `mean(radio)`; `transport=http.transport.ssl()` when `tls`, the default transport otherwise; `name`, `description`, `genre`, `host`, `port`, `mount`, `password=icecast_password`, `id="icecast"`, `register_telnet=false`; `out.on_error(synchronous=false, fun (restart_in, _) -> restart_in(1.))`; the existing `on_connect`/`on_disconnect` reports (`:355-356`) attached to every new output.
+- `make_output(cfg)`: one branch per codec and channel count — `%mp3(bitrate=br, samplerate=sr, stereo=true)` / `stereo=false` on `mean(radio)`, `%vorbis.cbr(bitrate=br, samplerate=sr, channels=2)` / `channels=1` on `mean(radio)`, `%fdkaac(aot="mpeg4_aac_lc", bitrate=br, samplerate=sr, channels=2)` / `channels=1` on `mean(radio)`; `transport=http.transport.tls()` when `tls` (§2.3), the default transport otherwise; `name`, `description`, `genre`, `host`, `port`, `mount`, `password=icecast_password`, `id="icecast"`, `register_telnet=false`; `out.on_error(synchronous=false, fun (restart_in, _) -> restart_in(1.))`; the existing `on_connect`/`on_disconnect` reports (`:355-356`) attached to every new output.
 - `current_output` (a `ref`) and `current_cfg` (the normalised JSON string).
-- `server.register("output.set", fun (arg) -> ...)`: `json.parse` into a record with defaults; validate the enums (codec, bitrate 64–320 in the settings set, sample rate 22050/32000/44100/48000, channels 1/2, port 1–65535, mount starting with `/`); equal to `current_cfg` → `"OK unchanged"`; otherwise `current_output().shutdown()`, create, store, write `OUTPUT_STATE_FILE` (`file.write`), → `"OK applied"`; invalid → `"ERROR <reason>"` and the running output stays.
+- `server.register("output.set", fun (arg) -> ...)`: `json.parse` into a typed record, every field required (§2.3); validate the enums (codec, bitrate 64–320 in the settings set, sample rate 22050/32000/44100/48000, channels 1/2, port 1–65535, mount starting with `/`) and the encoder limits (`ENCODER_LIMITS`, §2.3); equal to `current_cfg` → `"OK unchanged"`; otherwise `current_output().shutdown()`, create, store → `"OK applied"`; the new output writes `OUTPUT_STATE_FILE` (`file.write`, atomic) when it connects; invalid → `"ERROR <reason>"` and the running output stays.
 - Startup: `http.get(timeout=2., BACKEND_OUTPUT_URL)` → state file → environment (`ICECAST_HOST`, `ICECAST_PORT`, `ICECAST_MOUNT`, existing `:28-30`, plus `ICECAST_TLS`) → defaults; the chosen source is logged.
 - Header comment (`:1-22`): replace the output bullet; note the new contract (A6).
-- New environment: `BACKEND_OUTPUT_URL`, `OUTPUT_STATE_FILE` (default `/var/lib/radio/output.json`; a missing directory means no state file, not an error).
+- New environment: `BACKEND_OUTPUT_URL`, `OUTPUT_STATE_FILE` (set to `/var/cache/liquidsoap/output.json`, §2.3; a missing directory means no state file, not an error), `ICECAST_TLS`.
 
 **A5. Backend push on save and on reconnect (B1, blocks D3).**
 - `internal/playout/pusher.go`: `pusherState` (`:41-50`) gains `output string` (the last applied command); `resync` (`:140-169`) resets it like `shift`/`duck` (`:141`); new `applyOutput(ctx, set)` called in `pass` after `applyDuck` (`:121-123`): if `set.Output.Command()` equals `s.push.output`, nothing; else `s.ctl.Command(ctx, cmd)` (`internal/liquidsoap/client.go:101`); reply `OK applied` → INFO "stream output applied"; `OK unchanged` → nothing; `ERROR …` or a transport error → ERROR log with component `liquidsoap` (becomes a panel alert through `logging.Alert`, `internal/logging/alert.go:46`), `s.push.output` stays unset so the next pass retries, logged at most once per `retryLog`.
@@ -103,17 +117,42 @@ Steps are in dependency order. **D3** / **D4** marks the deploy phase a step blo
 ```
 The rule goes into the header comment and into `CLAUDE.md` (Liquidsoap section): bump the contract number whenever the telnet commands, callback payload, journal format, or the emergency/output endpoints change, and set `min-backend` to the release that first implements the new contract. Until the first release, `min-backend: 1.0.0`.
 
-**A7. Dev compose (B1, blocks D3).** `docker-compose.dev.yml` `liquidsoap` (`:56-92`): `BACKEND_OUTPUT_URL: ${BACKEND_OUTPUT_URL:-http://host.docker.internal:8090/api/playout/output}`, `OUTPUT_STATE_FILE: /var/lib/radio/output.json`, `ICECAST_TLS: "false"`, volume `liquidsoap-state:/var/lib/radio` (and in `volumes:` `:257-261`). The header comment (`:11-15`) keeps saying that the settings defaults must match this file.
+**A7. Dev compose (B1, blocks D3).** `docker-compose.dev.yml` `liquidsoap` (`:56-92`): `BACKEND_OUTPUT_URL: ${BACKEND_OUTPUT_URL:-http://host.docker.internal:8090/api/playout/output}`, `OUTPUT_STATE_FILE: /var/cache/liquidsoap/output.json`, `ICECAST_TLS: "false"`, volume `liquidsoap-state:/var/cache/liquidsoap` (§2.3; was `/var/lib/radio` in the plan) (and in `volumes:` `:257-261`). The header comment (`:11-15`) keeps saying that the settings defaults must match this file.
 
 **A8. Setting descriptions (B5).** `internal/settings/definitions.go`: `StreamLoudnessLUFS` (`:195`) → "Loudness target of the tracks: the import checks and Fix loudness use it; the stream output is not normalised."; `StreamHLSEnabled` (`:199`) → "Reserved: HLS output is not implemented yet; this value has no effect." Apply mode and range unchanged. Frontend help texts follow in F3.
 
 **A9. Runtime smoke test of the script in CI (B3, blocks D3).**
-- `dev/liqsmoke/main.go` (a dev tool like `dev/livecheck`): serves a stub backend (`/api/playout/callback` 204, `/api/playout/emergency/next` 204, `/api/playout/output` with a given config), connects to the telnet port, sends `output.set` for every codec × channel count with the lowest and the highest bitrate (64 and 320) and 44100/48000, and after each waits up to 10 s for Icecast's `/status-json.xsl` to list the mount with the expected `server_type` and `audio_info`. Then one switch to TLS through the proxy. Exit code non-zero on any miss.
+- `dev/liqsmoke/main.go` (a dev tool like `dev/livecheck`): serves a stub backend (`/api/playout/callback` 204, `/api/playout/emergency/next` 204, `/api/playout/output` with a given config), connects to the telnet port, sends `output.set` for every codec × channel count with the lowest and the highest bitrate (64 and 320) and, as implemented, all four sample rates and both sides of every encoder limit (§2.3), and after each waits up to 10 s for Icecast's `/status-json.xsl` to list the mount with the expected `server_type` and `audio_info`. Then one switch to TLS through the proxy. Exit code non-zero on any miss.
 - `dev/liqsmoke/compose.yml`: `libretime/icecast:2.4.4-alpine`, a TLS proxy (pinned `nginx` alpine image with a `stream` block and a throwaway certificate generated in the job, as in the 2026-11-12 check), `savonet/liquidsoap:v2.4.6` with `dev/liquidsoap/radio.liq` (the dev stack's pins, read from `docker-compose.dev.yml`).
 - `.github/workflows/ci.yml`: a job `liquidsoap` running `liquidsoap --check` and then the smoke test.
 - `Makefile`: `make liquidsoap-smoke`.
 
-**A10. Dev check (manual, before closing Phase A).** On the dev stack: change codec, bitrate, and mount in the panel while a track plays; the stream follows within a few seconds, the queue and the journal continue; restart the backend: no reconnect (`OK unchanged`); restart Liquidsoap with the backend down: it starts from the state file.
+**A10. Dev check (manual, before closing Phase A) — done (2026-11-12).** On the dev stack: change codec, bitrate, and mount in the panel while a track plays; the stream follows within a few seconds, the queue and the journal continue; restart the backend: no reconnect (`OK unchanged`); restart Liquidsoap with the backend down: it starts from the state file. Run by script by the Phase A agent: Liquidsoap recreated → `OK unchanged`; codec, bitrate, and mount changed through the API and Icecast followed each; the journal kept growing. The backend-restart path was covered by the smoke test instead of on the dev stack.
+
+**A11. Batch settings save with encoder limit validation (B12; before the first release).** Decision 14. The backend refuses a stream format the encoders cannot start, so the panel shows the error when the manager saves, not later as a playout alert; and it saves several settings at once, so the refusal does not depend on the order of the fields and a change of several stream fields gives one reconnect.
+
+- **One table in Go.** A new package `internal/streamformat` (named after what it provides; no SQL, no settings import) holds the encoder limits of the pinned Liquidsoap (the five rows of §2.3) and `func Check(codec string, channels, sampleRateHz, bitrateKbps int) *Limit` (nil when allowed; `Limit` carries the codec, channels, rate, and `MaxKbps`). `dev/liqsmoke` uses it instead of its own `limits.go` (`encoderLimits`, `encoderLimit`; `testBitrates` stays in the tool, reading the package's table), so the smoke test still sends both sides of every limit. A unit test in `dev/liqsmoke` (next to `pins_test.go`) parses the `encoder_limits` list of `dev/liquidsoap/radio.liq` and compares it with the package's table, so a drift fails `make test` without Docker.
+- **Endpoint `PATCH /api/settings`** (operation `set-settings`, `internal/httpapi/handlers/settings.go`, next to `set-setting`; PATCH because it changes some settings of the collection, as `move-hour-insert` does for one resource). Body `dto.SetSettings{Values map[string]any}` (`json:"values"`, `minProperties:"1"`, keys as in `PUT /api/settings/{key}`). 200 → `dto.SettingList` of the saved settings, in registry order. 422 `validation_failed` → `errors[]` in the existing field-error format, one per refused key, `field = "values.<key>"` (for example `values.stream.bitrate_kbps`), `code` from `settingRuleCodes`, so a type, range, or enum error and an encoder limit error come back together. An unknown key or a secret in the batch is a field error on that key (`unknown_field`; the message says that a secret is set in the environment) rather than the 404/409 of the single-key route. Add the path to `internal/httpapi/router_test.go`.
+- **Service** (`internal/settings/settings.go`): `func (s *Service) SetMany(ctx, values map[string]json.RawMessage) ([]Setting, error)`:
+  1. every key: `editable` and `d.parse` (its own rules); collect all refusals instead of stopping at the first;
+  2. the merged view: current values (`store.List` once) with the parsed batch on top;
+  3. the per-key guards (`Guard`, the retention guard unchanged) for every key of the batch, and the new cross-key checks (below) against the merged view;
+  4. any refusal → return `*InvalidValuesError{Errors []*InvalidValueError}` and write nothing;
+  5. otherwise write the batch in one transaction (step "Store"), log one `setting changed` line per key as now, and notify once.
+  A service mutex (`saveMu`) serializes `Set` and `SetMany`, so the checks and the write see the same saved values within the process (one backend per database).
+  - `Set` (the single-key PUT) becomes `SetMany` with one key; its handler keeps mapping the one refusal to `field = "value"`, so the existing route and the panel's older behaviour are unchanged. For a stream key it therefore also runs the encoder check against the merged state (saved values plus that one value).
+- **Cross-key checks.** Next to `Guard[T]`: `settings.Check(s, keys []string, fn func(ctx context.Context, v View) error)`, run once per save when the batch touches any of `keys`. `View` is the merged state: `settings.ViewValue[T](v, Key[T])` returns the batch value or the current one, and `v.Changed(key)` tells which keys the batch carries. The refusal is `settings.Refuse(key, rule, msg)` per changed key (several joined with `errors.Join`; the service unpacks them into `InvalidValuesError`). `Guard[T]` stays for checks against data outside the settings.
+- **Encoder rule.** `settings.RuleEncoderLimit = "encoder_limit"` (`settings.go:37-52`), field code `errcodes.EncoderLimit Field = "encoder_limit"` (`internal/httpapi/errcodes/errcodes.go`, next to `IntervalBeyondRetention` `:238`), mapped in `settingRuleCodes` (`internal/httpapi/handlers/errors.go:249-260`). The check (`cmd/backend/serve.go`, next to `guardRetention` `:495`) registers `settings.Check` on `stream.codec`, `stream.bitrate_kbps`, `stream.sample_rate_hz`, `stream.channels`, reads the four from the view, calls `streamformat.Check`, and on a violation refuses each of the four that the batch changed, with a message that names the limit and the values, for example "Vorbis mono at 22050 Hz allows at most 64 kbps; the bitrate is 128 kbps." Because the check sees the final combination, there is no "change this field first" advice and no order dependence.
+- **Store.** `settings.Store` gains `UpsertMany(ctx, []Stored) ([]Stored, error)`, implemented in `internal/repository/settings` as one multi-row `INSERT … ON CONFLICT (key) DO UPDATE` statement (one statement is one implicit transaction in PostgreSQL, §2.2, so the batch is saved whole or not at all and a concurrent reader, such as the pusher's pass, never sees half a batch). `Upsert` is then unused and removed (the fake stores in the tests follow).
+- **One notification.** `Subscribe` changes to `func(fn func([]Change))`: one call per save, after the write, with every saved key (one element for the single-key PUT). `OnChange` loops over the slice, so its users (`ctl.Reset` on control host and port, music gain, duck gain, `cmd/backend/serve.go:291-300`) are unchanged. `wakeOnStreamChange` (`serve.go:310`) takes the slice and calls `p.Wake()` once when any key starts with `stream.`. The pusher needs no change: `Wake` coalesces (a buffered channel of one, `internal/playout/playout.go:289`), the pass reads all stream settings after the write, and `applyOutput` sends `output.set` only when the command differs from the last applied one, so one batch gives one `output.set` and one reconnect.
+- **Script default.** `dev/liquidsoap/radio.liq` (`:60`): the default of `OUTPUT_STATE_FILE` becomes `/var/cache/liquidsoap/output.json` (§2.3), the path the compose file already sets.
+- `make openapi` and `make openapi-lint` (new operation, `SetSettings`, `FieldErrorCode` gains `encoder_limit`); the frontend syncs the snapshot (frontend F3).
+- Tests:
+  - unit: `internal/streamformat` table test (each limit at and above its maximum, other codecs at 320); the `dev/liqsmoke` drift test against `radio.liq`; `internal/settings` with a fake store: `SetMany` collects every refusal (a range error and an encoder limit in one batch), one invalid value means `UpsertMany` is not called, subscribers get one call with all keys, a single `Set` gives one call with one key, `View` returns batch values over saved ones;
+  - `cmd/backend` check tests: bitrate over the limit refused with `encoder_limit`, the same bitrate allowed at another sample rate, the case that failed with one-by-one saves (saved Vorbis mono 22050 Hz 64 kbps; batch sample rate 44100 Hz + bitrate 192 kbps) accepted in either key order, a single-key PUT of the sample rate against a saved bitrate refused, `mp3` with any combination allowed; `wakeOnStreamChange` wakes once for a batch of several stream keys and not for a batch without one;
+  - handler (`internal/httpapi`): `PATCH /api/settings` 200 with the saved list; 422 with `errors[].field = "values.stream.bitrate_kbps"`, `code = "encoder_limit"`, and several field errors in one response; an unknown key; `PUT /api/settings/{key}` still answers `field = "value"`;
+  - integration (`internal/repository/settings`, and the service on the real store): a batch with one invalid value saves nothing (the earlier values stay); `UpsertMany` writes all rows with one `updated_at`.
+- `CLAUDE.md`: the settings section notes that the panel saves through `PATCH /api/settings` (all or nothing, one notification per save, `Subscribe` receives `[]Change`, cross-key rules are `settings.Check`); the Liquidsoap note: the encoder table is `internal/streamformat`, used by the settings check and `dev/liqsmoke`, kept in step with `ENCODER_LIMITS` by a unit test.
 
 ### Phase B — Migration recovery, downgrade guard, release notes (blocks deploy D5's failure handling; must ship in 1.0.0)
 
@@ -177,30 +216,35 @@ Expand-only. (The next free number is 0022; `0021_track_air_duration` is the las
 - "Required reading": add `docs/deploy-prereqs-plan.md` (deploy prerequisites: runtime stream output, TLS, migration recovery, downgrade guard, multi-arch release).
 - Migration rules (the PostgreSQL and SQL section): every file runs in one implicit transaction; no explicit transaction control; a statement that cannot run in a transaction is alone in a file with `-- migrate: non-transactional`; from 1.0.0 expand-only and safe while the previous release runs; a contract migration raises `schema_compat.min_app_version` and `migrations.TargetMinAppVersion`; tag releases with `migrations: none|expand|contract`.
 - Binary line: `backend migrate up` (exit 4 rolled back, 5 dirty) | `backend migrate check` | `backend migrate target-compat`.
-- Liquidsoap notes: `output.set`, `BACKEND_OUTPUT_URL`, `stream.icecast_tls`, the contract header.
+- Liquidsoap notes: `output.set`, `BACKEND_OUTPUT_URL`, `stream.icecast_tls`, the contract header. **Done** in 7214870 (also `make liquidsoap-check` / `make liquidsoap-smoke` and `dev/liqsmoke/` in the layout).
+
+**Status (2026-11-12): open.** Only the Liquidsoap notes are in. The pinned image text still says `golang:1.27.2-trixie` (`CLAUDE.md` Dev stack notes) while the Dockerfile and `go.mod` use 1.27.4; "Runs on" still says Docker Desktop; `docs/deploy-prereqs-plan.md` is not yet in "Required reading"; the migration rules and binary line wait for Phase B.
 
 ## 4. Tests
 
-- Unit: settings key and descriptions (A1, A8); mount check over HTTPS and path matching (A2); output endpoint (A3); `applyOutput` cases (A5); version parsing and comparison (B2); startup guard (B3); `migrate check` output and exit codes (B4); migration lint and `target-compat` (B7).
-- Integration: `schema_compat` default, raised minimum, missing table (B2); existing migration integration tests still pass with 0022; rolled-back, lock-timeout, and dirty cases of B7.
-- Script: `liquidsoap --check` and the smoke test (A9) in CI; the dev check (A10) by hand.
+- Unit: settings key and descriptions (A1, A8); encoder limit table and drift test, `SetMany`, cross-key checks, one notification per save, the batch endpoint and the 422 field code (A11); mount check over HTTPS and path matching (A2); output endpoint (A3); `applyOutput` cases (A5); version parsing and comparison (B2); startup guard (B3); `migrate check` output and exit codes (B4); migration lint and `target-compat` (B7).
+- Integration: `schema_compat` default, raised minimum, missing table (B2); existing migration integration tests still pass with 0022; batch save all or nothing (A11); rolled-back, lock-timeout, and dirty cases of B7.
+- Script: `liquidsoap --check` and the smoke test (A9) in CI; the dev check (A10, done).
 - Release: a dry run of `release.yml` on a throwaway tag in a fork or with `workflow_dispatch` and a `-rc` image name is not available (tags are immutable); instead the CI matrix (C3) proves both builds, and the first real release is checked with `imagetools inspect`.
 
 ## 5. Order of work
 
 1. A1, A2 (setting and HTTPS check; small, independent).
 2. A3, A4, A5, A7 together (endpoint, script, push, dev compose), then A6 and A8.
-3. A9 (CI smoke test), A10 (dev check). **Phase A closes; the deploy repository can finish D3, and D4's first run can write `stream.icecast_tls`.**
-4. B1–B7 (B7 can be its own PR; it must be in before the deploy repository implements D5's failure paths).
-5. C1–C4.
-6. D1 (`CLAUDE.md`) with the last PR of each phase that changes a rule it describes, at the latest before the release.
-7. Tag `v1.0.0` (with `migrations:` in the tag message) after Phases A–C and the frontend's F1, F3, F4. **The release unblocks deploy D4's first run and the arm64 dry run (D7).**
+3. A9 (CI smoke test), A10 (dev check) — done. **The deploy repository can finish D3, and D4's first run can write `stream.icecast_tls`.**
+4. A11 (batch save and encoder limits), independent of the deploy phases but needed before the release; the frontend's F3 waits for it (snapshot with `PATCH /api/settings`). **Phase A closes.**
+5. B1–B7 (B7 can be its own PR; it must be in before the deploy repository implements D5's failure paths).
+6. C1–C4.
+7. D1 (`CLAUDE.md`) with the last PR of each phase that changes a rule it describes, at the latest before the release.
+8. Tag `v1.0.0` (with `migrations:` in the tag message) after Phases A–C and the frontend's F1, F3, F4. **The release unblocks deploy D4's first run and the arm64 dry run (D7).**
 
 ## 6. Done when
 
 - `make test`, `make lint`, `make openapi-lint` pass, and `make test-integration` has no failure beyond the known ones (`TestPipeline`, `TestImportFolder`, `TestRotationSimulate`).
-- `make liquidsoap-smoke` and the CI job pass for every codec × channel combination, plain and TLS.
-- The dev check of A10 passes.
+- `make liquidsoap-smoke` and the CI job pass for every codec × channels × sample rate, on both sides of every encoder limit, plain and TLS.
+- `PATCH /api/settings` saves a batch all or nothing with one change notification (one `output.set`); a combination over an encoder limit, in a batch or a single-key PUT, is refused with 422 and the field code `encoder_limit` whatever the order of the fields; the limits live in one Go package used by the check and `dev/liqsmoke`, with a unit test against `ENCODER_LIMITS` (A11).
+- The script's `OUTPUT_STATE_FILE` default is `/var/cache/liquidsoap/output.json` (A11).
+- The dev check of A10 passes (done 2026-11-12).
 - A failing transactional migration leaves the database clean at the previous version and `migrate up` exits 4; a failing marked migration exits 5; the lint rejects explicit transaction control.
 - `backend migrate check` reports `compatible: true` on a fresh dev database and `false` (exit 3) for a binary below a raised `min_app_version`; `backend serve` refuses to start in the same case.
 - A release tag produces one manifest list with `linux/amd64` and `linux/arm64`; `docker pull` on the Mac gets arm64 and on an amd64 host amd64.

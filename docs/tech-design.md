@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-24)
+Status: Draft (v7-25)
 Last updated: 2026-11-12
 
 ## 1. Overview
@@ -325,6 +325,8 @@ Playlist types are data in the `playlist_types` table, not entries in the `setti
 
 - Each setting states whether it takes effect immediately (for example, music gain or log level) or needs a reconnect (for example, Icecast host or mount point). Changing the stream server briefly interrupts the stream.
 - A reconnect is not a restart (v7-24). When a stream output setting is saved, the backend sends the new output to Liquidsoap over the control link; the script replaces its Icecast output and leaves the playout sources and queues alone, so only the connection to the server is renewed (a gap of a few seconds, §8.8).
+- Settings are saved as a batch (v7-25). The panel saves all changed settings in one request; the backend validates each value, checks the cross-key rules against the result (saved values plus the batch), and writes the batch in one transaction, all or nothing, followed by one change notification, so a change of several stream settings gives one reconnect. Saving one setting alone stays possible and follows the same rules.
+- Encoder limits are checked at save (v7-25). A value of `stream.codec`, `stream.bitrate_kbps`, `stream.sample_rate_hz`, or `stream.channels` that, together with the other three (from the same batch, else saved), makes a combination the Liquidsoap encoder cannot start (§8.8) is refused with a 422 and a field error on the changed value that names the limit, so the panel shows it at save time and the running output is never asked to change to it. The check does not depend on the order in which the fields were changed.
 - Changes that affect air are logged with a UTC timestamp (§12).
 
 **Secrets**
@@ -781,9 +783,22 @@ All Icecast and output parameters are settings, not code, so they can be changed
 
 The Docker Icecast service is a test server of the dev stack. Production streams to an external Icecast server; switching servers is a settings change, not a code or file change. Only the Icecast source password stays in the environment.
 
-**Applying output settings at runtime (v7-24, deploy plan §5.2).** The script registers a control command that takes the output as JSON (host, port, mount, TLS, codec, bitrate, sample rate, channels, name, description, genre). If it differs from the running output, the script shuts the Icecast output down and creates a new one on the same source; the queues, the fallback, and the journal are not touched. The backend sends it when a stream setting is saved and on every new control connection; at startup Liquidsoap fetches it from the backend (`GET /api/playout/output`), falling back to the last applied output and then to the defaults. Checked with `savonet/liquidsoap:v2.4.6`: bitrate, sample rate, channels, mount, and codec (MP3, Vorbis, AAC) all change at runtime; on the same mount the stream pauses about 4 s, because Icecast releases the mount only after the old connection closes. The MP3 encoder needs its stereo flag as a literal, so the script has one encoder branch per codec and channel count, and the script is tested by running it, not only by `liquidsoap --check`.
+**Applying output settings at runtime (v7-24, deploy plan §5.2).** The script registers a control command that takes the output as JSON (host, port, mount, TLS, codec, bitrate, sample rate, channels, name, description, genre). If it differs from the running output, the script shuts the Icecast output down and creates a new one on the same source; the queues, the fallback, and the journal are not touched. The backend sends it when a stream setting is saved and on every new control connection; at startup Liquidsoap fetches it from the backend (`GET /api/playout/output`, `BACKEND_OUTPUT_URL`), falling back to the last output that connected (the state file `OUTPUT_STATE_FILE`), then to its environment (`ICECAST_HOST`, `ICECAST_PORT`, `ICECAST_MOUNT`, `ICECAST_TLS`) with the settings defaults. Every field of the JSON is required (strict `json.parse` into a typed record; unknown fields are ignored), so no value becomes script code. Checked with `savonet/liquidsoap:v2.4.6`: bitrate, sample rate, channels, mount, and codec (MP3, Vorbis, AAC) all change at runtime; on the same mount the stream pauses about 4 s, because Icecast releases the mount only after the old connection closes. The MP3 encoder needs its stereo flag as a literal, so the script has one encoder branch per codec and channel count, and the script is tested by running it, not only by `liquidsoap --check`.
 
-**TLS.** Liquidsoap 2.4.6 streams to an Icecast server over TLS with `transport=http.transport.ssl()` (checked against a TLS proxy in front of the test Icecast). The backend's mount check reads the status page over HTTPS when TLS is on.
+**State file (v7-25).** The last output that connected is kept in `/var/cache/liquidsoap/output.json` (`OUTPUT_STATE_FILE`) on the named volume `liquidsoap-state`, mounted at `/var/cache/liquidsoap`. That directory exists in the image and belongs to the user `liquidsoap` the container runs as; a new named volume takes the owner of the directory it is mounted over, and over a directory the image lacks (such as `/var/lib/radio`) it would belong to root and the script could not write it. The file is written when an output connects, not when `output.set` is accepted, so an output that cannot start (one that makes Liquidsoap exit) never becomes the startup output. A missing or unwritable file is logged and means "no state file", not an error. The volume is rebuildable: without it the backend's answer or the environment gives the output.
+
+**Encoder limits (v7-25, checked with `savonet/liquidsoap:v2.4.6` on 2026-11-12 over every combination of the settings).** `liquidsoap --check` accepts every combination, but some make the encoder raise when the output starts, and Liquidsoap exits. They are all Vorbis:
+
+| Codec | Channels | Sample rate | Highest bitrate |
+|-------|----------|-------------|-----------------|
+| Vorbis | 1 | 22050 Hz | 64 kbps |
+| Vorbis | 1 | 32000 Hz | 160 kbps |
+| Vorbis | 1 | 44100 Hz, 48000 Hz | 192 kbps |
+| Vorbis | 2 | 22050 Hz | 160 kbps |
+
+Every other codec, channel, sample rate, and bitrate combination of the settings starts. AAC uses `aot="mpeg4_aac_lc"` (AAC-LC): the encoder's default, HE-AAC v2, fails on a mono source. The limits are enforced twice: the script refuses such an output with `ERROR <reason>` and keeps the running one (`ENCODER_LIMITS` in `radio.liq`), and the backend refuses to save a stream setting that would produce one (§6.3). The backend's table lives in one Go package that both the settings validation and the script's smoke test (`dev/liqsmoke`) use; the smoke test sends both sides of every limit, so the script's table and the Go table cannot drift apart. A new Liquidsoap pin repeats the check.
+
+**TLS (v7-25).** Liquidsoap 2.4.6 streams to an Icecast server over TLS with `transport=http.transport.tls()`, which verifies the server against the system roots of the image (checked by the smoke test against a TLS proxy in front of the test Icecast, whose throwaway CA takes the place of the system roots; the production server has a public certificate). `http.transport.ssl()` is not used: in the 2.4.6 image it rejects public certificate chains, Let's Encrypt included ("unable to get local issuer certificate"), although it passes `--check`. The backend's mount check reads the status page over HTTPS when TLS is on.
 
 **Metadata charset (checked 2026-11-12, Icecast 2.4.4).** Liquidsoap already sends the `charset` parameter with every metadata update (its `encoding`, UTF-8 by default), and Icecast converts the title from that charset to the mount's charset, so with the default ISO-8859-1 mount a Cyrillic or Armenian title becomes `*` for listeners and on the status page. The charset parameter alone cannot fix it. Declaring `encoding="ISO-8859-1"` makes Icecast store the UTF-8 bytes unchanged: listeners' players then show the title correctly, but Icecast's own status page shows it garbled. The correct fix stays `<charset>UTF-8</charset>` on the mount, set by the server owner. The script sends UTF-8 (the default `encoding`); until the owner changes the mount, non-Latin titles show as `*`, which is accepted. `encoding="ISO-8859-1"` is a documented fallback only.
 
@@ -1107,6 +1122,7 @@ The open questions from the previous version are closed. The decisions are recor
 36. **Automated host install** (v7-24). `install.bat` makes a Windows 10 or 11 machine ready: WSL2, a pinned Ubuntu LTS distribution, Docker Engine with pinned versions, a dedicated local account whose scheduled task keeps the distribution running from boot, host power and update settings, and the first configuration of the stack. It chooses NAT or mirrored networking from the Windows build, is idempotent, and resumes after the reboot it needs (§9.1, §9.2).
 37. **Multi-arch images** (v7-24). Backend and frontend tags are manifest lists for amd64 and arm64; production runs amd64, the developer's Mac runs the same release natively on arm64 (§1.1, §9.2).
 38. **Media stays in the Windows folder** (v7-24). The existing Windows folder of tracks is the media root, through WSL's drive mount; copying it into the distribution is the fallback (§9.1).
+39. **Encoder limits refused at save** (v7-25). A stream format that the pinned Liquidsoap encoder cannot start (some Vorbis bitrates per sample rate and channels) is refused by the backend when the settings are saved (checked against the whole batch, which is saved all or nothing), with a per-field message, and by the script if it ever arrives; one Go table is shared by the settings validation and the script's smoke test (§6.3, §8.8).
 
 ## 12. Non-functional Requirements
 
