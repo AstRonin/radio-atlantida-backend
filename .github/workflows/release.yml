@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.tag.outputs.version }}
+      migrations: ${{ steps.migrations.outputs.migrations }}
     steps:
       - name: tag is vX.Y.Z
         id: tag
@@ -41,6 +42,22 @@ jobs:
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1
           fi
+      - name: annotated tag with a migrations line
+        id: migrations
+        # The deploy tool and the operator read whether a release migrates
+        # (docs/deploy-prereqs-plan.md B6): git tag -a vX.Y.Z -m "migrations: expand".
+        # The tag is fetched again because checkout may replace an annotated
+        # tag by a lightweight one.
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is not an annotated tag; tag with git tag -a $GITHUB_REF_NAME -m \"migrations: none|expand|contract\""; exit 1
+          fi
+          lines=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | grep -E '^migrations:' || true)
+          if [ "$(printf '%s\n' "$lines" | grep -c .)" != 1 ] || ! [[ "$lines" =~ ^migrations:\ (none|expand|contract)$ ]]; then
+            echo "::error::the message of $GITHUB_REF_NAME needs exactly one line 'migrations: none|expand|contract', got: '$lines'"; exit 1
+          fi
+          echo "migrations=${lines#migrations: }" >> "$GITHUB_OUTPUT"
 
   ci:
     needs: check
@@ -99,8 +116,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.check.outputs.version }}
+          MIGRATIONS: ${{ needs.check.outputs.migrations }}
         run: |
           gh release create "$GITHUB_REF_NAME" openapi.json \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
             --title "$GITHUB_REF_NAME" \
-            --notes "Image: \`$IMAGE:$VERSION\`. Frontend: \`npm run api:sync -- openapi.json\`."
+            --notes "Migrations: $MIGRATIONS. Image: \`$IMAGE:$VERSION\`. Frontend: \`npm run api:sync -- openapi.json\`."

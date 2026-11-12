@@ -20,6 +20,8 @@ func TestRunArguments(t *testing.T) {
 		{"unknown command", []string{"start"}, true},
 		{"migrate down does not exist", []string{"migrate", "down"}, true},
 		{"migrate without direction", []string{"migrate"}, true},
+		{"migrate up with arguments", []string{"migrate", "up", "x"}, true},
+		{"migrate unknown", []string{"migrate", "status"}, true},
 		{"serve with arguments", []string{"serve", "x"}, true},
 		{"openapi with arguments", []string{"openapi", "x"}, true},
 		{"version with arguments", []string{"version", "x"}, true},

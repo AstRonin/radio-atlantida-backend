@@ -29,6 +29,7 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logsearch"
 	"github.com/AstRonin/radio-atlantida-backend/internal/media"
+	"github.com/AstRonin/radio-atlantida-backend/internal/migrations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/operations"
 	"github.com/AstRonin/radio-atlantida-backend/internal/outage"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
@@ -53,6 +54,10 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/workerpool"
 	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
+
+// compatRetry is how often the startup schema check is retried while the
+// database is unreachable.
+const compatRetry = 5 * time.Second
 
 // shutdownTimeout bounds the drain of in-flight requests on SIGINT/SIGTERM.
 const shutdownTimeout = 15 * time.Second
@@ -95,11 +100,27 @@ func serve(ctx context.Context) error {
 	}
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	if err := database.Pool.Ping(pingCtx); err != nil {
+	pingErr := database.Pool.Ping(pingCtx)
+	if pingErr != nil {
 		// Not fatal: /readyz reports the state, and the pool reconnects.
-		dbLog.Warn("database not reachable at startup", logging.KeyError, err)
+		dbLog.Warn("database not reachable at startup", logging.KeyError, pingErr)
 	}
 	cancel()
+
+	// Downgrade guard (design §9.2): a release below the schema's
+	// min_app_version refuses to start. Without the database the check runs
+	// in the background at the first successful connection (guardSchema).
+	readCompat := func(ctx context.Context) (migrations.Status, error) {
+		return migrations.Compat(ctx, cfg.DatabaseURL)
+	}
+	schemaChecked := false
+	if pingErr == nil {
+		var err error
+		schemaChecked, err = checkSchema(ctx, readCompat, version, dbLog)
+		if err != nil && schemaChecked {
+			return err
+		}
+	}
 
 	hub := ws.NewHub(apiLog)
 	opsPool := workerpool.New(operationWorkers, operationQueue)
@@ -188,6 +209,10 @@ func serve(ctx context.Context) error {
 	srv.RegisterOnShutdown(hub.Close)
 
 	g, gctx := errgroup.WithContext(ctx)
+	if !schemaChecked {
+		// An incompatible schema stops the service like a failed component.
+		g.Go(func() error { return guardSchema(gctx, readCompat, version, dbLog, compatRetry) })
+	}
 	g.Go(func() error {
 		forwardAlerts(gctx, logs.Alerts(), hub)
 		return nil
