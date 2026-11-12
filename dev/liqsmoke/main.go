@@ -18,8 +18,12 @@
 //   - a Liquidsoap restart with the backend down starts from the state
 //     file, over TLS again.
 //
-// Exit code non-zero on any miss. The stack is left running for
-// inspection; `make liquidsoap-smoke` removes it.
+// Exit code non-zero on any miss. A Liquidsoap container that stops while
+// an output is awaited fails the case at once (an encoder that raises makes
+// Liquidsoap exit with code 2), and every failure prints the container
+// state and the last lines of the Liquidsoap log, which hold the encoder
+// error. The stack is left running for inspection; `make
+// liquidsoap-smoke` removes it.
 package main
 
 import (
@@ -69,6 +73,7 @@ type config struct {
 	tlsHost     string
 	tlsPort     int
 	timeout     time.Duration
+	poll        time.Duration
 }
 
 func main() {
@@ -82,6 +87,7 @@ func main() {
 	flag.StringVar(&c.tlsHost, "tls-host", "tlsproxy", "TLS proxy host as Liquidsoap sees it")
 	flag.IntVar(&c.tlsPort, "tls-port", 8443, "TLS proxy port")
 	flag.DurationVar(&c.timeout, "timeout", 15*time.Second, "how long to wait for each output on Icecast")
+	flag.DurationVar(&c.poll, "poll", 200*time.Millisecond, "how often to check Icecast and the Liquidsoap container while waiting")
 	certDir := flag.String("cert", "", "only write a throwaway CA and the proxy certificate into this directory, then exit")
 	flag.Parse()
 	c.compose = []string{"compose", "-f", *composeFile, "-p", *project}
@@ -96,6 +102,13 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "liqsmoke: FAIL:", err)
+		if *certDir == "" && ctx.Err() == nil {
+			// The encoder error, if any, is in the Liquidsoap log.
+			if state, code, serr := liquidsoapState(context.Background(), c); serr == nil {
+				fmt.Fprintf(os.Stderr, "liqsmoke: liquidsoap container: %s (exit code %d)\n", state, code)
+			}
+			fmt.Fprintf(os.Stderr, "liqsmoke: last %d lines of the liquidsoap log:\n%s\n", logTail, liquidsoapLog(context.Background(), c))
+		}
 		os.Exit(1)
 	}
 }
@@ -343,11 +356,16 @@ type source struct {
 }
 
 // waitOutput waits until Icecast lists the mount of o with its codec and
-// format, and its stream name and genre.
+// format, and its stream name and genre. It stops at once when the
+// Liquidsoap container is no longer running (an encoder that raises makes
+// Liquidsoap exit).
 func waitOutput(ctx context.Context, c config, o output) error {
 	deadline := time.Now().Add(c.timeout)
 	var last string
 	for {
+		if state, code, err := liquidsoapState(ctx, c); err == nil && state != "running" {
+			return fmt.Errorf("%s: liquidsoap %s (exit code %d)", o.Mount, state, code)
+		}
 		srcs, err := sources(ctx, c.status)
 		if err != nil {
 			last = err.Error()
@@ -371,9 +389,42 @@ func waitOutput(ctx context.Context, c config, o output) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(c.poll):
 		}
 	}
+}
+
+// liquidsoapState returns the state of the Liquidsoap container ("running",
+// "exited", ...) and its exit code, from `docker compose ps`.
+func liquidsoapState(ctx context.Context, c config) (string, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	args := append(append([]string{}, c.compose...), "ps", "-a", "--format", "{{.State}} {{.ExitCode}}", "liquidsoap")
+	out, err := exec.CommandContext(ctx, "docker", args...).Output() //nolint:gosec // G204: a dev tool runs docker compose with its own arguments
+	if err != nil {
+		return "", 0, err
+	}
+	var state string
+	var code int
+	if _, err = fmt.Sscan(string(out), &state, &code); err != nil {
+		return "", 0, fmt.Errorf("docker compose ps: %q: %w", out, err)
+	}
+	return state, code, nil
+}
+
+// logTail is how many Liquidsoap log lines a failure prints.
+const logTail = 40
+
+// liquidsoapLog returns the last logTail lines of the Liquidsoap log.
+func liquidsoapLog(ctx context.Context, c config) string {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	args := append(append([]string{}, c.compose...), "logs", "--no-color", "--no-log-prefix", "--tail", fmt.Sprint(logTail), "liquidsoap")
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput() //nolint:gosec // G204: a dev tool runs docker compose with its own arguments
+	if err != nil {
+		return fmt.Sprintf("(docker compose logs: %v)\n%s", err, out)
+	}
+	return strings.TrimRight(string(out), "\n")
 }
 
 // mismatch compares what Icecast reports with o; empty when it matches.
