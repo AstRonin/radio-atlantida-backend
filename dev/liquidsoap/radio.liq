@@ -57,7 +57,10 @@ emergency_url =
   )
 output_url =
   env("BACKEND_OUTPUT_URL", "http://host.docker.internal:8090/api/playout/output")
-output_state_file = env("OUTPUT_STATE_FILE", "/var/lib/radio/output.json")
+# The image's own cache directory: it belongs to the user liquidsoap the
+# container runs as, so a named volume mounted over it is writable (§8.8).
+output_state_file =
+  env("OUTPUT_STATE_FILE", "/var/cache/liquidsoap/output.json")
 
 settings.log.stdout := true
 settings.log.file := false
@@ -413,7 +416,9 @@ end
 # 2.4.6 accept per codec, channel count, and sample rate, where it is below
 # 320. Found by running every combination of the settings (2026-11-12):
 # above it the encoder raises when the output starts and Liquidsoap exits.
-# dev/liqsmoke checks both sides of every limit (encoderLimits there).
+# The same table is internal/streamformat of the backend (the settings
+# check refuses these at save; a unit test in dev/liqsmoke compares the
+# two); dev/liqsmoke checks both sides of every limit.
 encoder_limits =
   [
     ("vorbis", 1, 22050, 64),

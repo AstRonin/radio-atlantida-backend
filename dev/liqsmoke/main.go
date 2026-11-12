@@ -40,6 +40,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/AstRonin/radio-atlantida-backend/internal/streamformat"
 )
 
 // output is the JSON object of output.set and GET /api/playout/output
@@ -278,11 +280,11 @@ func run(ctx context.Context, c config) error {
 }
 
 // refused lists the combinations the script refuses because the encoder
-// cannot make them (ENCODER_LIMITS in dev/liquidsoap/radio.liq). Kept in
-// step by this test: a combination refused here and accepted there, or the
-// other way round, fails.
+// cannot make them (internal/streamformat, ENCODER_LIMITS in
+// dev/liquidsoap/radio.liq). Kept in step by this test: a combination
+// refused here and accepted there, or the other way round, fails.
 func refused(o output) bool {
-	return encoderLimit(o.Codec, o.Channels, o.SampleRateHz, o.BitrateKbps)
+	return streamformat.Check(o.Codec, o.Channels, o.SampleRateHz, o.BitrateKbps) != nil
 }
 
 func pass(msg string) { fmt.Println("liqsmoke: ok:", msg) }
