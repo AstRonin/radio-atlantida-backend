@@ -1,8 +1,8 @@
 # Deploy Initialization Plan (radio-atlantida-deploy)
 
-Status: Draft for Claude Code (rewritten to match the current design and code; host on Docker Engine in WSL2)
-Based on: `tech-design.md` v7-25 (§1.1, §3.1, §6.3, §7.1, §8, §9, §10), `base.md`, backend plans `backend-init-plan.md`, `phase-12-plan.md` (live voice), `phase-13-plan.md` (release pipeline), `phase-21-plan.md` (stream metadata, mount charset), `phase-22-plan.md` (cue fades), `safety-on-air-state-plan.md`, `logs-loki-plan.md`; frontend plans `frontend-init-plan.md`, `f12-release-plan.md`, `f13-grafana-link-plan.md`
-Last updated: 2026-11-12
+Status: Phases D1–D7 done (deploy commits c55eb5e … 13b62cd; §0.1). Not yet installed on the production machine: see "Remaining before the first production install" (§0.1). Deviations from the plan text are listed at the end of each phase.
+Based on: `tech-design.md` v7-26 (§1.1, §3.1, §6.3, §7.1, §8, §9, §10), `base.md`, backend plans `backend-init-plan.md`, `phase-12-plan.md` (live voice), `phase-13-plan.md` (release pipeline), `phase-21-plan.md` (stream metadata, mount charset), `phase-22-plan.md` (cue fades), `safety-on-air-state-plan.md`, `logs-loki-plan.md`; frontend plans `frontend-init-plan.md`, `f12-release-plan.md`, `f13-grafana-link-plan.md`
+Last updated: 2026-11-13
 
 ## 0. How to use this plan
 
@@ -18,6 +18,34 @@ Last updated: 2026-11-12
 - Section 12 lists **cross-repo tasks** (B1, B6, and B9 matter most). Phases that depend on one say so; they must not be worked around in this repository.
 - Every statement about Windows and WSL behaviour that could not be tested on the developer's Mac is marked **(verify on Windows)**; each one is part of the Windows acceptance run in D4.
 - Scope of initialization: Phases D1 to D7. They produce a complete, validated deploy repository, a tested installer, and a dry run. Running the installer on the production machine is the first step of the runbook (D7).
+
+### 0.1 Status (2026-11-13)
+
+| Phase | Status | Deploy commits |
+|-------|--------|----------------|
+| D1 Skeleton | done | c55eb5e (PR #2, merge 2c6e1b0) |
+| D2 Compose stack | done | 1f42a38 (PR #2) |
+| D3 Production script | done | 915b1e4, e9955d6, 52bbfbf; backend ref rule 01a359e |
+| D4 Host install | done (Windows acceptance run pending) | 849261e, 8fb564f, 50859ac, f50f792, 408675c, c56c75b, 6bd1026, 75df638, 7f1b4d3, 2af198b |
+| D5 Update tool | done | 23e4ffa, 28c4b6d, 75092c7, bcb01fe, 7d97c7a, 5b6deb4 |
+| D6 Backups | done | f917740, 5f893c1, ba8d7ac, 5885c3e |
+| D7 CI, runbook, dry run | done (Mac dry run pending) | 5b6deb4, 01a359e, 52fda4f, 580d3b6, 8cb490a, 6d05045, 13b62cd |
+
+`config/` was taken from backend commit 1867efa (`config/backend-source.env`), which includes cross-repo task B13 (§12).
+
+**Remaining before the first production install:**
+
+1. Backend and frontend annotated tags `v1.0.0` (backend: `git tag -a v1.0.0 -m "migrations: expand"`).
+2. `release.env` with the manifest list digests of both tags, and `scripts/check-backend-sync.sh --update` at the backend tag (rewrites `config/` and `config/backend-source.env`).
+3. The repository variable `GHCR_USER` and the secret `GHCR_READ_TOKEN`, then green CI including the `windows` job.
+4. Revoke the token shared in plain text during planning (11.10) and record the new token's expiry date (runbook §1.6).
+5. Ask the server owner for `<charset>UTF-8</charset>` on `/atlantida` (11.15).
+6. The Mac dry run (`docs/dry-run.md`, 9.3).
+7. The Windows acceptance run with a cold reboot (runbook §11, D4 "Done when").
+8. B5 (stream loudness normalisation, HLS) stays open; it does not block the install.
+9. Open minor items:
+   - a stale `install/versions.env` on an engine upgrade: `install.bat` reads the Windows copy of the repository, not the one `radioctl` pulled inside the distribution, so the operator must replace the Windows copy first (runbook §6.3 works around it by hand);
+   - `GRAFANA_URL` is not rewritten on the same release: when the release already runs, `update.bat` applies monitoring but does not rewrite `runtime/applied.env`, so a changed `MONITORING_ENABLED` or `GRAFANA_PORT` reaches the panel's Grafana link only with the next install of another release.
 
 ## 1. Ground rules
 
@@ -62,45 +90,69 @@ Last updated: 2026-11-12
 
 ## 2. Repository layout
 
+As implemented (2026-11-13, deploy commit 13b62cd):
+
 ```
 radio-atlantida-deploy/
-  .github/workflows/ci.yml            # every PR: compose, sync with backend dev files, Liquidsoap, scripts, tests (D7)
+  .github/workflows/ci.yml            # every push to main and every PR; jobs lint, compose, release, backend-sync, liquidsoap, radioctl, distro, versions, install, windows (D7)
+  .claude/agents/deploy.md            # the subagent definition for this repository
   release.env                         # BACKEND_TAG, BACKEND_DIGEST, FRONTEND_TAG, FRONTEND_DIGEST (committed, §10.1)
-  install.bat                         # entry point of the host install: runs install.ps1 elevated
+  install.bat                         # entry point of the host install: runs install.ps1, which elevates itself
   install.ps1                         # Windows half of the install (D4)
   install/
-    versions.env                      # pinned Ubuntu rootfs URL + SHA-256, Docker Engine and Compose plugin apt versions, Docker apt key fingerprint, minimum WSL version
+    versions.env                      # pinned Ubuntu 24.04 rootfs URL + SHA-256, Docker apt key fingerprint, docker-ce, containerd, Compose and buildx apt versions, minimum WSL version
     setup-distro.sh                   # Linux half of the install, run as root inside the distribution (D4)
     wsl.conf                          # /etc/wsl.conf of the distribution
-    wslconfig.template                # %UserProfile%\.wslconfig of the radio account
-    systemd/                          # radio-backup.service/.timer, radio-boot-check.service
-    radio-keepalive                   # /usr/local/bin/radio-keepalive (keeps the distribution running)
-  update.bat                          # thin wrapper: wsl.exe -d radio-atlantida ... bin/radioctl %*
-  bin/radioctl                        # update, rollback, restore, maintenance, backup, cutover, status, first-run (D5, D6)
+    radio-keepalive                   # /usr/local/bin/radio-keepalive (keeps the distribution running; logs/keepalive.log)
+    systemd/
+      install-units.sh                # installs and enables the units below (run by setup-distro.sh)
+      radio-network.service           # radioctl network at boot (6.5)
+      radio-boot-check.service        # radioctl boot-check at boot (6.3)
+      radio-backup.service, .timer    # radioctl backup, daily 04:30 Asia/Yerevan (D6)
+      radio-restore-drill.service, .timer  # radioctl restore-drill, 05:30 Asia/Yerevan on the 1st (D6)
+  update.bat                          # thin wrapper: wsl.exe -d radio-atlantida -u radio ... bin/radioctl %*
+  bin/radioctl                        # update, rollback, restore, maintenance, cutover, first-run, status, logs, compose, backup, restore-drill, network, boot-check (D4-D6)
   config/
+    backend-source.env                # the backend commit config/ was taken from (written by check-backend-sync.sh --update, D3)
     liquidsoap/
-      radio.liq                       # production script = backend dev/liquidsoap/radio.liq at v${BACKEND_TAG} + production.patch (D3)
-      production.patch                # the production overrides, possibly empty (D3)
-    grafana/                          # = backend dev/grafana/ at v${BACKEND_TAG} (role.sql, provisioning/, dashboards/)
+      radio.liq                       # production script = backend dev/liquidsoap/radio.liq at the backend ref + production.patch (D3)
+      production.patch                # comment lines only: the patch is empty (D3)
+    grafana/                          # = backend dev/grafana/ (role.sql, provisioning/datasources/, provisioning/dashboards/, dashboards/*.json)
     loki/loki.yaml                    # = backend dev/loki/loki.yaml
     alloy/config.alloy                # = backend dev/alloy/config.alloy
-  docs/                               # pushed copies (§0)
+  docs/
+    runbook.md                        # the operator runbook (D7; maintained in this repository)
+    dry-run.md                        # the Mac dry run (D7; maintained in this repository)
+    base.md, tech-design.md, backend-init-plan.md, frontend-init-plan.md, deploy-init-plan.md   # pushed copies (§0)
   docker-compose.yml                  # the production stack (D2)
   .env.example                        # every per-machine variable, placeholders, comments
-  tests/
-    install.Tests.ps1                 # Pester tests of install.ps1 with wsl.exe, dism, powercfg, Task Scheduler mocked (D7)
-    radioctl/*.bats                   # bats tests of radioctl with docker, git, curl mocked (D7)
-    liquidsoap/                       # runtime smoke test of radio.liq (D3, D7)
   scripts/
-    check-line-endings.ps1
-    check-backend-sync.sh             # CI: compares config/ and image pins with the backend at v${BACKEND_TAG}
-  .gitattributes  .gitignore  .editorconfig
-  README.md                           # runbook (D7)
+    backend-ref.sh                    # prints the backend ref of the checks (D3 rule)
+    check-backend-sync.sh             # config/ and image pins equal the backend at the ref; --update rewrites config/ and backend-source.env
+    check-compose.sh                  # compose renders and keeps its rules (9.1 item 1)
+    check-config.sh                   # Loki, Alloy, Grafana configuration in the pinned images (pinned yq for the YAML)
+    check-release.sh                  # release.env (9.1 item 2)
+    check-versions.sh                 # install/versions.env pins exist upstream (9.1 item 7)
+    check-shell.sh                    # shellcheck (pinned image) on every bash file
+    check-line-endings.sh             # line endings, BOM, case-only path duplicates
+    lib/backend-source.sh             # the backend ref rule, shared by the scripts and CI
+    lib/contract.sh                   # the Liquidsoap contract header regexes, shared with radioctl
+  tests/
+    radioctl/                         # bats tests (air, backup, commands, guard, network, update), helpers.bash, stubs/ (docker, git, ip, systemctl), Dockerfile, run.sh
+    install/                          # install.Tests.ps1 (Pester), PSScriptAnalyzerSettings.psd1, Dockerfile + run.sh (PowerShell 7), run-windows.ps1 (Windows PowerShell 5.1)
+    distro/                           # run.sh, check.sh: setup-distro.sh twice in ubuntu:24.04, systemd-analyze verify, --with-apt
+    liquidsoap/                       # compose.yml, run.sh, tlsproxy.conf, backend-proxy.conf: the runtime smoke test with the backend's dev/liqsmoke (D3)
+    fixtures/                         # applied.env, network-nat.env, network-mirrored.env
+    dryrun/                           # compose.override.yml, tlsproxy.conf (the Mac dry run)
+  .gitattributes  .gitignore  .editorconfig  LICENSE
+  README.md                           # developer overview: layout, tests and CI, config sync, a release, radioctl switches (D7)
 ```
 
-Runtime files, created by the scripts and never committed, all inside the distribution under `/opt/radio-atlantida/deploy`: `.env`, `state.json`, `state.lock`, `runtime/applied.env` (the tags, digests, and derived values of the running stack), `logs/`. Backups are under `BACKUP_ROOT` (`/srv/radio/backups`) with a copy on the Windows drive (D6). The installer's own state and log are on Windows: `C:\ProgramData\RadioAtlantida\install-state.json` and `C:\ProgramData\RadioAtlantida\logs\`.
+Runtime files, created by the scripts and never committed, all inside the distribution under `/opt/radio-atlantida/deploy`: `.env`, `state.json`, `state.lock`, `runtime/applied.env` (the tags, digests, and `GRAFANA_URL` of the running stack), `runtime/target.env` (the same for the release being installed: the pull, `migrate target-compat`, and the migration run with it, while `applied.env` keeps naming the running release until the install succeeds), `runtime/network.env` (6.5), `logs/` (run logs `<command>-<UTC>.log`, `boot-<UTC>.log`, `keepalive.log`). The host settings of `setup-distro.sh` are in `/etc/radio-atlantida/host.env` (the network mode). Backups are under `BACKUP_ROOT` (`/srv/radio/backups`) with a copy in `BACKUP_WINDOWS_COPY` (D6). The installer's own state and log are on Windows: `C:\ProgramData\RadioAtlantida\install-state.json` and `C:\ProgramData\RadioAtlantida\logs\`.
 
 ## 3. Phase D1 — Skeleton and conventions
+
+**Status: done** (c55eb5e, PR #2).
 
 **Goal:** structure, ignore rules, line endings, the environment template, and the release file. Nothing runs yet.
 
@@ -134,6 +186,8 @@ Tasks:
 **Done when:** the layout of Section 2 exists without running configuration; `git check-attr` shows `eol=crlf` for `*.bat` and `*.ps1` and `eol=lf` for `bin/radioctl` and `*.sh`; `.env` is ignored.
 
 ## 4. Phase D2 — Compose stack
+
+**Status: done** (1f42a38, PR #2).
 
 **Goal:** `docker compose config` renders the full production stack with pinned images, health checks, the correct environment, and the allowed ports only.
 
@@ -172,6 +226,8 @@ Tasks:
 **Done when:** `docker compose --env-file .env.example --env-file <fixture applied.env> config` renders with and without `--profile monitoring`, with no `latest` tag and no `icecast` service; the CI port rule (D7) passes: the only published ports are `127.0.0.1:${PANEL_PORT}->8080/tcp` (frontend), `${LIVE_UDP_BIND}:8189->8189/udp` (backend; the fixtures render it with `127.0.0.1` and with `0.0.0.0`), and `127.0.0.1:${GRAFANA_PORT}->3000/tcp` (grafana).
 
 ## 5. Phase D3 — Production playout script and external Icecast
+
+**Status: done** (915b1e4, e9955d6, 52bbfbf; the backend ref rule 01a359e). Deviations: 5.5.
 
 **Goal:** the production Liquidsoap script, derived mechanically from the backend dev script, and the stream output to the external Icecast server driven by the backend settings, applied at runtime.
 
@@ -246,13 +302,21 @@ The `stream.*` settings are already "reconnect" settings (`definitions.go:25-28`
 
 **Done when:** `config/liquidsoap/radio.liq` equals the dev script at `v${BACKEND_TAG}` plus the patch (CI); `liquidsoap --check` passes in the pinned image; the runtime smoke test (D7) runs the script against a test Icecast (plain and behind a TLS proxy) and applies `output.set` for every codec × channels × sample rate, on both sides of every encoder limit; the contract header exists.
 
-## 6. Phase D4 — Host install (Windows 10 or 11, Docker Engine in WSL2)
+### 5.5 As implemented (deviations)
+
+- **`production.patch` is empty.** It holds only comment lines: the dev script takes every startup value from the environment, `docker-compose.yml` sets the production values, and the script's built-in defaults (stream name, log level) are right for production. `config/backend-source.env` records the backend commit `config/` was taken from (`BACKEND_SOURCE_REF`, `BACKEND_SOURCE_COMMIT`; today 1867efa), written by `scripts/check-backend-sync.sh --update`.
+- **The backend ref** of the sync check, the smoke test, and CI is one rule (`scripts/lib/backend-source.sh`, printed by `scripts/backend-ref.sh`): `--ref`, else `BACKEND_REF` from the environment (CI: the workflow-level `env.BACKEND_REF`, empty by default); else `v${BACKEND_TAG}` of `release.env` if that tag exists in the backend repository; else `BACKEND_SOURCE_COMMIT` of `config/backend-source.env`, with a warning (a `::warning::` annotation in CI). The fallback covers the time before the first backend tag; once `release.env` has digests, the `release` job requires the tag (D7).
+- **The deploy smoke test runs the backend's own tool.** `tests/liquidsoap/run.sh` runs `liquidsoap --check` in the pinned image, then the backend's `dev/liqsmoke` (Go, at the same backend ref as the script) against the **production `liquidsoap` service** of `docker-compose.yml`, extended unchanged by `tests/liquidsoap/compose.yml` (same image, command, environment, script mount, state volume, health check), with a test Icecast, a TLS proxy, and a TCP proxy that lets the production URLs `http://backend:8090/...` reach the tool's stub backend. So the deploy and backend smoke tests are the same checks; there is no separate deploy smoke script. Compose project `radio-deploy-liqsmoke`, ports 18000, 11234, 18090 on `127.0.0.1`.
+- The deploy smoke test, under parallel load, found the Liquidsoap exit at an output switch that cross-repo task B13 fixed (§12).
+ — Host install (Windows 10 or 11, Docker Engine in WSL2)
+
+**Status: done** (849261e, 8fb564f, 50859ac, f50f792, 408675c, c56c75b, 6bd1026, 75df638, 7f1b4d3, 2af198b); the Windows acceptance run and the cold-reboot test are still to do (§0.1). Deviations: 6.10.
 
 **Goal:** `install.bat` turns a Windows 10 or 11 machine into a station host: WSL2, the `radio-atlantida` distribution, Docker Engine, autostart at boot without a sign-in, host settings, and the first configuration of the stack. It is idempotent, resumable after its reboot, logged, and has `-DryRun`.
 
 ### 6.1 Requirements and accounts
 
-- **Windows 10, 21H2 (build 19044) or later with current cumulative updates**, or Windows 11; x64; virtualization enabled in the firmware; at least 16 GB RAM (DEFAULT: the WSL VM gets 8 GB), an SSD with at least 100 GB free on the drive that holds the distribution. The production machine is most likely Windows 10 Home without ESU (11.17); the default path uses only what Home allows.
+- **Windows 10, 21H2 (build 19044) or later with current cumulative updates**, or Windows 11; x64; virtualization enabled in the firmware; 16 GB RAM recommended (less is a warning, not a stop); the WSL VM gets half the RAM, at least 4 GB and at most 16 GB (8 GB on a 16 GB machine); an SSD with at least 40 GB free on the drive of `InstallRoot`, which holds the distribution's virtual disk (a fresh install stops below that; with an existing distribution it is a warning). The media folder stays on Windows (6.6), so the virtual disk holds only the images (two releases during an update), the database, the journal, and the backups. The production machine is most likely Windows 10 Home without ESU (11.17); the default path uses only what Home allows.
   - WSL from the Microsoft Store (the version `wsl --update` installs) runs on Windows 10 from build 19044 with the November 2022 cumulative update (19044.2311 or later); it brings systemd support and `wsl --import ... --version 2`, which this install needs. The inbox WSL of older builds is not enough (verify on Windows: `wsl --version` must print a version).
   - The installer detects the build: Windows 11 22H2 (22621) or later gets mirrored networking; Windows 10 and older Windows 11 get NAT mode (6.5).
 - **Support status.** Windows 10 reached end of support on 14 October 2025; the consumer Extended Security Updates year ended in October 2026, and paid ESU for organisations runs at most until October 2028. Without ESU the machine gets no more security fixes (Defender signatures still update). The station exposes no inbound port (everything is bound to the local machine), which limits the risk; an upgrade to Windows 11 is recommended later and changes nothing in this plan except the network mode, chosen again by `install.bat`.
@@ -274,7 +338,7 @@ Steps, in order:
 2. **Windows features**: enable `Microsoft-Windows-Subsystem-Linux` and `VirtualMachinePlatform` (`dism.exe /online /enable-feature ... /all /norestart`). If a reboot is needed: register a one-shot scheduled task "at logon of `radio`, highest privileges" that runs `install.bat -Resume`, tell the operator, and reboot after confirmation. The task deletes itself when the install continues. (A RunOnce entry would not run elevated, hence the task.)
 3. **WSL**: `wsl --update` (the Store WSL), `wsl --set-default-version 2`; `wsl --version` must report at least the version in `versions.env`.
 4. **Network mode**: build ≥ 22621 → `mirrored`; otherwise `nat` (6.5). Recorded in `install-state.json` and passed to the Linux half.
-5. **`.wslconfig`** of the `radio` profile (merge: unknown keys are kept): `memory=8GB`, `processors` = half the logical CPUs (at least 2), `swap=4GB`, `vmIdleTimeout=-1` where supported (6.4); in mirrored mode `networkingMode=mirrored`; in NAT mode `localhostForwarding=true` (the default, written explicitly). Key names and their section follow the installed WSL version. A change is followed by `wsl --shutdown` (nothing runs yet on a fresh machine; on a re-run this interrupts the air and needs confirmation).
+5. **`.wslconfig`** of the `radio` profile (merge: unknown keys are kept; no template file): `memory` = half the RAM, 4 to 16 GB, `processors` = half the logical CPUs (at least 2), `swap=4GB`, `vmIdleTimeout=-1` where supported (6.4); in mirrored mode `networkingMode=mirrored`; in NAT mode `localhostForwarding=true` (the default, written explicitly). Key names and their section follow the installed WSL version. A change is followed by `wsl --shutdown` (nothing runs yet on a fresh machine; on a re-run this interrupts the air and needs confirmation).
 6. **Media folder**: ask for the station's Windows media folder (default `D:\RadioAtlantida\media`, or the existing folder of tracks), check that it exists and is on a local NTFS drive (not a network share, not removable), and convert it to the WSL path (`/mnt/d/...`). Add a Microsoft Defender exclusion for it (6.6). The path goes to `.env` in step 11.
 7. **Distribution**: download the pinned Ubuntu 24.04 LTS WSL root file system (URL and SHA-256 in `versions.env`), verify the checksum, `wsl --import radio-atlantida <InstallRoot>\wsl <rootfs> --version 2` (`InstallRoot` default `C:\RadioAtlantida`, or a data drive with `-InstallRoot D:\RadioAtlantida`). An import is used instead of `wsl --install` because it gives an exact image, a fixed name, and no interactive first-run dialog, and it works on Windows 10 (verify on Windows). If the distribution exists, it is kept.
 8. **Linux half**: copy `install/` into the distribution and run `setup-distro.sh --network-mode <mode>` as root (6.3). Then `wsl --terminate radio-atlantida` so `/etc/wsl.conf` (systemd, default user, drive mount options) takes effect, start it again, and check `systemctl is-system-running` (`running` or `degraded` with only known units), `docker info`, and that the media folder is visible and writable by the group (6.6).
@@ -357,7 +421,7 @@ The first run is any run where no successful install of the stack is recorded (`
 3. GHCR login inside the distribution (`docker login ghcr.io --password-stdin`); the credentials file `~/.docker/config.json` of `radio` has mode `0600` (it holds the read-only token).
 4. Release check and pull of `release.env` (as 7.3 steps 3 and 5). `radio-network.service` has written `runtime/network.env` (6.5); `.env` gets `MEDIA_ROOT` from the folder chosen in 6.2 step 6.
 5. Start in order: `db` (healthy), `migrate`, `backend` (health gate without the `queued` condition: there is no plan yet), `frontend`, `loki`, `alloy`, monitoring if enabled. `liquidsoap` is **not** started: the mount still carries the old source (6.9).
-6. Stream settings through `PUT /api/settings/{key}`, proposed and confirmed in the prompt: `stream.icecast_host=listen.teploe.net`, `stream.icecast_port=8001`, `stream.mount=/atlantida`, `stream.icecast_tls=true` (B6), `stream.codec=mp3`, `stream.bitrate_kbps=160`, `stream.sample_rate_hz=44100`, `stream.channels=2`, `stream.name="Radio Atlantida"`. They stay panel settings, changeable at any time (applied at runtime, D3).
+6. Stream settings in one batch through `PATCH /api/settings` (backend A11; was `PUT /api/settings/{key}` per key), proposed and confirmed in the prompt: `stream.icecast_host=listen.teploe.net`, `stream.icecast_port=8001`, `stream.mount=/atlantida`, `stream.icecast_tls=true` (B6), `stream.codec=mp3`, `stream.bitrate_kbps=160`, `stream.sample_rate_hz=44100`, `stream.channels=2`, `stream.name="Radio Atlantida"`. They stay panel settings, changeable at any time (applied at runtime, D3).
 7. Enable `radio-backup.timer` (D6) and run the first backup.
 8. Record `current`, `applied`, and `last_result = ok` in `state.json`; write the run log.
 9. On failure: `last_result = failed`, the failing step is reported, and the next `install.bat` or `update.bat` takes the first-run path again.
@@ -382,7 +446,23 @@ The external mount carries the current playout system's source until the develop
 - **Reboot test:** after a cold reboot with nobody signed in, the stack is healthy and Liquidsoap is connected to the server (or, before the cut-over, all services except `liquidsoap` are healthy) within **5 minutes** of power-on, as recorded by `radio-boot-check`; the operator then signs in and `update.bat status` confirms it.
 - The Windows checks marked (verify on Windows) pass: Store WSL with systemd and `wsl --import` on the production build, WSL from the task without a sign-in, no idle shutdown with the keep-alive, localhost forwarding of the panel and Grafana (NAT mode), a live voice session from the Windows browser to the VM address after two reboots (the address changed and `radio-network.service` recreated the backend), no LAN host reaching the VM's UDP port, the media folder: group write (a transcode writes a fixed file and renames it), the first import's duration, Cyrillic file names, clock agreement between Windows and WSL (difference under 1 s).
 
+### 6.10 As implemented (deviations)
+
+- **Root file system:** the classic dated rootfs tarball of Canonical's WSL images (`cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-24.04lts.rootfs.tar.gz`, SHA-256 in `versions.env`): a dated folder is never rewritten, and the tarball has no first-run user dialog. The newer `.wsl` file is noted in `versions.env` as the alternative. `setup-distro.sh` updates its packages once.
+- **The stock `ubuntu` user** (uid 1000 in some images) is renamed to `radio` (`usermod -l`, `groupmod -n`), instead of a second user being created.
+- **`radio-network` and `boot-check` are `radioctl` subcommands** (`radioctl network [--mode nat|mirrored]`, `radioctl boot-check`); the units `radio-network.service` and `radio-boot-check.service` only run them as `radio`. The network mode is in `/etc/radio-atlantida/host.env`. The units are installed and enabled by `install/systemd/install-units.sh`, which `setup-distro.sh` runs.
+- **Keep-alive log:** `radio-keepalive` writes its line to `logs/keepalive.log` (kept below 1 MiB), not to the boot log, whose last line `update.bat status` shows.
+- **The boot check measures VM uptime:** it records the VM uptime (`/proc/uptime`) when the stack became healthy and compares it with the 5-minute target, rather than the time since the unit started.
+- **VM memory:** half the RAM, at least 4 GB and at most 16 GB (was a fixed 8 GB); **free disk:** 40 GB (was 100 GB) (6.1; 2af198b).
+- **External USB is refused** for the media folder (`BusType` USB), besides network shares and non-NTFS or removable drives.
+- **Exit code 3010** (`ERROR_SUCCESS_REBOOT_REQUIRED`) when the features step needs a restart; the install continues at the next sign-in of `radio`.
+- **Switches:** `-Yes` accepts the defaults of the questions (media folder, active hours) but never answers a question that interrupts the air; `-Elevated` is internal, set by the self-elevation so the elevated window waits for Enter before it closes. Also `-MediaFolder`, `-ActiveHoursStart`, `-ActiveHoursEnd`, `-AccountName`, `-RepoUrl`.
+- **No `install/wslconfig.template`:** `install.ps1` merges the keys into `.wslconfig` itself.
+- **First run:** `install.ps1` step 11 starts `radio-network.service` once after the clone and calls `radioctl first-run`; the first-run logic lives in `radioctl` (D5).
+
 ## 7. Phase D5 — Update tool (`radioctl` inside WSL)
+
+**Status: done** (23e4ffa, 28c4b6d, 75092c7, bcb01fe, 7d97c7a; 5b6deb4 in D7). Deviations: 7.8.
 
 **Goal:** the manager updates, installs a given release, rolls back, restores, and runs maintenance from a double-click, with the least interruption of the air.
 
@@ -490,7 +570,19 @@ The tool never runs `docker compose down -v` or `wsl --unregister`, never delete
 
 **Done when:** every command runs with `--dry-run` and prints its full step list; the bats tests pass; the dry run (D7) completes the first run, an update with a migration, an install of an older release, a refused downgrade below `min_app_version` (with a test schema), a rollback, a restore, a maintenance run, and the cut-over against a test Icecast.
 
-## 8. Phase D6 — Backups and restore
+### 7.8 As implemented (deviations)
+
+- **`previous` and `current` change only on success.** The pre-pull step (7.3 step 5) records only the `target` and `last_result = pending`; `finish_install` sets `previous = current` and `current = target` (with the pulled image IDs and the platform) when the install succeeds. A failed or undone install leaves both as they were.
+- **`runtime/applied.env` and `runtime/target.env`.** `applied.env` names the running release (tags, digests, `GRAFANA_URL`) and is rewritten only when the new backend is started; `target.env` names the release being installed and is used for the pull, `migrate target-compat`, and the migration. The rollback of step 14 rewrites `applied.env` with the `current` values.
+- **First run lives in `radioctl`** (`radioctl first-run [--media-root <path>]`); `install.ps1` only calls it (6.10).
+- **First-run stream settings use the batch `PATCH /api/settings`** (backend A11), all at once, not `PUT /api/settings/{key}` per key (6.8 step 6).
+- **`status`, `logs`, and `compose` take no lock**: they only read, or are diagnostics; every other command takes `state.lock` (`RADIOCTL_LOCK_WAIT`, default 600 s; the timers' units set longer waits). New command `update.bat logs [<service>...]`: the tail of the last run log, or the last 200 lines of the named services' container logs.
+- **`history` has more fields** than 7.6: `kind` (`update`, `rollback`, `restore-install`, `first-run`), `from_frontend`, `to_frontend`, `result` (`ok`, `failed`, `rolled_back`), `restored`, and `log` (the run log). `current` also records `backend_image_id`, `frontend_image_id`, and `platform`; `state.json` also has `last_backup` and `last_drill` objects (D6).
+- **Digests come from `docker buildx imagetools inspect`** (the manifest list digest), not `docker manifest inspect`; the buildx plugin is pinned in `versions.env`.
+- **A bare `X.Y.Z` means update:** `update.bat 1.0.1 [1.0.1]` is `radioctl update 1.0.1 [1.0.1]` (5b6deb4).
+- **Environment switches `RADIOCTL_*`** for tests and the dry run, never in `.env`: `RADIOCTL_ROOT`, `RADIOCTL_BACKEND_IMAGE`, `RADIOCTL_FRONTEND_IMAGE`, `RADIOCTL_COMPOSE_OVERRIDE`, `RADIOCTL_HEALTH_TIMEOUT` (default 90, at least 60), `RADIOCTL_LOCK_WAIT`, `RADIOCTL_FAKE_CLOCK`, `RADIOCTL_HOST_ENV`, `RADIOCTL_NET_DEV`, `RADIOCTL_NET_WAIT`, `RADIOCTL_BOOT_WAIT`, `RADIOCTL_UPTIME0`, and `RADIOCTL_STREAM_OVERRIDE` (a JSON object merged over the first-run stream settings, for a test Icecast; the cut-over preconditions and the listen hint then follow it). Also `COMPOSE_PROJECT_NAME` and `DOCKER_DEFAULT_PLATFORM`.
+- **No automatic rollback after a boundary-dump restore** (§10.4) whose health gate fails: the previous release cannot run on the restored database, so the tool records the failure (`restored: true`) and reports "the developer must check it" instead of reinstalling the previous release.
+ — Backups and restore
 
 **Goal:** the database and the playout journal can be recovered to at most 24 hours old, on the machine itself, also after a loss of the distribution.
 
@@ -507,14 +599,25 @@ Tasks:
 
 **Done when:** backup, both copies, retention, restore, and the drill run on the dry run; on Windows, the timer runs after a reboot and the Windows copy appears in `C:\RadioAtlantida\backups`.
 
+**Status: done** (f917740, 5f893c1, ba8d7ac, 5885c3e). As implemented (deviations):
+
+- **A monthly drill timer:** `radio-restore-drill.timer` runs `radioctl restore-drill` at 05:30 on the 1st of every month (an hour after the daily backup, so it restores a fresh dump), `Persistent=true`, in addition to the runbook checklist item. The result is `last_drill` in `state.json`, shown by `status`.
+- **The timers' time zone is fixed** in the units (`OnCalendar=… Asia/Yerevan`, the backend's `station.timezone` default), so the schedule does not depend on the distribution's local time zone; `setup-distro.sh` installs `tzdata` for it.
+- **`setup-distro.sh` installs and enables the timers** (`install/systemd/install-units.sh`, as root); `radioctl first-run` runs as `radio` and only checks that both timers are enabled (a warning otherwise), then runs the first backup (6.8 step 7).
+- **The journal folder per day:** every dump, daily or pre-update, gets the journal files copied into `<category>/journal-<UTC date>/` beside it (`daily/` or `update/`), refreshed by a second dump on the same day; retention removes a journal folder when no kept dump of that date remains. `BACKUP_ROOT` and the Windows copy have the same layout.
+- **The Windows copy** is the `.env` variable `BACKUP_WINDOWS_COPY` (default `/mnt/c/RadioAtlantida/backups`, empty disables it). `radioctl` never creates the folder (a missing `/mnt/c` would make it a folder inside the virtual disk); `install.bat` creates it.
+- **Journal and Windows copy problems are warnings:** a missing journal folder, a failed journal copy, a missing or failed Windows copy are recorded in `last_backup.warnings` and shown, but the backup succeeds when the dump succeeds. Only a failed dump fails the backup.
+
 ## 9. Phase D7 — CI, runbook, and dry run
+
+**Status: done** (5b6deb4, 01a359e, 52fda4f, 580d3b6, 8cb490a, 6d05045, 13b62cd); the Mac dry run itself is still to do (§0.1). Deviations: 9.4.
 
 **Goal:** every change to this repository is checked before it reaches the production machine, and the procedure is rehearsed.
 
-### 9.1 CI (`.github/workflows/ci.yml`, every PR)
+### 9.1 CI (`.github/workflows/ci.yml`, every push to `main` and every PR)
 
 1. Compose renders with `.env.example` and a fixture `applied.env`, with and without `--profile monitoring`. From `docker compose config --format json`: no `latest`; no `icecast` service; the only published ports are the three of D2: the panel and Grafana with `host_ip: 127.0.0.1`, the UDP port with `host_ip` equal to the fixture's `LIVE_UDP_BIND` (rendered once with `127.0.0.1` and once with `0.0.0.0`) and `protocol: udp`; the media mounts have `create_host_path: false`; `loki`, `alloy`, `db`, `liquidsoap` publish nothing; `migrate` and `grafana-role` have `healthcheck.disable: true`; `backend` has `stop_grace_period: 30s`, `group_add` 10001, its media mount read-write and its journal mount read-only.
-2. `release.env`: tags match `^\d+\.\d+\.\d+$`, digests are set and match the tags (`docker manifest inspect` with a read token), the frontend and backend MAJOR.MINOR rule holds.
+2. `release.env`: tags match `^\d+\.\d+\.\d+$`, digests are set and match the tags (`docker buildx imagetools inspect` with the read token), the frontend and backend MAJOR.MINOR rule holds. As implemented: empty digests are only a warning until the backend tag `v${BACKEND_TAG}` exists (9.4).
 3. **Sync with the backend at `v${BACKEND_TAG}`** (`scripts/check-backend-sync.sh`; fetches the public backend repository at that tag, no token, 11.13):
    - infrastructure image tags equal those of `docker-compose.dev.yml`;
    - `config/grafana/`, `config/loki/loki.yaml`, `config/alloy/config.alloy` equal `dev/grafana/` (without its Go test file), `dev/loki/loki.yaml`, `dev/alloy/config.alloy`;
@@ -523,22 +626,28 @@ Tasks:
 5. Grafana provisioning YAML and dashboard JSON parse; dashboard data source uids match the provisioned ones.
 6. Liquidsoap: `liquidsoap --check config/liquidsoap/radio.liq` in `savonet/liquidsoap:v2.4.6`; then the **runtime smoke test** (`tests/liquidsoap/`): the script runs for a few seconds against a test Icecast container (plain, and behind a TLS proxy) with a stub backend (callbacks, emergency, output endpoint), and `output.set` is applied for every codec × channels × sample rate with the lowest and highest bitrate and both sides of every encoder limit (as the backend's `dev/liqsmoke`). Required because `--check` does not catch encoder errors that appear at runtime (5.2).
 7. `install/versions.env`: the pinned Docker apt versions exist in Docker's repository for Ubuntu 24.04 (`apt-cache madison` in an `ubuntu:24.04` container with the pinned key); the rootfs URL answers and its SHA-256 matches.
-8. `shellcheck` on `bin/radioctl`, `install/*.sh`, `install/radio-keepalive`, `scripts/*.sh`; PSScriptAnalyzer on `install.ps1` and `scripts/*.ps1`.
+8. `shellcheck` on every tracked bash file (`scripts/check-shell.sh`: `*.sh`, `*.bash`, and every file with a bash shebang, such as `bin/radioctl`, `install/radio-keepalive`, the test stubs); PSScriptAnalyzer on `install.ps1` and the test scripts.
 9. **bats tests** of `radioctl` on Ubuntu, with `docker`, `git`, and `curl` replaced by stubs on `PATH`. Cases: happy path; dump failure stops; migrate exit `4` (rolled back) aborts with the plain message, keeps the old images, runs no restore, and records `history`; migrate exit `5` (dirty) restores the pre-update dump without a prompt, restarts the old backend, and records `restored: true`; a failed automatic restore still starts the old backend and reports it; a migrate that did not start (exit 1) aborts without restore; a target whose `migrate target-compat` is above the running release migrates with the old backend stopped and restarts it on exit `4`; a database already dirty at preflight stops with the plain message; health gate timeout rolls back by digest; frontend failure rolls back; monitoring failure is only a warning; `release.env` digest mismatch stops before any change; incompatible versions stop; open outage stops; `on_air` null asks; unreachable endpoint asks; fewer than 2 queued items waits then stops; prepush window waits; a changed Liquidsoap image or script becomes pending and `liquidsoap` is not restarted; a changed Loki config hash recreates `loki`; `maintenance` asks for `MAINTENANCE`; restore asks for `RESTORE` and stops `backend` first; install below 1.0.0 refused; `update.bat <tag>` with a missing image stops; `update.bat <b> <f>` with different MAJOR.MINOR stops; a frontend tag defaults to the backend tag; a newer target migrates, an older one does not; an older target below `min_app_version` is refused and the boundary dumps are offered; a missing `schema_compat` table counts as 1.0.0; an older target below the script's `min-backend` is refused; `history` gets an entry per install; retention keeps boundary dumps and the recorded dump; backup writes both copies and an unwritable Windows copy is a warning; `radio-network` in NAT mode writes the `eth0` address and recreates `backend` only when it changed, and in mirrored mode writes `127.0.0.1`; a missing media mount is reported by `status`; first run skips the air check and the dump and does not start `liquidsoap`; first run with a volume and no state stops; a failed first run does not roll back; `cutover` checks its preconditions, asks for `CUTOVER`, and `--undo` stops `liquidsoap`; Docker or Compose version different from `versions.env` stops; `--dry-run` changes nothing; the lock blocks a second run.
 10. **Pester tests** of `install.ps1` under Windows PowerShell 5.1 on a Windows runner, with `wsl.exe`, `dism.exe`, `powercfg.exe`, `w32tm.exe`, `Register-ScheduledTask`, the registry, and downloads mocked. Cases: a build below 19044 or without the Store WSL stops; Windows 10 19044+ chooses NAT mode, prints the support note, and writes `localhostForwarding`; Windows 11 22621+ chooses mirrored mode; virtualization off stops; the media folder must exist on a local NTFS drive, its WSL path is derived correctly (drive letter, spaces, Cyrillic names), and the Defender exclusion is added; Docker Desktop present stops; wrong account offers `-CreateAccount`; features already enabled skip the reboot; features enabled now register the resume task and ask to reboot; `-Resume` continues at the recorded step and removes the resume task; WSL below the minimum runs `wsl --update`; `.wslconfig` merge keeps unknown keys and sets the chosen network mode; an existing distribution is kept; a rootfs checksum mismatch stops; `setup-distro.sh` failure stops with its log; the keep-alive task has the startup and repetition triggers, no time limit, "run whether logged on or not", and `IgnoreNew`; the password is never written to the log; active hours are set to the operator's window (at most 18 hours) and no Pro-only policy is written; the edition and the newest KB with its date are logged and an old patch level only warns; a second run changes nothing; `-DryRun` changes nothing.
-11. `scripts/check-line-endings.ps1` (CRLF for `*.bat`/`*.ps1`, LF for everything else, in particular `bin/radioctl` and `*.sh`).
+11. `scripts/check-line-endings.sh` (bash, not `.ps1`): the `.gitattributes` eol per file (CRLF for `*.bat`/`*.ps1`, LF for everything else, in particular `bin/radioctl` and `*.sh`), LF in the index, the working tree matches, a UTF-8 BOM on `*.ps1` only, no case-only path duplicates.
 
-### 9.2 Runbook (`README.md`)
+### 9.2 Runbook (`docs/runbook.md`) and `README.md`
 
-- Before the install: Windows 10 21H2+ (19044) with current updates or Windows 11 (Home is enough), the support-status and security note (6.1, 6.7); BIOS settings (power on after power loss, virtualization); a UPS; the `radio` account; the GHCR read token (with its expiry date); the external Icecast source password.
-- Install: `install.bat` (signed in as `radio`), the feature reboot and resume, what the summary shows, the reboot test.
-- Media: copy new folders into the station's Windows media folder ("Radio media"), then import the folder in the panel; never rename, move, or delete a file that is in the plan (use Replace file); the Defender exclusion and indexing; `update.bat status` for a missing drive or permission problems.
-- The cut-over from the old source on `/atlantida` (6.9) and its rollback.
-- Regular update, install of a given release, rollback, restore, maintenance, with what each does to the air; Windows Update and Docker Engine upgrades in a maintenance window, followed by the reboot check.
-- Backups: where they are (both copies), the timer, the monthly restore drill, the disk-loss risk; **never `wsl --unregister radio-atlantida`**.
-- Stream output: changed in the panel ("Stream output (Icecast)"), applied at once with a gap of a few seconds; the request to the server owner for the UTF-8 mount charset.
-- Monitoring: `http://127.0.0.1:${GRAFANA_PORT}`, admin login, the dashboards, `MONITORING_ENABLED`, `grafana cli admin reset-admin-password` (through `update.bat compose exec grafana ...`), changing `GRAFANA_DB_PASSWORD`.
-- Troubleshooting: the stack did not start after boot (keep-alive task history, `logs/boot-*.log`), the panel does not open (localhost forwarding or mirrored networking, `wsl --status`), live voice does not connect (`runtime/network.env`, the VM address), registry login, health timeout, Liquidsoap not connected to the external server (password, TLS, mount busy), non-Latin titles shown as `*`.
+The operator runbook is `docs/runbook.md`, maintained in the deploy repository (not a pushed copy). `README.md` is the developer overview: the layout, the CI jobs and how to run them on the Mac, the config sync with the backend and the backend ref rule (5.5), how a station release is made, and the `radioctl` test switches. `docs/dry-run.md` is the Mac dry run (9.3).
+
+The runbook's sections:
+
+1. **Before the install:** the machine (Windows 10 21H2+ with the November 2022 cumulative update or later, or Windows 11; Home is enough; 16 GB RAM recommended, the VM gets half; 40 GB free on the SSD of the install folder; no Docker Desktop), the BIOS/UEFI settings (power on after power loss, virtualization), the security note for Windows 10 without ESU, what to have ready (the GHCR user and read-only token with its expiry date, the Icecast source password, the media folder, the `radio` password), the external Icecast server and the request for the UTF-8 mount charset, a record sheet.
+2. **First install:** the `radio` account (`install.bat -CreateAccount`), `install.bat`, the feature restart and resume, what the install did, how to check it.
+3. **Before the first air:** media import, grid and clocks, the emergency playlist.
+4. **Cut-over** on `/atlantida` (6.9) and its undo.
+5. **Daily operation:** the panel, `update.bat status`, the stream output settings (applied at once with a gap of a few seconds), monitoring (Grafana login, password reset, `MONITORING_ENABLED`).
+6. **Updates and rollback:** the regular update, a given release, rollback, and Docker Engine, WSL, and Windows updates in a maintenance window, followed by the reboot check.
+7. **Maintenance window.**
+8. **Backups:** what and where (both copies), the schedule (the daily and monthly timers), retention, the disk-loss risk; **never `wsl --unregister radio-atlantida`**.
+9. **Restore and the monthly drill**, going back past a database change, production data to development.
+10. **Troubleshooting:** where the logs are, a shell inside the distribution, the stack did not start after a restart, a table of problems and what to do, replacing the station PC, editing `.env`.
+11. **The Windows acceptance checklist** (every "verify on Windows" item of D4) **and the cold-reboot test**.
 
 ### 9.3 Dry run (no staging)
 
@@ -549,7 +658,18 @@ There is no staging machine. The dry run of a release, and of every change to th
 
 What the Mac cannot test, checked on Windows (the D4 acceptance run, and again after a Windows update or a WSL or Docker Engine upgrade): `install.ps1` itself (features, reboot and resume, `wsl --import`, `.wslconfig`), WSL started by the task without a sign-in, idle shutdown and the keep-alive, WSL's localhost forwarding and the UDP path to the VM address (or mirrored networking on Windows 11), the Windows media folder through the drive mount (permissions, speed, names, Defender), Windows power and update settings, the Windows backup copy on `/mnt/c`, clock agreement, the amd64 images on the real CPU, and the reboot test.
 
+The procedure is `docs/dry-run.md` (6d05045): an Ubuntu 24.04 arm64 VM, `setup-distro.sh --network-mode nat`, a test Icecast behind TLS through `tests/dryrun/compose.override.yml` (`RADIOCTL_COMPOSE_OVERRIDE`, `RADIOCTL_STREAM_OVERRIDE`), application images from GHCR (a real release) or, before a release, built locally into a registry in the VM (`RADIOCTL_BACKEND_IMAGE`, `RADIOCTL_FRONTEND_IMAGE`, `--no-fetch`), and the rehearsal list of item 1.
+
 **Done when:** CI is green on a PR; the dry run passes; the D4 Windows acceptance run passes; the runbook lets someone who has never seen the system install, update, and recover it.
+
+### 9.4 As implemented (deviations)
+
+- **The runbook is `docs/runbook.md`**, and `README.md` is the developer overview (9.2; 13b62cd).
+- **The line-endings check is bash** (`scripts/check-line-endings.sh`), not `.ps1`, so it runs on the Linux runner and on the Mac with the other checks.
+- **Empty digests only warn until the backend tag exists:** `scripts/check-release.sh` requires the digests once `v${BACKEND_TAG}` exists in the backend repository, and then also requires both Git tags, so the sync check cannot fall back to `config/backend-source.env` with a released `release.env`. The registry comparison runs only with the repository variable `GHCR_USER` and the secret `GHCR_READ_TOKEN` (otherwise a warning: the images are private).
+- **Pinned tools:** `mikefarah/yq:4.44.3` by index digest for the Grafana provisioning YAML (`scripts/check-config.sh`), shellcheck 0.10.0, actionlint 1.7.7, bats-core 1.11.1, Pester 5.7.1, PSScriptAnalyzer 1.25.0, PowerShell 7.5 (pinned images).
+- **No `workflow_call`:** the workflow runs on pushes to `main` and on pull requests only; every job calls a script of this repository, so the same checks run locally.
+- **The CI jobs:** `lint` (line endings, shellcheck, actionlint), `compose` (`check-compose.sh`, `check-config.sh`), `release` (`check-release.sh`), `backend-sync` (`check-backend-sync.sh` at the backend ref), `liquidsoap` (`tests/liquidsoap/run.sh` with the backend checked out at the same ref and Go from its `go.mod`), `radioctl` (bats), `distro` (`setup-distro.sh` twice in `ubuntu:24.04`, `systemd-analyze verify`, then the pinned Docker apt install), `versions` (`check-versions.sh --download`), `install` (Pester and PSScriptAnalyzer in PowerShell 7 on Linux), `windows` (the same under Windows PowerShell 5.1 on `windows-latest`).
 
 ## 10. Releases, versions, and migrations
 
@@ -673,12 +793,13 @@ Backend (`radio-atlantida-backend`):
 - **B2.** Contract header in the dev script (`radio-atlantida-contract: N`, `min-backend: X.Y.Z`), bumped whenever the telnet commands, callback payload, journal format, emergency or output endpoints change. **Done** (e2b9178: contract 1, `min-backend: 1.0.0`).
 - **B3.** `liquidsoap --check` and a short runtime run of the dev script in the backend CI, so the script is checked where it is developed. **Done** (7214870: `make liquidsoap-smoke`, CI job `liquidsoap`).
 - **B4.** `CLAUDE.md` lists `golang:1.27.2-trixie` (line 184); the Dockerfile and `go.mod` use 1.27.4 (`docker/Dockerfile:4`, `go.mod:3`). Resolved as a `CLAUDE.md` update in backend step D1. **Done** (8efa7bc).
-- **B5.** `stream.loudness_target_lufs` and `stream.hls_enabled` are settings that nothing applies to the output; decide whether the script applies the loudness target (normalisation) and whether HLS stays a setting.
+- **B5.** `stream.loudness_target_lufs` and `stream.hls_enabled` are settings that nothing applies to the output; decide whether the script applies the loudness target (normalisation) and whether HLS stays a setting. Backend A8 only changed their descriptions. **Open, not blocking** the first install.
 - **B6 (prerequisite of the first air date).** TLS to the stream server: a setting `stream.icecast_tls` (bool, reconnect), passed in `output.set` and used by the script (`transport=http.transport.tls()`), and the mount check over `https` when it is on. **Done** (6b270a5, e2b9178).
 - **B7 (required, before the first release).** Automatic recovery of a failed migration: CI lint for transaction-unsafe files and the `-- migrate: non-transactional` marker; `backend migrate up` resets the version after a transactional failure and exits `4` ("rolled back, schema unchanged at version N"), exits `5` when the database is dirty; `backend migrate target-compat` prints the `min_app_version` the image's migrations set (7.3 step 7). **Done** (137cc5d).
 - **B8 (decided).** Annotated release tags carry a line `migrations: none|expand|contract`; the release notes repeat it (10.3). **Done** (137cc5d `release.yml`, 8efa7bc `CLAUDE.md`). Tag with `git tag -a v1.0.0 -m "migrations: expand"`.
 - **B10 (before the first release).** Multi-arch backend image: `release.yml` publishes one manifest list per tag for `linux/amd64` and `linux/arm64`. Recommended: build each architecture natively (`ubuntu-24.04` and `ubuntu-24.04-arm` runners, free for public repositories), because the runtime stage runs `apt-get install ffmpeg` and would need QEMU on a single runner; push by digest, then `docker buildx imagetools create` the list under `X.Y.Z`. The Go stage can also cross-compile (`FROM --platform=$BUILDPLATFORM`, `GOOS=$TARGETOS GOARCH=$TARGETARCH`, `CGO_ENABLED=0` already). Smoke-test both images (`backend version`, `openapi` equal on both; the attached `openapi.json` from amd64). The "tag is not taken" check inspects the manifest list (`imagetools inspect`). `ci.yml` builds both architectures. The Dockerfile's `HEALTHCHECK` and `curl` are per-arch packages, no change. **Done** (37cd98c).
 - **B12 (with B1, before the first release; decided 2026-11-12, the developer may override).** Batch settings save with encoder limit validation (decided 2026-11-12): a new endpoint saves several settings at once, all or nothing, with one change notification (one `output.set`, one reconnect). The backend refuses a `stream.codec`, `stream.bitrate_kbps`, `stream.sample_rate_hz`, or `stream.channels` value that, with the others (from the batch, else saved), violates the encoder limits (5.2 item 4), with a 422 and a field error naming the limit, so the panel shows it at save time regardless of the order of the fields. The table moves to one Go package shared by the settings validation and `dev/liqsmoke`. Backend `deploy-prereqs-plan.md` step A11. **Done** (460e8f0, a722b20; endpoint `PATCH /api/settings`, field code `encoder_limit`).
+- **B13 (found in D3/D7, 2026-11-13).** Liquidsoap stays up on an output switch, and a crash-loop guard for the startup output. Root cause: `output.set` shuts the old Icecast output down and creates the new one; when the shutdown is processed before the new output wakes up, the source graph has no consumer for a moment and Liquidsoap puts it to sleep, so the harbor input closes port 8005; the new output wakes it at once, the rebind fails with `EADDRINUSE`, and Liquidsoap exits with code 2. Fix: a permanent `output.dummy(id="keepalive")` on `radio`, created once at startup, so the graph always has a consumer. Guard: the script counts quick starts in a row in `quick-starts` next to `OUTPUT_STATE_FILE` (raised at every start, reset once a run has lived 30 s); after 3 quick starts it starts with the environment output instead of the backend's or the state file's and logs it at level 1 ("crash-loop guard"); the backend's `output.set` then applies its output as usual. No interface change, so no contract bump. This also explains the earlier unexplained backend CI failure of the smoke test at "aac 2 ch 320 kbps 32000 Hz" (and the deploy smoke test's failure under parallel load at "aac 2 ch 320 kbps 48000 Hz"). The backend smoke test gained a rapid-switch case and a guard case. **Done** (a53eba8, 1867efa; backend `deploy-prereqs-plan.md` A12; `config/` taken from 1867efa).
 - **B9 (before the first contract migration).** Downgrade guard (§10.4): the `schema_compat` table with `min_app_version` (expand migration, seeded `1.0.0`), the startup check in `backend serve`, the `backend migrate check` subcommand (JSON), and the rule in the migration guidelines that a contract migration raises `min_app_version`. **Done** (137cc5d, rules in 8efa7bc; `serve` exits 3 when incompatible; a dirty database is only logged at ERROR and `serve` keeps running, 341702c).
 
 Frontend (`radio-atlantida-frontend`):
@@ -695,6 +816,8 @@ Frontend status (2026-11-12): F1, F2, F4 done (commits a458e18, 8de99b5; the CI 
 The design changes this plan needed are applied in `tech-design.md` v7-24 (2026-11-12): §1.1 (separate tags, digests, deploy contents including `install.bat` and `radioctl`), §3 (stream server row), §6.3 (reconnect is not a restart), §7.1 (mount check over HTTPS), §8.8 (runtime output, TLS, charset findings and decision, production server and first format), §9 (no production Icecast, published ports, health checks), §9.1 (Windows 10 or 11 host with Docker Engine in a dedicated WSL2 distribution, autostart without sign-in, NAT or mirrored networking, the media folder on Windows and the other data on ext4, database volume, Windows 10 support status), §9.2 (multi-arch images, release file, migrations baseline and downgrade guard, install and update tooling, steps, effect on air), §10 (access, backups with the systemd timer and the Windows copy), §10.3 (reference), §10.4 (journal location), §11 (items 5 and 6, new items 32 to 36).
 
 v7-25 (2026-11-12, backend Phase A findings): §6.3 (encoder limits checked at save; batch save `PATCH /api/settings`, all or nothing, one `output.set`), §8.8 (startup order with the environment, strict JSON, state file path and ownership, state written on connect, encoder limits table, AAC-LC, TLS with `http.transport.tls()` instead of `ssl()`), §11 (new item 39).
+
+v7-26 (2026-11-13, D3–D7 and backend B13): §8.8 (the keepalive output and the crash-loop guard of the startup output), §10 (the backup and restore drill timers with their fixed station time zone), §11 (new item 40).
 
 ## 14. Prompt for the first Claude Code session
 

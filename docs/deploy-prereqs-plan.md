@@ -1,8 +1,8 @@
 # Plan — Deploy Prerequisites: Runtime Stream Output, TLS, Migration Recovery and Downgrade Guard, Multi-arch Release (radio-atlantida-backend)
 
-Status: Approved scope (deploy plan and tech-design v7-24, 2026-11-12). Phase A done (commits 6b270a5, e2b9178, 7214870; see §2.3; dev check A10 passed 2026-11-12; A11 done in 460e8f0, a722b20). Phase B done (137cc5d; B3 dirty-database decision 341702c), Phase C done (37cd98c), Phase D1 done (8efa7bc). Next: tag `v1.0.0` (§5 item 8). Deviations: §2.3, §2.4.
-Based on: `docs/tech-design.md` v7-25 (§1.1, §6.3, §7.1, §8.1, §8.5, §8.8, §9, §9.2, §11 items 32–38), `radio-atlantida-docs/deploy/docs/deploy-init-plan.md` (§5 Phase D3, §6 Phase D4, §7.3, §10, §12 cross-repo tasks B1–B10, B12), frontend `docs/deploy-prereqs-plan.md` (F1–F4)
-Last updated: 2026-11-12
+Status: Approved scope (deploy plan and tech-design v7-24, 2026-11-12). Phase A done (commits 6b270a5, e2b9178, 7214870; see §2.3; dev check A10 passed 2026-11-12; A11 done in 460e8f0, a722b20). Phase B done (137cc5d; B3 dirty-database decision 341702c), Phase C done (37cd98c), Phase D1 done (8efa7bc). A12 (B13, Liquidsoap stays up on an output switch, crash-loop guard) done (a53eba8, 1867efa; §2.5). Next: tag `v1.0.0` (§5 item 9). Deviations: §2.3, §2.4, §2.5.
+Based on: `docs/tech-design.md` v7-26 (§1.1, §6.3, §7.1, §8.1, §8.5, §8.8, §9, §9.2, §11 items 32–38), `radio-atlantida-docs/deploy/docs/deploy-init-plan.md` (§5 Phase D3, §6 Phase D4, §7.3, §10, §12 cross-repo tasks B1–B10, B12), frontend `docs/deploy-prereqs-plan.md` (F1–F4)
+Last updated: 2026-11-13
 
 ## 1. Goal
 
@@ -14,7 +14,7 @@ The deploy repository (`radio-atlantida-deploy`) can only finish its phases D3 a
 - undoes a failed migration by itself, so the deploy tool can keep the running release on air without asking the operator anything;
 - publishes its image for `linux/amd64` (production) and `linux/arm64` (the developer's Mac) under one tag.
 
-This plan covers the deploy plan's cross-repo tasks B1, B2, B3, B4 (resolved as a `CLAUDE.md` update to 1.27.4, step D1), B5, B6, B7 (required: automatic recovery of a failed migration), B8 (decided), B9, B10, and B12 (encoder limits at save, A11). B11 is not planned (§7).
+This plan covers the deploy plan's cross-repo tasks B1, B2, B3, B4 (resolved as a `CLAUDE.md` update to 1.27.4, step D1), B5, B6, B7 (required: automatic recovery of a failed migration), B8 (decided), B9, B10, B12 (encoder limits at save, A11), and B13 (Liquidsoap stays up on an output switch, crash-loop guard, A12; found by the deploy smoke test). B11 is not planned (§7).
 
 **Precondition:** the uncommitted working-tree change (`docker/Dockerfile` `GO_VERSION=1.27.4`, `go.mod`) is committed first; it is not part of this plan.
 
@@ -88,6 +88,14 @@ Phases B, C (137cc5d, 341702c, 37cd98c):
 - The B7 lint also refuses `ABORT`, and refuses `BEGIN ATOMIC` function bodies (it does not parse them, so it errs on the safe side).
 - An empty database reports `schema_version` 0.
 - Pre-release versions such as `1.0.0-rc1` do not parse as a release, so they count as non-release builds and are always compatible.
+
+### 2.5 Found after Phase C: Liquidsoap exit on an output switch (B13, A12; 2026-11-13, commits a53eba8, 1867efa)
+
+- **Symptom.** Liquidsoap exited with code 2 on some `output.set` switches: in the deploy smoke test under parallel load at "aac 2 ch 320 kbps 48000 Hz", and earlier in this repository's CI at "aac 2 ch 320 kbps 32000 Hz", which was unexplained until now (it is this bug, not a codec limit).
+- **Root cause** (reproduced locally). `set_output` shuts the old Icecast output down and creates the new one. When the shutdown is processed before the new output wakes up, `radio` has no active consumer for a moment and Liquidsoap puts the whole graph to sleep: the harbor input logs "Nothing more on port 8005: closing sockets" and closes port 8005. The new output wakes the graph at once, the harbor's rebind fails with `EADDRINUSE`, and Liquidsoap exits with code 2. 30 switches 50–200 ms apart crashed 16 of 16 runs before the fix; 0 ms or 300 ms and more did not crash.
+- **Fix** (a53eba8). A permanent `output.dummy(id="keepalive", register_telnet=false, radio)`, created once at startup: `radio` always has a consumer, so a switch never puts the harbor, the queues, or the emergency source to sleep. Both outputs run on one clock and read the same frames, so the track callbacks and the journal fire once; idle CPU unchanged. No interface change, so no contract bump.
+- **Crash-loop guard** (1867efa). If the startup output (from the backend or the state file) makes Liquidsoap exit, the restart policy would start it with the same output again and again. The script counts quick starts in a row in `quick-starts` next to `OUTPUT_STATE_FILE`: raised at every start, reset to 0 once the run has lived 30 s. After 3 quick starts it skips the backend and the state file, starts with the environment output, and logs at level 1 (critical) "crash-loop guard: N starts in a row ended within 30.0 s; startup output from the environment", for a log alert. The backend's `output.set` then applies its output as usual. It is not reported to the backend (a new callback event would change the contract), so no contract bump; if the backend's own output is the cause, its `output.set` still crashes the guarded run: the guard only stops the state file from looping.
+- **Smoke test** (`dev/liqsmoke`): case 4b, 30 switches 75 ms apart, then Liquidsoap still running, the last output on Icecast, and port 8005 listening (fails on the old script, passes with the fix); case 7, the count set to 3, Liquidsoap killed and started, the guard line logged and the state file's output then `OK applied` and on Icecast.
 
 **For the release:** `v1.0.0` must be an annotated tag with the migrations line, for example `git tag -a v1.0.0 -m "migrations: expand"` (B6 refuses a lightweight tag).
 
@@ -174,6 +182,12 @@ The rule goes into the header comment and into `CLAUDE.md` (Liquidsoap section):
   - integration (`internal/repository/settings`, and the service on the real store): a batch with one invalid value saves nothing (the earlier values stay); `UpsertMany` writes all rows with one `updated_at`.
 - `CLAUDE.md`: the settings section notes that the panel saves through `PATCH /api/settings` (all or nothing, one notification per save, `Subscribe` receives `[]Change`, cross-key rules are `settings.Check`); the Liquidsoap note: the encoder table is `internal/streamformat`, used by the settings check and `dev/liqsmoke`, kept in step with `ENCODER_LIMITS` by a unit test.
 
+**A12. Liquidsoap stays up on an output switch, crash-loop guard (B13; found by the deploy smoke test, before the first release) — done (a53eba8, 1867efa; §2.5).**
+- `dev/liquidsoap/radio.liq`: a permanent `output.dummy(id="keepalive", register_telnet=false, radio)` before the stream output part; the header comment names it.
+- `dev/liquidsoap/radio.liq`: the quick-start counter (`quick-starts` next to `OUTPUT_STATE_FILE`, written atomically; `quick_start_s = 30.`, `max_quick_starts = 3`); at 3 or more the initial output is the environment one, logged with `log.critical` ("crash-loop guard"); a failed write of the counter is logged at INFO.
+- `dev/liqsmoke`: case 4b (rapid switches; port 8005 still in LISTEN in the container's `/proc/net/tcp`) and case 7 (the guard); `pins_test.go` `TestListensOn` tests the `/proc/net/tcp` parser of case 4b.
+- No contract bump; the deploy repository copies the script with `check-backend-sync.sh --update` (done at 1867efa).
+
 ### Phase B — Migration recovery, downgrade guard, release notes (blocks deploy D5's failure handling; must ship in 1.0.0) — done
 
 B1–B7: commit 137cc5d; B5 and B8 rules in `CLAUDE.md`: 8efa7bc; B3 dirty-database decision: 341702c. Deviations in §2.4.
@@ -246,9 +260,9 @@ C1–C4: commit 37cd98c.
 
 ## 4. Tests
 
-- Unit: settings key and descriptions (A1, A8); encoder limit table and drift test, `SetMany`, cross-key checks, one notification per save, the batch endpoint and the 422 field code (A11); mount check over HTTPS and path matching (A2); output endpoint (A3); `applyOutput` cases (A5); version parsing and comparison (B2); startup guard (B3); `migrate check` output and exit codes (B4); migration lint and `target-compat` (B7).
+- Unit: settings key and descriptions (A1, A8); the `/proc/net/tcp` listener parser of the smoke tool (A12, `TestListensOn`); encoder limit table and drift test, `SetMany`, cross-key checks, one notification per save, the batch endpoint and the 422 field code (A11); mount check over HTTPS and path matching (A2); output endpoint (A3); `applyOutput` cases (A5); version parsing and comparison (B2); startup guard (B3); `migrate check` output and exit codes (B4); migration lint and `target-compat` (B7).
 - Integration: `schema_compat` default, raised minimum, missing table (B2); existing migration integration tests still pass with 0022; batch save all or nothing (A11); rolled-back, lock-timeout, and dirty cases of B7.
-- Script: `liquidsoap --check` and the smoke test (A9) in CI; the dev check (A10, done).
+- Script: `liquidsoap --check` and the smoke test (A9) in CI, with the rapid-switch and crash-loop guard cases (A12); the dev check (A10, done).
 - Release: a dry run of `release.yml` on a throwaway tag in a fork or with `workflow_dispatch` and a `-rc` image name is not available (tags are immutable); instead the CI matrix (C3) proves both builds, and the first real release is checked with `imagetools inspect`.
 
 ## 5. Order of work
@@ -260,7 +274,8 @@ C1–C4: commit 37cd98c.
 5. B1–B7 (B7 can be its own PR; it must be in before the deploy repository implements D5's failure paths). — done (137cc5d, 341702c).
 6. C1–C4. — done (37cd98c).
 7. D1 (`CLAUDE.md`) with the last PR of each phase that changes a rule it describes, at the latest before the release. — done (8efa7bc).
-8. Tag `v1.0.0` as an annotated tag with the `migrations:` line (`git tag -a v1.0.0 -m "migrations: expand"`) after Phases A–C and the frontend's F1, F3, F4. **The release unblocks deploy D4's first run and the arm64 dry run (D7).**
+8. A12 (B13: keepalive output, crash-loop guard), found by the deploy smoke test. — done (a53eba8, 1867efa).
+9. Tag `v1.0.0` as an annotated tag with the `migrations:` line (`git tag -a v1.0.0 -m "migrations: expand"`) after Phases A–C and the frontend's F1, F3, F4. **The release unblocks deploy D4's first run and the arm64 dry run (D7).**
 
 ## 6. Done when
 
@@ -273,6 +288,7 @@ C1–C4: commit 37cd98c.
 - `backend migrate check` reports `compatible: true` on a fresh dev database and `false` (exit 3) for a binary below a raised `min_app_version`; `backend serve` refuses to start (exit 3) in the same case; a dirty database is only logged at ERROR (341702c).
 - A release tag produces one manifest list with `linux/amd64` and `linux/arm64`; `docker pull` on the Mac gets arm64 and on an amd64 host amd64.
 - The script's header carries `radio-atlantida-contract` and `min-backend`.
+- 30 `output.set` switches 75 ms apart leave Liquidsoap running with port 8005 open, and after 3 quick starts in a row the script starts with the environment output and logs "crash-loop guard" (A12; done, a53eba8, 1867efa).
 - `CLAUDE.md` is updated (D1).
 
 ## 7. Out of scope and not planned
