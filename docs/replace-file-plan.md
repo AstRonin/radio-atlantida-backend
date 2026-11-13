@@ -47,6 +47,7 @@ Failure behaviour: if step 6 fails, nothing is written, because `SaveAnalysis` i
 
 - `internal/library/tracks.go` `UpdateTrack` and `prepareTrack`: do not accept `file_path` or `duration_ms` in the update input. `create-track` keeps them, because a new track needs a file.
 - `internal/repository/library/tracks.go:446` `Update`: drop the `file_path` clause from the reviewed rule (`tracks.go:448-449`), keep title and artist. Drop `cueReset(in.DurationMS)` from `Update`, since duration no longer changes there.
+- `trackColumns` (now `trackEditColumns`, `internal/repository/library/tracks.go:29`) wrote `duration_ms`, `format`, `bitrate` and `sample_rate` on every update, as nil when they are omitted. So a PUT without them cleared the stored analysis. Remove these four from the update columns. Keep `title`, `artist_id`, `type_id`, `quality_ok`, `quality_notes`. Analysis columns are written only by `SaveAnalysis`. Add an integration test: a PUT without these fields keeps the stored values. (Code done: `trackEditColumns` has only the five kept columns, 2026-11-14.)
 - `internal/httpapi/handlers/tracks.go:184-201`: the request type for PUT loses the two fields. A request that sends them is rejected as an unknown field, if the decoder is strict; otherwise the fields are ignored. Check the decoder setting and state which one in the handler.
 
 Result: after this change the only ways to change a track's file, length or quality fields are import, analyse, transcode and replace.
