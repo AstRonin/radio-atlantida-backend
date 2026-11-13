@@ -159,7 +159,7 @@ func serve(ctx context.Context) error {
 	librarySvc := library.NewService(database,
 		libraryrepo.NewTypes(database), libraryrepo.NewPlaylists(database),
 		libraryrepo.NewArtists(database), libraryrepo.NewTracks(database),
-		libraryrepo.NewTrackQueries(database), mediaLib, prober, playoutSvc, emergencySetting{settingsSvc}, log)
+		libraryrepo.NewTrackQueries(database.Pool), mediaLib, prober, playoutSvc, emergencySetting{settingsSvc}, log)
 	airWindowSvc := airwindow.NewService(airwindowrepo.New(database.Pool), playoutSvc, airWindowSettings(settingsSvc), time.Now)
 	ingestSvc := ingest.NewService(database, ingestrepo.New(database.Pool), librarySvc, mediaLib, prober, ff, tracker,
 		ingestSettings(settingsSvc), log, time.Now)

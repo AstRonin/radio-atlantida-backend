@@ -1,8 +1,6 @@
 package library
 
 import (
-	"gorm.io/gorm"
-
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 )
@@ -12,13 +10,10 @@ import (
 // missed hours. The writes stay on Tracks (GORM).
 type TrackQueries struct {
 	q db.Querier
-	g *gorm.DB
 }
 
-// NewTrackQueries returns the store on the database.
-func NewTrackQueries(d *db.DB) *TrackQueries { return &TrackQueries{q: d.Pool, g: d.Gorm} }
+// NewTrackQueries returns the store.
+func NewTrackQueries(q db.Querier) *TrackQueries { return &TrackQueries{q: q} }
 
 // WithTx returns the store bound to tx.
-func (s *TrackQueries) WithTx(tx db.Tx) library.TrackQueries {
-	return &TrackQueries{q: tx.Pgx(), g: tx.Gorm()}
-}
+func (s *TrackQueries) WithTx(tx db.Tx) library.TrackQueries { return &TrackQueries{q: tx.Pgx()} }

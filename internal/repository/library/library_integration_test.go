@@ -35,7 +35,7 @@ func newFixture(t *testing.T) *fixture {
 		t: t, d: d,
 		types: libraryrepo.NewTypes(d), playlists: libraryrepo.NewPlaylists(d),
 		artists: libraryrepo.NewArtists(d), tracks: libraryrepo.NewTracks(d),
-		queries: libraryrepo.NewTrackQueries(d),
+		queries: libraryrepo.NewTrackQueries(d.Pool),
 	}
 	require.NoError(t, d.Pool.QueryRow(t.Context(), `SELECT id FROM playlist_types WHERE code = 'music'`).Scan(&f.music))
 	return f

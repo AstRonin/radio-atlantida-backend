@@ -168,7 +168,7 @@ func newLibraryAPI(t *testing.T) *libraryAPI {
 	require.NoError(t, err)
 	svc := library.NewService(d,
 		libraryrepo.NewTypes(d), libraryrepo.NewPlaylists(d), libraryrepo.NewArtists(d), libraryrepo.NewTracks(d),
-		libraryrepo.NewTrackQueries(d), lib, prober, a.playout, emergencyFromSettings{settingsSvc}, log)
+		libraryrepo.NewTrackQueries(d.Pool), lib, prober, a.playout, emergencyFromSettings{settingsSvc}, log)
 	ingestSvc := ingest.NewService(d, ingestrepo.New(d.Pool), svc, lib, prober, ff, tracker,
 		func(context.Context) (ingest.Settings, error) {
 			return ingest.Settings{ // setting defaults

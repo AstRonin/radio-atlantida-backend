@@ -59,24 +59,21 @@ UPDATE tracks SET cue_in_ms = ?, cue_out_ms = ?, fade_in_ms = ?, fade_out_ms = ?
 // planned item of the track: plan_hours holds the plan horizon (48 rows at
 // most), each probed on ix_scheduled_items_track_id_planned_start_utc.
 func (s *TrackQueries) PlannedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
-	var r struct {
-		First *time.Time
-		Last  *time.Time
-	}
-	err := s.g.WithContext(ctx).Raw(`
+	var first, last *time.Time
+	err := s.q.QueryRow(ctx, `
 SELECT min(h.hour_start_utc) AS first, max(h.hour_start_utc) AS last
 FROM plan_hours h
 WHERE EXISTS (SELECT 1 FROM scheduled_items si
-              WHERE si.track_id = ? AND si.status = 'planned'
+              WHERE si.track_id = $1 AND si.status = 'planned'
                 AND si.planned_start_utc >= h.hour_start_utc
-                AND si.planned_start_utc < h.hour_start_utc + interval '1 hour')`, id).Scan(&r).Error
+                AND si.planned_start_utc < h.hour_start_utc + interval '1 hour')`, id).Scan(&first, &last)
 	if err != nil {
 		return nil, fmt.Errorf("select planned hours of track %d: %w", id, err)
 	}
-	if r.First == nil || r.Last == nil {
+	if first == nil || last == nil {
 		return nil, nil
 	}
-	return &library.HourRange{From: r.First.UTC(), To: r.Last.UTC().Add(time.Hour)}, nil
+	return &library.HourRange{From: first.UTC(), To: last.UTC().Add(time.Hour)}, nil
 }
 
 // MissedHours returns the range of the hours of the open missed items of the
@@ -85,19 +82,16 @@ WHERE EXISTS (SELECT 1 FROM scheduled_items si
 // read there and is not bounded by the plan horizon; the probe is on
 // ix_play_log_track_id_started_at.
 func (s *TrackQueries) MissedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
-	var r struct {
-		First *time.Time
-		Last  *time.Time
-	}
-	err := s.g.WithContext(ctx).Raw(`
+	var first, last *time.Time
+	err := s.q.QueryRow(ctx, `
 SELECT min(date_trunc('hour', p.planned_start_utc)) AS first, max(date_trunc('hour', p.planned_start_utc)) AS last
 FROM play_log p
-WHERE p.track_id = ? AND p.status = 'missed' AND p.resolution = 'open'`, id).Scan(&r).Error
+WHERE p.track_id = $1 AND p.status = 'missed' AND p.resolution = 'open'`, id).Scan(&first, &last)
 	if err != nil {
 		return nil, fmt.Errorf("select missed hours of track %d: %w", id, err)
 	}
-	if r.First == nil || r.Last == nil {
+	if first == nil || last == nil {
 		return nil, nil
 	}
-	return &library.HourRange{From: r.First.UTC(), To: r.Last.UTC().Add(time.Hour)}, nil
+	return &library.HourRange{From: first.UTC(), To: last.UTC().Add(time.Hour)}, nil
 }

@@ -4,6 +4,7 @@ package library_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -81,6 +82,56 @@ func TestCueStateSetCueAndPlannedHours(t *testing.T) {
 	// The database refuses what needs no duration.
 	require.Error(t, f.tracks.SetCue(ctx, a, library.Cue{InMS: 10, OutMS: new(10)}))
 	require.Error(t, f.tracks.SetCue(ctx, a, library.Cue{FadeInMS: 5001}))
+}
+
+// Tracks and TrackQueries bound to one tx see each other's uncommitted
+// work, as the cue save does (SetCue, then PlannedHours); a rollback undoes
+// both.
+func TestSetCueAndPlannedHoursInOneTx(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	clock := f.id(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
+	a := f.track("A", nil)
+	h1 := time.Date(2026, 10, 17, 6, 0, 0, 0, time.UTC)
+	f.hour(clock, h1)
+	f.hour(clock, h1.Add(time.Hour))
+	cut := library.Cue{InMS: 5000, OutMS: new(150000)}
+	rollback := errors.New("rollback")
+
+	var inTx, outside *library.HourRange
+	err := f.d.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		ts, tq := f.tracks.WithTx(tx), f.queries.WithTx(tx)
+		if _, err := ts.CueState(ctx, a); err != nil {
+			return err
+		}
+		if err := ts.SetCue(ctx, a, cut); err != nil {
+			return err
+		}
+		// A plan item written through GORM in the same tx.
+		if err := tx.Gorm().Exec(`INSERT INTO scheduled_items (clock_id, track_id, planned_start_utc, planned_out_ms, source, status)
+		        VALUES (?, ?, ?, 200000, 'fill', 'planned')`, clock, a, h1.Add(time.Hour+5*time.Minute)).Error; err != nil {
+			return err
+		}
+		var err error
+		if inTx, err = tq.PlannedHours(ctx, a); err != nil {
+			return err
+		}
+		if outside, err = f.queries.PlannedHours(ctx, a); err != nil {
+			return err
+		}
+		return rollback
+	})
+	require.ErrorIs(t, err, rollback)
+	require.Equal(t, &library.HourRange{From: h1.Add(time.Hour), To: h1.Add(2 * time.Hour)}, inTx)
+	require.Nil(t, outside, "the pool does not see the uncommitted item")
+
+	hours, err := f.queries.PlannedHours(ctx, a)
+	require.NoError(t, err)
+	require.Nil(t, hours, "rolled back")
+	got, err := f.queries.Get(ctx, a)
+	require.NoError(t, err)
+	require.Equal(t, library.Cue{}, got.Cue, "the cue is rolled back too")
 }
 
 // A new duration on update keeps a cue that fits and resets one that does
