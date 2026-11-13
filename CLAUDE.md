@@ -66,8 +66,8 @@ Release: push an annotated tag `vX.Y.Z` from `main` whose message has exactly on
 cmd/backend/          subcommand dispatch (main.go) and serve wiring
 internal/
   config/             env config (caarlos0/env + godotenv); the only place that reads env
-  settings/           admin settings: typed registry (defaults, limits, apply mode, secrets), Service (Set, SetMany: batch all or nothing), Value/OnChange, Guard (checks against other data before a save), Check (cross-key rules on the merged View)
-  streamformat/       encoder limits of the pinned Liquidsoap (Check); used by the settings check and dev/liqsmoke; no SQL
+  settings/           admin settings: typed registry (defaults, limits, apply mode, secrets), Service (Set, SetMany: batch all or nothing), Value/OnChange, Guard (checks against other data before a save), Check (cross-key rules on the merged View); CheckEncoderLimits (stream.* format within the encoder limits, through streamformat)
+  streamformat/       encoder limits of the pinned Liquidsoap (Check); used by settings.CheckEncoderLimits and dev/liqsmoke; imports nothing from internal/; no SQL
   logging/            slog JSON, components, secret masking, async writer, Loki push (LokiSink; the backend writes no log files)
   db/                 pgx pool (UTC session, timeouts), GORM on the same pool, DB.WithTx (one Tx for pgx and GORM), ConstraintError, CollectOne/CollectAll
   dbtest/             integration-test helpers: PostgreSQL container, migrated DB (build tag integration)

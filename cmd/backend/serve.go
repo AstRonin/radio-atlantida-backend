@@ -144,7 +144,7 @@ func serve(ctx context.Context) error {
 	}
 	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool), intervalLimit(settingsSvc))
 	playRulesSvc.GuardRetention(settingsSvc)
-	checkEncoderLimits(settingsSvc)
+	settings.CheckEncoderLimits(settingsSvc)
 	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
 	clocksSvc := clocks.NewService(database, clocksrepo.New(database), clocksrepo.NewCheck(database.Pool),
 		gridSvc, clockSettings(settingsSvc), time.Now)

@@ -1,10 +1,11 @@
 // Package streamformat holds the encoder limits of the pinned Liquidsoap
 // (savonet/liquidsoap:v2.4.6, design §8.8): the stream formats whose
 // encoder raises when the output starts, which makes Liquidsoap exit. The
-// settings check refuses them at save (cmd/backend), the script refuses
-// them on output.set (ENCODER_LIMITS in dev/liquidsoap/radio.liq), and
-// dev/liqsmoke sends both sides of every limit. A unit test in dev/liqsmoke
-// compares this table with the script's list.
+// settings check refuses them at save (settings.CheckEncoderLimits), the
+// script refuses them on output.set (ENCODER_LIMITS in
+// dev/liquidsoap/radio.liq), and dev/liqsmoke sends both sides of every
+// limit. A unit test in dev/liqsmoke compares this table with the script's
+// list. The package imports nothing from internal/.
 package streamformat
 
 import (

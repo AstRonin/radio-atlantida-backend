@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +16,6 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/errcodes"
 	"github.com/AstRonin/radio-atlantida-backend/internal/logging"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
-	"github.com/AstRonin/radio-atlantida-backend/internal/streamformat"
 )
 
 type memSettings struct {
@@ -63,8 +61,7 @@ func newSettingsRouter(t *testing.T) (http.Handler, *syncBuffer) {
 }
 
 // newSettingsRouterWith is newSettingsRouter with access to the service,
-// and the stream encoder check of cmd/backend (checkEncoderLimits) in a
-// copy that refuses on the changed keys.
+// and the stream encoder check (settings.CheckEncoderLimits).
 func newSettingsRouterWith(t *testing.T) (http.Handler, *syncBuffer, *settings.Service) {
 	t.Helper()
 	logs := &syncBuffer{}
@@ -73,27 +70,7 @@ func newSettingsRouterWith(t *testing.T) (http.Handler, *syncBuffer, *settings.S
 		map[string]bool{"ICECAST_SOURCE_PASSWORD": true, "LIQUIDSOAP_CONTROL_USER": true, "LIQUIDSOAP_CONTROL_PASSWORD": false},
 		log, func() time.Time { return testNow })
 	require.NoError(t, err)
-	keys := []string{
-		settings.StreamCodec.Name(), settings.StreamBitrateKbps.Name(),
-		settings.StreamSampleRateHz.Name(), settings.StreamChannels.Name(),
-	}
-	settings.Check(svc, keys, func(_ context.Context, v settings.View) error {
-		codec, _ := settings.ViewValue(v, settings.StreamCodec)
-		ch, _ := settings.ViewValue(v, settings.StreamChannels)
-		sr, _ := settings.ViewValue(v, settings.StreamSampleRateHz)
-		kbps, _ := settings.ViewValue(v, settings.StreamBitrateKbps)
-		l := streamformat.Check(codec, ch, sr, kbps)
-		if l == nil {
-			return nil
-		}
-		var refused []error
-		for _, k := range keys {
-			if v.Changed(k) {
-				refused = append(refused, settings.Refuse(k, settings.RuleEncoderLimit, l.String()))
-			}
-		}
-		return errors.Join(refused...)
-	})
+	settings.CheckEncoderLimits(svc)
 	return NewRouter(Deps{Log: log, DB: fakePinger{}, Settings: svc, Now: func() time.Time { return testNow }}), logs, svc
 }
 
@@ -333,7 +310,7 @@ func TestSettingsPatchRefusesWholeBatch(t *testing.T) {
 		{"values.no.such_key", errcodes.UnknownField},
 		{"values.stream.icecast_source_password", errcodes.UnknownField},
 	}, got)
-	require.Equal(t, "Vorbis mono at 22050 Hz allows at most 64 kbps", p.Errors[0].Message)
+	require.Equal(t, "Vorbis mono at 22050 Hz allows at most 64 kbps; the bitrate is 128 kbps.", p.Errors[0].Message)
 
 	all := do(t, h, http.MethodGet, "/api/settings")
 	require.Equal(t, true, findSetting(t, all.Body.Bytes(), "station.name")["is_default"], "nothing saved")
