@@ -1,6 +1,6 @@
 # Plan — Settings Guards into the Domain (radio-atlantida-backend)
 
-Status: Approved (2026-11-14).
+Status: Done (2026-11-14): 50a89ff (retention guard into playrules), 7a194cc (encoder limit check into settings).
 Based on: `docs/backend-split-plan.md` §5 item 1, `docs/tech-design.md` §4.1, §6.3, Plan agent analysis (2026-11-13)
 Last updated: 2026-11-14
 
@@ -58,4 +58,8 @@ Move them into domain packages with unit tests. `cmd` keeps one registration lin
 
 ## 6. Deviations
 
-(Filled in during implementation.)
+- Commit 3 (CLAUDE.md and doc comments) was folded into commits 1 and 2, as §4 allows.
+- `internal/settings/stream_test.go` uses the in-package `fakeStore` and `allSecretsSet()` (instead of `config.Secrets{}.IsSet()`); the tests themselves are unchanged.
+- `internal/playrules/retention_guard_test.go` (package `playrules_test`) has its own small in-memory settings store (`memSettings`), since the settings test fakes are not exported.
+- The doc comment of the old `checkEncoderLimits` was merged into `CheckEncoderLimits`.
+- No other deviations. Import checks: `go list -deps ./internal/settings` has no `playrules`; `internal/streamformat` imports nothing from `internal/`.
