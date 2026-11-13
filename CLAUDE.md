@@ -85,7 +85,7 @@ internal/
   validation/         validation.Error: per-field refusals of domain services (rule → field code in problemFor)
   logsearch/          log search in Loki (GET /api/logs): query model, validation, LogQL builder, cursor, Loki HTTP client; no SQL
   library/            playlist types, playlists (placement rule in clocks), artists, tracks; track preview; *InUseError names what blocks a delete; title rule, reviewed mark, bulk rename; cue points and fades (SetCue, Cue.Check), usage marks (next planned, on air)
-  playrules/          play rules (window, weekdays, track and artist intervals capped at the play log retention, max per hour) and their track/playlist targets
+  playrules/          play rules (window, weekdays, track and artist intervals capped at the play log retention, max per hour) and their track/playlist targets; GuardRetention (settings guard: the play log retention not shorter than the longest interval)
   clocks/             clock templates: playlists with placement rules (EffectiveRule), timed inserts, Check (field validation), one-step save, dry check warnings
   grid/               grid slots (station local weekday/hour/dates), assign/unassign with trim/split/delete, Schedule, Hours, ClockHours
   rotation/           track plan: Build (pure, seeded: insert anchors and chains, rule slots, weighted fill, best fit and crossing, play rules, emergency), Service.Sync (missing/stale hours, plan_hours), one-time inserts (AddInsert, RemoveInsert, Reschedule; hour_inserts survive rebuilds), Sample (the hour of a clock save), planner queue for clock_build, hour_insert, and reschedule

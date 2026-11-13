@@ -143,7 +143,7 @@ func serve(ctx context.Context) error {
 		apiLog.Warn("ffmpeg not found on PATH: import, analysis, and transcoding are refused")
 	}
 	playRulesSvc := playrules.NewService(database, playrulesrepo.New(database.Pool), intervalLimit(settingsSvc))
-	guardRetention(settingsSvc, playRulesSvc)
+	playRulesSvc.GuardRetention(settingsSvc)
 	checkEncoderLimits(settingsSvc)
 	gridSvc := grid.NewService(database, gridrepo.New(database), gridSettings(settingsSvc), time.Now)
 	clocksSvc := clocks.NewService(database, clocksrepo.New(database), clocksrepo.NewCheck(database.Pool),

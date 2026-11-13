@@ -5,27 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/AstRonin/radio-atlantida-backend/internal/playrules"
 	"github.com/AstRonin/radio-atlantida-backend/internal/settings"
 	"github.com/AstRonin/radio-atlantida-backend/internal/streamformat"
 )
-
-// guardRetention refuses a play log retention shorter than the longest
-// interval of the play rules (§4.1).
-func guardRetention(svc *settings.Service, rules *playrules.Service) {
-	settings.Guard(svc, settings.RetentionPlayLogDays, func(ctx context.Context, days int) error {
-		longest, err := rules.LongestIntervalMinutes(ctx)
-		if err != nil {
-			return err
-		}
-		if longest > days*24*60 {
-			return settings.Refuse(settings.RetentionPlayLogDays.Name(), settings.RuleIntervalBeyondRetention,
-				fmt.Sprintf("a play rule has an interval of %d minutes; the play log must keep at least %d days",
-					longest, (longest+24*60-1)/(24*60)))
-		}
-		return nil
-	})
-}
 
 // streamFormatKeys are the settings that make the stream format.
 var streamFormatKeys = []string{
