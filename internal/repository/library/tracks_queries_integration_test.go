@@ -35,7 +35,8 @@ func TestTrackListParameterNumbering(t *testing.T) {
 			require.NoError(t, f.tracks.SetPlaylists(ctx, id, []uint64{pool}))
 		}
 		if reviewed {
-			f.exec(`UPDATE tracks SET reviewed_at = now() WHERE id = $1`, id)
+			_, eerr := f.d.Pool.Exec(ctx, `UPDATE tracks SET reviewed_at = now() WHERE id = $1`, id)
+			require.NoError(t, eerr)
 		}
 		return id
 	}
