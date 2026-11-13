@@ -18,7 +18,10 @@
 //     output reaches Icecast, and the live harbor port still listens;
 //   - a switch to TLS through a TLS proxy in front of Icecast;
 //   - a Liquidsoap restart with the backend down starts from the state
-//     file, over TLS again.
+//     file, over TLS again;
+//   - after three quick starts in a row (the crash-loop guard of the
+//     script), a start ignores the state file: its output is then applied
+//     by output.set as a change.
 //
 // Exit code non-zero on any miss. A Liquidsoap container that stops while
 // an output is awaited fails the case at once (an encoder that raises makes
@@ -293,6 +296,41 @@ func run(ctx context.Context, c config) error {
 	}
 	pass("restart with the backend down: output from the state file, then OK unchanged")
 
+	// 7. Crash-loop guard: after three quick starts in a row the startup
+	// output is the environment one, not the state file's (TLS output). The
+	// count is set by hand and the process killed at once (as a crash
+	// would), well before this run resets the count (30 s after its start).
+	// The environment output differs between this stack and the deploy
+	// test, so it is not awaited on Icecast: the guard shows in the log, and
+	// the state file's output is then a change ("OK applied", not "OK
+	// unchanged") that reaches Icecast, as the backend's output.set would.
+	ctl.close()
+	if err = docker(ctx, c, "exec", "-T", "liquidsoap", "sh", "-c",
+		"printf 3 > /var/cache/liquidsoap/quick-starts"); err != nil {
+		return err
+	}
+	if err = docker(ctx, c, "kill", "liquidsoap"); err != nil {
+		return err
+	}
+	if err = docker(ctx, c, "start", "liquidsoap"); err != nil {
+		return err
+	}
+	ctl, err = dialTelnet(ctx, c.telnet, time.Minute)
+	if err != nil {
+		return err
+	}
+	defer ctl.close()
+	if !strings.Contains(liquidsoapLogLines(ctx, c, "all"), "crash-loop guard") {
+		return errors.New("crash-loop guard: no \"crash-loop guard\" line in the liquidsoap log")
+	}
+	if err = expectReply(ctl, tlsOut, "OK applied"); err != nil {
+		return fmt.Errorf("crash-loop guard: the state file's output after the guard: %w", err)
+	}
+	if err = waitOutput(ctx, c, tlsOut); err != nil {
+		return fmt.Errorf("crash-loop guard: %w", err)
+	}
+	pass("crash-loop guard: after three quick starts the environment output, then output.set applies")
+
 	if st.connected.Load() == 0 {
 		return errors.New("no output connected callback arrived")
 	}
@@ -508,9 +546,15 @@ const logTail = 40
 
 // liquidsoapLog returns the last logTail lines of the Liquidsoap log.
 func liquidsoapLog(ctx context.Context, c config) string {
+	return liquidsoapLogLines(ctx, c, fmt.Sprint(logTail))
+}
+
+// liquidsoapLogLines returns the last n lines of the Liquidsoap log ("all":
+// the whole log, the runs before a restart included).
+func liquidsoapLogLines(ctx context.Context, c config, n string) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	args := append(append([]string{}, c.compose...), "logs", "--no-color", "--no-log-prefix", "--tail", fmt.Sprint(logTail), "liquidsoap")
+	args := append(append([]string{}, c.compose...), "logs", "--no-color", "--no-log-prefix", "--tail", n, "liquidsoap")
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput() //nolint:gosec // G204: a dev tool runs docker compose with its own arguments
 	if err != nil {
 		return fmt.Sprintf("(docker compose logs: %v)\n%s", err, out)
