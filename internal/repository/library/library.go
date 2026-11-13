@@ -67,9 +67,9 @@ func deleteError(op string, err error) error {
 
 // refRow is an entity named in a refusal.
 type refRow struct {
-	Kind string
-	ID   uint64
-	Name string
+	Kind string `db:"kind"`
+	ID   uint64 `db:"id"`
+	Name string `db:"name"`
 }
 
 func refs(rows []refRow) []library.Ref {
@@ -82,8 +82,8 @@ func refs(rows []refRow) []library.Ref {
 
 // linkRow is a row of a link table, read to fill ID lists without N+1.
 type linkRow struct {
-	OwnerID uint64
-	OtherID uint64
+	OwnerID uint64 `db:"owner_id"`
+	OtherID uint64 `db:"other_id"`
 }
 
 // group collects the IDs of each owner, in the order of rows.

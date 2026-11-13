@@ -3,51 +3,67 @@ package library
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 )
 
+// trackRow is a row of selectTracks (trackSelect).
 type trackRow struct {
-	ID           uint64
-	Title        string
-	ArtistID     *uint64
-	ArtistName   *string
-	DurationMS   *int `gorm:"column:duration_ms"`
-	FilePath     string
-	Format       *string
-	Bitrate      *int
-	SampleRate   *int
-	QualityOK    *bool `gorm:"column:quality_ok"`
-	QualityNotes string
-	TypeID       uint64
-	TypeCode     string
-	TypeName     string
-	FileChecksum *string
-	CreatedAt    time.Time
+	ID           uint64    `db:"id"`
+	Title        string    `db:"title"`
+	ArtistID     *uint64   `db:"artist_id"`
+	ArtistName   *string   `db:"artist_name"`
+	DurationMS   *int      `db:"duration_ms"`
+	FilePath     string    `db:"file_path"`
+	Format       *string   `db:"format"`
+	Bitrate      *int      `db:"bitrate"`
+	SampleRate   *int      `db:"sample_rate"`
+	QualityOK    *bool     `db:"quality_ok"`
+	QualityNotes string    `db:"quality_notes"`
+	TypeID       uint64    `db:"type_id"`
+	TypeCode     string    `db:"type_code"`
+	TypeName     string    `db:"type_name"`
+	FileChecksum *string   `db:"file_checksum"`
+	CreatedAt    time.Time `db:"created_at"`
 
-	Codec           *string
-	Channels        *int
-	LoudnessLUFS    *float64 `gorm:"column:loudness_lufs"`
-	TruePeakDBTP    *float64 `gorm:"column:true_peak_dbtp"`
-	LoudnessRangeLU *float64 `gorm:"column:loudness_range_lu"`
-	SourceBitrate   *int
-	// QualityIssues is the text[] joined with commas: database/sql does not
-	// scan arrays. The codes contain no comma (ck_tracks_quality_issues).
-	QualityIssues string
-	AnalyzedAt    *time.Time
-	ReviewedAt    *time.Time
+	Codec           *string  `db:"codec"`
+	Channels        *int     `db:"channels"`
+	LoudnessLUFS    *float64 `db:"loudness_lufs"`
+	TruePeakDBTP    *float64 `db:"true_peak_dbtp"`
+	LoudnessRangeLU *float64 `db:"loudness_range_lu"`
+	SourceBitrate   *int     `db:"source_bitrate"`
+	// QualityIssues is the text[] column as it is (pgx scans arrays).
+	QualityIssues []string   `db:"quality_issues"`
+	AnalyzedAt    *time.Time `db:"analyzed_at"`
+	ReviewedAt    *time.Time `db:"reviewed_at"`
 
-	CueInMS   int  `gorm:"column:cue_in_ms"`
-	CueOutMS  *int `gorm:"column:cue_out_ms"`
-	FadeInMS  int  `gorm:"column:fade_in_ms"`
-	FadeOutMS int  `gorm:"column:fade_out_ms"`
+	CueInMS   int  `db:"cue_in_ms"`
+	CueOutMS  *int `db:"cue_out_ms"`
+	FadeInMS  int  `db:"fade_in_ms"`
+	FadeOutMS int  `db:"fade_out_ms"`
 
-	NextPlannedAt *time.Time
-	Queued        bool
-	// Total is count(*) OVER () in List; zero elsewhere.
-	Total int
+	NextPlannedAt *time.Time `db:"next_planned_at"`
+	Queued        bool       `db:"queued"`
+}
+
+// listRow is a row of List: a track and count(*) OVER ().
+type listRow struct {
+	trackRow
+	Total int64 `db:"total"`
+}
+
+// queryArgs numbers the parameters of a query as they are added.
+type queryArgs []any
+
+// add appends v and returns its placeholder ($n).
+func (a *queryArgs) add(v any) string {
+	*a = append(*a, v)
+	return "$" + strconv.Itoa(len(*a))
 }
 
 // trackSortKeys are the ORDER BY keys of each sort, fixed SQL: the sort
@@ -106,24 +122,21 @@ const (
 
 // trackWhere is the WHERE of the filters of f (not the cursor), shared by
 // the page, the count, and the statistics so that they cannot drift. The
-// conditions are fixed strings; values go in args.
-func trackWhere(f library.TrackFilter) (where []string, args []any) {
+// conditions are fixed strings; values go in args, numbered from $1.
+func trackWhere(f library.TrackFilter) (where []string, args queryArgs) {
 	if f.TypeID != 0 {
-		where = append(where, "tr.type_id = ?")
-		args = append(args, f.TypeID)
+		where = append(where, "tr.type_id = "+args.add(f.TypeID))
 	}
 	if f.ArtistID != 0 {
-		where = append(where, "tr.artist_id = ?")
-		args = append(args, f.ArtistID)
+		where = append(where, "tr.artist_id = "+args.add(f.ArtistID))
 	}
 	if f.PlaylistID != 0 {
-		where = append(where, "EXISTS (SELECT 1 FROM track_playlists tp WHERE tp.track_id = tr.id AND tp.playlist_id = ?)")
-		args = append(args, f.PlaylistID)
+		where = append(where, "EXISTS (SELECT 1 FROM track_playlists tp WHERE tp.track_id = tr.id AND tp.playlist_id = "+
+			args.add(f.PlaylistID)+")")
 	}
 	if f.Query != "" {
-		p := containsPattern(f.Query)
-		where = append(where, "(tr.title ILIKE ? OR a.name ILIKE ?)")
-		args = append(args, p, p)
+		p := args.add(containsPattern(f.Query))
+		where = append(where, "(tr.title ILIKE "+p+" OR a.name ILIKE "+p+")")
 	}
 	switch f.Quality {
 	case library.QualityOK:
@@ -202,25 +215,32 @@ func (s *TrackQueries) List(ctx context.Context, f library.TrackFilter) ([]libra
 	}
 	where, args := trackWhere(f)
 	if f.After != nil {
-		where = append(where, "(tr.title, tr.id) > (?, ?)")
-		args = append(args, f.After.Title, f.After.ID)
+		where = append(where, "(tr.title, tr.id) > ("+args.add(f.After.Title)+", "+args.add(f.After.ID)+")")
 	}
+	page := " LIMIT " + args.add(f.Limit) + " OFFSET " + args.add(f.Offset)
 	sql := "SELECT " + trackSelect + `, p.total
 FROM (SELECT tr.id, count(*) OVER () AS total` + fromTracks + whereClause(where) + `
-      ORDER BY ` + order + ` LIMIT ? OFFSET ?) p
+      ORDER BY ` + order + page + `) p
 JOIN tracks tr ON tr.id = p.id
 JOIN playlist_types t ON t.id = tr.type_id
 LEFT JOIN artists a ON a.id = tr.artist_id` + planUsage + `
 ORDER BY ` + order
-	args = append(args, f.Limit, f.Offset)
 
-	var rows []trackRow
-	if err = s.g.WithContext(ctx).Raw(sql, args...).Scan(&rows).Error; err != nil {
+	pgRows, err := s.q.Query(ctx, sql, args...)
+	if err != nil {
 		return nil, 0, fmt.Errorf("select tracks: %w", err)
 	}
+	listed, err := pgx.CollectRows(pgRows, pgx.RowToStructByName[listRow])
+	if err != nil {
+		return nil, 0, fmt.Errorf("scan tracks: %w", err)
+	}
 	total := 0
-	if len(rows) > 0 {
-		total = rows[0].Total
+	rows := make([]trackRow, len(listed))
+	for i, r := range listed {
+		rows[i] = r.trackRow
+	}
+	if len(listed) > 0 {
+		total = int(listed[0].Total)
 	}
 	if f.After != nil || (len(rows) == 0 && f.Offset > 0) {
 		if total, err = s.count(ctx, f); err != nil {
@@ -238,7 +258,7 @@ ORDER BY ` + order
 func (s *TrackQueries) count(ctx context.Context, f library.TrackFilter) (int, error) {
 	where, args := trackWhere(f)
 	var n int
-	if err := s.g.WithContext(ctx).Raw("SELECT count(*)"+fromTracks+whereClause(where), args...).Scan(&n).Error; err != nil {
+	if err := s.q.QueryRow(ctx, "SELECT count(*)"+fromTracks+whereClause(where), args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count tracks: %w", err)
 	}
 	return n, nil
@@ -246,11 +266,11 @@ func (s *TrackQueries) count(ctx context.Context, f library.TrackFilter) (int, e
 
 // trackStatsRow is the one row of Stats.
 type trackStatsRow struct {
-	Total         int
-	Reviewed      int
-	WithIssues    int
-	Unanalysed    int
-	AirDurationMS int64 `gorm:"column:air_duration_ms"`
+	Total         int   `db:"total"`
+	Reviewed      int   `db:"reviewed"`
+	WithIssues    int   `db:"with_issues"`
+	Unanalysed    int   `db:"unanalysed"`
+	AirDurationMS int64 `db:"air_duration_ms"`
 }
 
 // Stats returns the figures of the tracks matching the filters of f; the sort
@@ -264,18 +284,26 @@ func (s *TrackQueries) Stats(ctx context.Context, f library.TrackFilter) (librar
        count(*) FILTER (WHERE ` + condTrackHasIssues + `) AS with_issues,
        count(*) FILTER (WHERE ` + condTrackUnanalysed + `) AS unanalysed,
        COALESCE(sum(tr.air_duration_ms), 0) AS air_duration_ms` + fromTracks + whereClause(where)
-	var r trackStatsRow
-	if err := s.g.WithContext(ctx).Raw(sql, args...).Scan(&r).Error; err != nil {
+	rows, err := s.q.Query(ctx, sql, args...)
+	if err != nil {
 		return library.TrackStats{}, fmt.Errorf("select track stats: %w", err)
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[trackStatsRow])
+	if err != nil {
+		return library.TrackStats{}, fmt.Errorf("scan track stats: %w", err)
 	}
 	return library.TrackStats(r), nil
 }
 
 // Get returns one track, or library.ErrTrackNotFound.
 func (s *TrackQueries) Get(ctx context.Context, id uint64) (library.Track, error) {
-	var rows []trackRow
-	if err := s.g.WithContext(ctx).Raw(selectTracks+` WHERE tr.id = ?`, id).Scan(&rows).Error; err != nil {
+	pgRows, err := s.q.Query(ctx, selectTracks+` WHERE tr.id = $1`, id)
+	if err != nil {
 		return library.Track{}, fmt.Errorf("select track %d: %w", id, err)
+	}
+	rows, err := pgx.CollectRows(pgRows, pgx.RowToStructByName[trackRow])
+	if err != nil {
+		return library.Track{}, fmt.Errorf("scan track %d: %w", id, err)
 	}
 	if len(rows) == 0 {
 		return library.Track{}, library.ErrTrackNotFound
@@ -297,17 +325,15 @@ func (s *TrackQueries) withLinks(ctx context.Context, rows []trackRow) ([]librar
 	for i, r := range rows {
 		ids[i] = r.ID
 	}
-	g := s.g.WithContext(ctx)
-	var playlists, rules []linkRow
-	err := g.Raw(`
+	playlists, err := s.links(ctx, `
 SELECT track_id AS owner_id, playlist_id AS other_id FROM track_playlists
-WHERE track_id IN ? ORDER BY playlist_id`, ids).Scan(&playlists).Error
+WHERE track_id = ANY($1) ORDER BY playlist_id`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("select track playlists: %w", err)
 	}
-	err = g.Raw(`
+	rules, err := s.links(ctx, `
 SELECT track_id AS owner_id, rule_id AS other_id FROM track_play_rules
-WHERE track_id IN ? ORDER BY rule_id`, ids).Scan(&rules).Error
+WHERE track_id = ANY($1) ORDER BY rule_id`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("select track play rules: %w", err)
 	}
@@ -327,7 +353,10 @@ WHERE track_id IN ? ORDER BY rule_id`, ids).Scan(&rules).Error
 
 			Codec: r.Codec, Channels: r.Channels,
 			LoudnessLUFS: r.LoudnessLUFS, TruePeakDBTP: r.TruePeakDBTP, LoudnessRangeLU: r.LoudnessRangeLU, SourceBitrate: r.SourceBitrate,
-			QualityIssues: issues(r.QualityIssues),
+			QualityIssues: make([]library.QualityIssue, len(r.QualityIssues)),
+		}
+		for j, c := range r.QualityIssues {
+			t.QualityIssues[j] = library.QualityIssue(c)
 		}
 		if r.AnalyzedAt != nil {
 			t.AnalyzedAt = new(r.AnalyzedAt.UTC())
@@ -350,14 +379,11 @@ WHERE track_id IN ? ORDER BY rule_id`, ids).Scan(&rules).Error
 	return out, nil
 }
 
-// issues splits the joined quality_issues column.
-func issues(joined string) []library.QualityIssue {
-	out := []library.QualityIssue{}
-	if joined == "" {
-		return out
+// links reads the link rows of a query whose one parameter is the track IDs.
+func (s *TrackQueries) links(ctx context.Context, sql string, ids []uint64) ([]linkRow, error) {
+	rows, err := s.q.Query(ctx, sql, ids)
+	if err != nil {
+		return nil, err
 	}
-	for c := range strings.SplitSeq(joined, ",") {
-		out = append(out, library.QualityIssue(c))
-	}
-	return out
+	return pgx.CollectRows(rows, pgx.RowToStructByName[linkRow])
 }

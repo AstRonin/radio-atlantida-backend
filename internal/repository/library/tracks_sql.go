@@ -7,7 +7,7 @@ const trackSelect = `tr.id, tr.title, tr.artist_id, a.name AS artist_name, tr.du
        tr.format, tr.bitrate, tr.sample_rate, tr.quality_ok, tr.quality_notes,
        t.id AS type_id, t.code AS type_code, t.name AS type_name, tr.file_checksum, tr.created_at,
        tr.codec, tr.channels, tr.loudness_lufs, tr.true_peak_dbtp, tr.loudness_range_lu, tr.source_bitrate,
-       array_to_string(tr.quality_issues, ',') AS quality_issues, tr.analyzed_at, tr.reviewed_at,
+       tr.quality_issues, tr.analyzed_at, tr.reviewed_at,
        tr.cue_in_ms, tr.cue_out_ms, tr.fade_in_ms, tr.fade_out_ms,
        np.next_planned_at, COALESCE(np.queued, false) AS queued`
 
