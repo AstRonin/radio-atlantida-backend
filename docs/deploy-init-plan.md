@@ -43,9 +43,10 @@ Last updated: 2026-11-13
 6. The Mac dry run (`docs/dry-run.md`, 9.3).
 7. The Windows acceptance run with a cold reboot (runbook §11, D4 "Done when").
 8. B5 (stream loudness normalisation, HLS) stays open; it does not block the install.
-9. Open minor items:
-   - a stale `install/versions.env` on an engine upgrade: `install.bat` reads the Windows copy of the repository, not the one `radioctl` pulled inside the distribution, so the operator must replace the Windows copy first (runbook §6.3 works around it by hand);
-   - `GRAFANA_URL` is not rewritten on the same release: when the release already runs, `update.bat` applies monitoring but does not rewrite `runtime/applied.env`, so a changed `MONITORING_ENABLED` or `GRAFANA_PORT` reaches the panel's Grafana link only with the next install of another release.
+9. Minor items, resolved 2026-11-13:
+   - a stale `install/versions.env` on an engine upgrade: `install.ps1` now compares the Windows copy's pins with `/opt/radio-atlantida/deploy/install/versions.env` in the distribution and stops on a difference before any change; `-UseLocalVersions` overrides (deploy `8ca582e`, runbook §6.3);
+   - `GRAFANA_URL` on the same release: `update.bat` re-derives it on every run and, if it changed, rewrites `runtime/applied.env` and recreates only the frontend (deploy `9fe2f24`, runbook §5.4).
+   - Also resolved: free-disk minimum 20 GB with `-MinFreeGB` (deploy `560bc62`); no fixed Icecast server in `radioctl`, defaults in `config/stream-defaults.json`, cut-over checks and shows the panel settings, a source-password change is pending maintenance (deploy `1869697`, runbook §10.7).
 
 ## 1. Ground rules
 
