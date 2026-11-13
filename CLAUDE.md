@@ -98,7 +98,7 @@ internal/
   ingest/             import of a folder in place (folders and files with counts and statuses, title and artist from tags or the file name, originals of .optimal copies skipped), analysis against the broadcast standard (quality issues), transcodes (Fix loudness, Optimize; replace or .optimal copy); one media operation at a time on its worker; cached track waveforms (beside the operations, two decodes at a time)
   repository/         the only place with SQL (§5.1): one package per domain, same name as the domain
     operations/ retention/ jobs/ settings/         (jobs: the advisory locks; settings: GORM)
-    library/                                       (GORM; one store per aggregate)
+    library/                                       (GORM; one store per aggregate; TrackQueries is pgx: list, stats, usage, delete of unreferenced, planned/missed hours)
     playrules/                                     (pgx: time and smallint[] columns, array-parameter link sets)
     clocks/ grid/                                  (GORM CRUD; clocks.CheckStore is pgx for the dry check reads)
     rotation/                                      (pgx: library snapshot, history window, plan hours, CopyFrom of items, hour inserts)

@@ -1,9 +1,12 @@
 // Package library stores the content library: playlist types, playlists,
 // artists, tracks, and their memberships (§4 of the design). It implements
 // the stores of the domain package with the same name; import it as
-// libraryrepo next to the domain. GORM: admin CRUD (§5).
+// libraryrepo next to the domain. GORM: admin CRUD (§5). TrackQueries is
+// pgx: the track list and statistics, usage, the delete of unreferenced
+// tracks, and the planned and missed hours (complex SQL beside the GORM
+// Tracks store, like clocks.CheckStore).
 //
-// Each aggregate has its own store. The stores that take part in a
+// Each aggregate has its own store (tracks: Tracks and TrackQueries). The stores that take part in a
 // transaction have WithTx, which returns the store bound to the transaction
 // as the domain's interface type (Go has no covariant return types).
 package library

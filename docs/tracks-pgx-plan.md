@@ -1,6 +1,6 @@
 # Plan — Complex Track Queries from GORM to pgx (radio-atlantida-backend)
 
-Status: Approved (2026-11-14). Starts after `docs/settings-guards-domain-plan.md` is done.
+Status: Done (2026-11-14). Commits: e955b55 (domain split), 27b5298 (list/stats/get), 185a270 (usage/blockers/delete), 6c8f7e0 (planned/missed hours), 6e64f53 (lint fix in a new test), "Docs: tracks pgx plan status".
 Based on: `docs/backend-split-plan.md` §5 item 2, CLAUDE.md (GORM for admin CRUD, pgx for complex queries; repository layer), Plan agent analysis (2026-11-13)
 Last updated: 2026-11-14
 
@@ -63,4 +63,11 @@ Done when all checks pass, no `gorm.Raw` remains for the methods in §3, and API
 
 ## 7. Deviations
 
-(Filled in during implementation.)
+1. **Commit (1) kept separate, not folded into (2).** To compile without moving SQL, the repository `TrackQueries` held the GORM handle for commits (1)–(3) (`NewTrackQueries(d *db.DB)`), and the methods kept their `gorm.Raw` until their own commit. Commit (4) removed it: `NewTrackQueries(q db.Querier)`, wired with `database.Pool`, as in §4.2. Each SQL move was integration-tested on its own.
+2. **Delete retry loop.** `deleteUnreferenced` (`library/tracks.go`) runs no transaction: each attempt is one statement on the pool, before and after. It now calls `TrackQueries`; nothing to bind. Only `SetCue` binds both stores to one `tx`.
+3. **Decision 3 held:** pgx flattens the embedded `trackRow` in `listRow` under `RowToStructByName`; no explicit fields needed.
+4. **Small helpers in the topic files:** `queryArgs.add` (the `$n` builder, `tracks_list.go`), `TrackQueries.links` (the two link reads of `withLinks`), `TrackQueries.users` (`usersOfTracks`, shared by `Users` and `Blockers`). The `issues()` helper is gone; `withLinks` converts `[]string` inline, as `repository/ingest` does (never nil). `Stats` uses `pgx.CollectExactlyOneRow`, `count`/`PlannedHours`/`MissedHours` `QueryRow().Scan`.
+5. **Domain fakes:** the query-only fakes (`usesTracks`, `failingUses`, `failingMissed`, `fakeBulkTracks`, `fakeListTracks`) now embed `TrackQueries`; `fakeTitleTracks` stays a `TrackStore`; `fakeTracks` and `cueTracks` got companions (`fakeTrackQueries`, `cueQueries`). `newTrackServiceOn` takes both (either may be nil).
+6. **Construction outside the three folders:** `internal/httpapi/library_integration_test.go` passes `libraryrepo.NewTrackQueries(d.Pool)` (expected by §5).
+7. **Extra commit** 6e64f53: `contextcheck` flagged the fixture helper `exec` inside a closure of the new numbering test; it uses `ctx` now.
+8. **Not covered by a test:** a foreign key violation that surfaces at `rows.Err` in `DeleteUnreferenced` needs a concurrent reference to trigger; the mapping is in the code path (`deleteError` on the collect error).
