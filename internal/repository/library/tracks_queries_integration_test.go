@@ -122,6 +122,35 @@ func TestTrackQualityIssuesRoundTrip(t *testing.T) {
 	}
 }
 
+// An empty ID list deletes nothing and finds no blockers; a delete that
+// keeps every track returns an empty list, not nil.
+func TestDeleteUnreferencedAndBlockersWithNoIDs(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	kept := f.track("kept", nil)
+	clock := f.id(`INSERT INTO clocks (name) VALUES ('Morning') RETURNING id`)
+	f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 0, $2) RETURNING id`, clock, kept)
+
+	for _, ids := range [][]uint64{nil, {}} {
+		deleted, err := f.queries.DeleteUnreferenced(ctx, ids)
+		require.NoError(t, err)
+		require.NotNil(t, deleted)
+		require.Empty(t, deleted)
+
+		blockers, err := f.queries.Blockers(ctx, ids, library.MaxUsers)
+		require.NoError(t, err)
+		require.Empty(t, blockers)
+	}
+
+	deleted, err := f.queries.DeleteUnreferenced(ctx, []uint64{kept})
+	require.NoError(t, err)
+	require.NotNil(t, deleted)
+	require.Empty(t, deleted)
+	_, err = f.queries.Get(ctx, kept)
+	require.NoError(t, err)
+}
+
 func trackIDs(ts []library.Track) []uint64 {
 	out := make([]uint64, len(ts))
 	for i, tr := range ts {

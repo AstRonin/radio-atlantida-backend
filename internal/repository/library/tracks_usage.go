@@ -4,27 +4,37 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/AstRonin/radio-atlantida-backend/internal/library"
 )
 
 type trackUserRow struct {
-	TrackID uint64
-	Kind    string
-	ID      uint64
-	Name    string
+	TrackID uint64 `db:"track_id"`
+	Kind    string `db:"kind"`
+	ID      uint64 `db:"id"`
+	Name    string `db:"name"`
+}
+
+// users reads usersOfTracks for ids, at most limit per track.
+func (s *TrackQueries) users(ctx context.Context, ids []uint64, limit int) ([]trackUserRow, error) {
+	rows, err := s.q.Query(ctx, usersOfTracks, ids, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[trackUserRow])
 }
 
 // Users returns the clocks with an insert of the track and its one-time
 // inserts, at most limit.
 func (s *TrackQueries) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
-	var users []trackUserRow
-	err := s.g.WithContext(ctx).Raw(usersOfTracks, []uint64{id}, []uint64{id}, limit).Scan(&users).Error
+	users, err := s.users(ctx, []uint64{id}, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select users of track %d: %w", id, err)
+	}
 	rows := make([]refRow, len(users))
 	for i, u := range users {
 		rows[i] = refRow{Kind: u.Kind, ID: u.ID, Name: u.Name}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("select users of track %d: %w", id, err)
 	}
 	return refs(rows), nil
 }
@@ -40,43 +50,56 @@ func (s *TrackQueries) Users(ctx context.Context, id uint64, limit int) ([]libra
 // 1 000 IDs: Index Only Scan on pk_tracks, anti joins to the reference
 // tables, 1.7 ms; the delete of 666 tracks with their links 15 ms.
 // Blockers on the 334 kept: 8 ms.
+//
+// A foreign key violation can surface when the rows are read (pgx reports
+// it at rows.Err), so the collect error is mapped as the query error is.
 func (s *TrackQueries) DeleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error) {
-	var deleted []uint64
-	err := s.g.WithContext(ctx).Raw(`
+	rows, err := s.q.Query(ctx, `
 DELETE FROM tracks t
-WHERE t.id IN ?
+WHERE t.id = ANY($1)
   AND NOT EXISTS (SELECT 1 FROM play_log p WHERE p.track_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM scheduled_items i WHERE i.track_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM hour_inserts h WHERE h.track_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM clock_inserts c WHERE c.track_id = t.id)
-RETURNING t.id`, ids).Scan(&deleted).Error
+RETURNING t.id`, ids)
 	if err != nil {
 		return nil, deleteError("delete tracks", err)
 	}
+	deleted, err := pgx.CollectRows(rows, pgx.RowTo[uint64])
+	if err != nil {
+		return nil, deleteError("delete tracks", err)
+	}
+	if deleted == nil {
+		deleted = []uint64{}
+	}
 	return deleted, nil
+}
+
+// blockerRow is a track of Blockers and whether its history refers to it.
+type blockerRow struct {
+	ID      uint64 `db:"id"`
+	Title   string `db:"title"`
+	History bool   `db:"history"`
 }
 
 // Blockers returns the title of each existing track of ids, whether its
 // history refers to it, and the clocks and one-time inserts that use it (at
 // most limit per track).
 func (s *TrackQueries) Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]library.TrackBlockers, error) {
-	g := s.g.WithContext(ctx)
-	var tracks []struct {
-		ID      uint64
-		Title   string
-		History bool
-	}
-	err := g.Raw(`
+	rows, err := s.q.Query(ctx, `
 SELECT t.id, t.title,
        EXISTS (SELECT 1 FROM play_log p WHERE p.track_id = t.id)
        OR EXISTS (SELECT 1 FROM scheduled_items i WHERE i.track_id = t.id) AS history
 FROM tracks t
-WHERE t.id IN ?`, ids).Scan(&tracks).Error
+WHERE t.id = ANY($1)`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("select tracks kept: %w", err)
 	}
-	var users []trackUserRow
-	err = g.Raw(usersOfTracks, ids, ids, limit).Scan(&users).Error
+	tracks, err := pgx.CollectRows(rows, pgx.RowToStructByName[blockerRow])
+	if err != nil {
+		return nil, fmt.Errorf("scan tracks kept: %w", err)
+	}
+	users, err := s.users(ctx, ids, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select users of tracks kept: %w", err)
 	}

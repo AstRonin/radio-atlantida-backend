@@ -36,12 +36,12 @@ FROM (
     FROM (
         SELECT DISTINCT i.track_id, 'clock' AS kind, c.id, c.name
         FROM clock_inserts i JOIN clocks c ON c.id = i.clock_id
-        WHERE i.track_id IN ?
+        WHERE i.track_id = ANY($1)
         UNION ALL
         SELECT h.track_id, 'hour_insert' AS kind, h.id, to_char(h.hour_start_utc AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI"Z"') AS name
         FROM hour_inserts h
-        WHERE h.track_id IN ?
+        WHERE h.track_id = ANY($1)
     ) u
 ) n
-WHERE n <= ?
+WHERE n <= $2
 ORDER BY track_id, n`
