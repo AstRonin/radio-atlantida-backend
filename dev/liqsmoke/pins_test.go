@@ -65,3 +65,15 @@ func TestEncoderLimitsMatchScript(t *testing.T) {
 	require.NotEmpty(t, script)
 	require.ElementsMatch(t, streamformat.Limits(), script)
 }
+
+func TestListensOn(t *testing.T) {
+	t.Parallel()
+	proc := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0B00007F:B535 00000000:0000 0A 00000000:00000000 00:00000000 00000000   100        0 1 1 0 100 0 0 10 0
+   1: 00000000:04D2 00000000:0000 0A 00000000:00000000 00:00000000 00000000   100        0 2 1 0 100 0 0 10 0
+   2: 00000000:1F45 0100007F:9C40 01 00000000:00000000 00:00000000 00000000   100        0 3 1 0 20 4 30 10 -1
+`
+	require.True(t, listensOn(proc, 1234))
+	require.False(t, listensOn(proc, 8005), "an established connection on the port is not a listener")
+	require.True(t, listensOn(proc+"   3: 00000000:1F45 00000000:0000 0A 0 0 0 0 0 0\n", 8005))
+}

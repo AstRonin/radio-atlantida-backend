@@ -14,6 +14,8 @@
 //     on both sides of each encoder limit, reaches Icecast with that
 //     format, or is refused by the script where the encoder cannot make
 //     it (Liquidsoap would exit);
+//   - 30 output switches 75 ms apart: Liquidsoap keeps running, the last
+//     output reaches Icecast, and the live harbor port still listens;
 //   - a switch to TLS through a TLS proxy in front of Icecast;
 //   - a Liquidsoap restart with the backend down starts from the state
 //     file, over TLS again.
@@ -254,6 +256,13 @@ func run(ctx context.Context, c config) error {
 		return fmt.Errorf("after the refused combinations: %w", err)
 	}
 
+	// 4b. Rapid switches, without waiting for Icecast in between.
+	if err = rapidSwitches(ctx, c, ctl, plain); err != nil {
+		return err
+	}
+	pass(fmt.Sprintf("%d rapid output switches: liquidsoap running, the last output on Icecast, harbor port %d listening",
+		rapidSwitchCount, harborPort))
+
 	// 5. TLS through the proxy.
 	tlsOut := plain("/smoke-tls", "mp3", 128, 44100, 2)
 	tlsOut.Host, tlsOut.Port, tlsOut.TLS = c.tlsHost, c.tlsPort, true
@@ -290,6 +299,88 @@ func run(ctx context.Context, c config) error {
 	pass(fmt.Sprintf("%d output connected callbacks", st.connected.Load()))
 	fmt.Println("liqsmoke: PASS")
 	return nil
+}
+
+// rapidSwitchCount is how many outputs rapidSwitches applies, rapidSwitchGap
+// apart. Before the fix in radio.liq a gap of 50-200 ms made Liquidsoap exit
+// within 30 switches on nearly every run; with no gap, or with 300 ms and
+// more, it did not (2026-11-13, unloaded Docker Desktop).
+const (
+	rapidSwitchCount = 30
+	rapidSwitchGap   = 75 * time.Millisecond
+)
+
+// harborPort is the live harbor port inside the Liquidsoap container
+// (HARBOR_PORT of compose.yml).
+const harborPort = 8005
+
+// rapidSwitches applies rapidSwitchCount outputs rapidSwitchGap apart,
+// without waiting for Icecast in between, then checks that
+// Liquidsoap still runs, that the last output reaches Icecast, and that
+// the live harbor port still listens. Without a permanent consumer of the
+// source graph (output.dummy in radio.liq), a shutdown processed before
+// the next output wakes up puts the graph to sleep, harbor closes its port,
+// the rebind fails with EADDRINUSE, and Liquidsoap exits with code 2: before
+// that fix this case failed within about 15 switches.
+func rapidSwitches(ctx context.Context, c config, ctl *telnet, plain func(mount, codec string, br, sr, ch int) output) error {
+	var o output
+	for i := range rapidSwitchCount {
+		br := 128
+		if i%2 == 1 {
+			br = 192
+		}
+		o = plain("/smoke", "mp3", br, 44100, 2)
+		if err := expectReply(ctl, o, "OK applied"); err != nil {
+			if state, code, serr := liquidsoapState(ctx, c); serr == nil && state != "running" {
+				return fmt.Errorf("rapid switch %d: liquidsoap %s (exit code %d): %w", i+1, state, code, err)
+			}
+			return fmt.Errorf("rapid switch %d: %w", i+1, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(rapidSwitchGap):
+		}
+	}
+	if err := waitOutput(ctx, c, o); err != nil {
+		return fmt.Errorf("after %d rapid switches: %w", rapidSwitchCount, err)
+	}
+	listening, err := harborListening(ctx, c)
+	if err != nil {
+		return fmt.Errorf("after %d rapid switches: %w", rapidSwitchCount, err)
+	}
+	if !listening {
+		return fmt.Errorf("after %d rapid switches: harbor port %d not listening", rapidSwitchCount, harborPort)
+	}
+	return nil
+}
+
+// harborListening reports whether a socket listens on harborPort inside
+// the Liquidsoap container, from /proc/net/tcp and /proc/net/tcp6 (the
+// image has no netstat; a published port would always accept through the
+// Docker proxy).
+func harborListening(ctx context.Context, c config) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	args := append(append([]string{}, c.compose...), "exec", "-T", "liquidsoap", "cat", "/proc/net/tcp", "/proc/net/tcp6")
+	out, err := exec.CommandContext(ctx, "docker", args...).Output() //nolint:gosec // G204: a dev tool runs docker compose with its own arguments
+	if err != nil && len(out) == 0 {
+		return false, fmt.Errorf("read /proc/net/tcp in the liquidsoap container: %w", err)
+	}
+	return listensOn(string(out), harborPort), nil
+}
+
+// listensOn reports whether /proc/net/tcp content has a socket in state
+// LISTEN (0A) on port.
+func listensOn(procNetTCP string, port int) bool {
+	want := fmt.Sprintf(":%04X", port)
+	for line := range strings.SplitSeq(procNetTCP, "\n") {
+		f := strings.Fields(line)
+		if len(f) > 3 && strings.HasSuffix(f[1], want) && f[3] == "0A" {
+			return true
+		}
+	}
+	return false
 }
 
 // refused lists the combinations the script refuses because the encoder
