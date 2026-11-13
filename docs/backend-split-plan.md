@@ -1,6 +1,6 @@
 # Plan — Split Large Files (radio-atlantida-backend)
 
-Status: Approved (2026-11-13). §7 item 1 decided: option (a).
+Status: Done (2026-11-13). Phases A–D implemented: A `e64f8b1` (A2 skipped), B `278dad6` (CLAUDE.md rule) + `0972b4f`, C `2a3edcd`, D `cfe036c`. §7 item 1 decided: option (a).
 Based on: `go-reviewer` architecture review (2026-11-13), `docs/tech-design.md` (layers, GORM/pgx split)
 Last updated: 2026-11-13
 
@@ -96,7 +96,12 @@ Pure algorithm, no I/O, well covered (`build_test.go`, `simulate_test.go`, `full
 
 ## 6. Deviations
 
-(Filled in during implementation.)
+1. **A2 skipped.** `serve` interleaves construction with `defer`s (`logs.Close`, `database.Close`, `cancelRequests`) and early error returns; splitting it into `buildServices`/`runServices` needs a new struct or many return values and moved defers, more than passing already-built values.
+2. **Phase A, schema checks.** `checkSchema` and `guardSchema` live in `migrate.go` (same topic: schema/migrations), so they stay; no `schema_guard.go`. The `compatRetry` constant stays in `serve.go`, its only user.
+3. **Phase A, unlisted declarations.** `operationsRetentionDays` and the `EmergencyPlaylistID` method went to `wiring_settings.go` with `retentionPeriods` and `emergencySetting`. `shutdownTimeout`, `operationWorkers`, `operationQueue` stay in `serve.go`.
+4. **Phase B, `tracks_sql.go`.** `tracks_list.go` came out at 363 lines (over ~350), so the shared SQL constants `selectTracks`, `trackSelect`, `planUsage`, `fromTracks`, `usersOfTracks` went to `tracks_sql.go`; `tracks.go` keeps only the constructor and writes, as the amended `CLAUDE.md` rule says. `trackSortKeys` and the `condTrack*` constants went to `tracks_list.go` (their users `trackOrder`, `trackWhere`, `Stats`); `TableName` stays with `trackWrite` in `tracks.go`.
+5. **Phase C, names.** `ports.go`, `settings.go`, `plan_types.go`, `service_hour.go`, `service_plan.go` did not exist in `internal/rotation`; created as planned. `rotation.go`, `snapshot.go`, `inputs.go`, `planner.go` hold none of the plan types, so `plan_types.go` was created. Methods and constants not listed moved with their type: `InsertError.Error`, `InsertError.FailureReason`, `PlanHour.current`, `planItemPlanned`, `Range.contains`, `SyncResult.String` to `plan_types.go`. The error variables (`ErrHourStarted`, ...) and the timeout constants stay in `service.go`.
+6. **Phase D.** The `kind*` constants went to `build_state.go` with `kind`; the size constants (`minuteMS`, `middleTargetMS`, `middleWindowMS`, `minAirMS`) stay in `build.go`.
 
 ## 7. Open questions
 
