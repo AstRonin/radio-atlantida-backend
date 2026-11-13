@@ -12,16 +12,16 @@ import (
 	"github.com/AstRonin/radio-atlantida-backend/internal/db"
 )
 
-// usesTracks answers the three lookups of FileInUse; the rest of TrackStore
+// usesTracks answers the three lookups of FileInUse; the rest of TrackQueries
 // panics if called.
 type usesTracks struct {
-	TrackStore // unused methods panic
-	users      []Ref
-	planned    *HourRange
-	missed     *HourRange
+	TrackQueries // unused methods panic
+	users        []Ref
+	planned      *HourRange
+	missed       *HourRange
 }
 
-func (f *usesTracks) WithTx(db.Tx) TrackStore { return f }
+func (f *usesTracks) WithTx(db.Tx) TrackQueries { return f }
 
 func (f *usesTracks) Users(context.Context, uint64, int) ([]Ref, error) { return f.users, nil }
 
@@ -56,7 +56,7 @@ func TestTrackInUseMatchesFileInUse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			svc := newTrackServiceOn(&usesTracks{users: tt.users, planned: tt.planned, missed: tt.missed}, &bytes.Buffer{})
+			svc := newTrackServiceOn(nil, &usesTracks{users: tt.users, planned: tt.planned, missed: tt.missed}, &bytes.Buffer{})
 			got, err := svc.TrackInUse(t.Context(), 1)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
@@ -75,21 +75,21 @@ func TestTrackInUseReportsLookupErrors(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	tracks := &failingUses{err: boom}
-	_, err := newTrackServiceOn(tracks, &bytes.Buffer{}).TrackInUse(t.Context(), 1)
+	_, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).TrackInUse(t.Context(), 1)
 	require.ErrorIs(t, err, boom)
 
 	missedFails := &failingMissed{usesTracks: &usesTracks{}, err: boom}
-	_, err = newTrackServiceOn(missedFails, &bytes.Buffer{}).TrackInUse(t.Context(), 1)
+	_, err = newTrackServiceOn(nil, missedFails, &bytes.Buffer{}).TrackInUse(t.Context(), 1)
 	require.ErrorIs(t, err, boom)
-	require.ErrorIs(t, newTrackServiceOn(missedFails, &bytes.Buffer{}).FileInUse(t.Context(), 1), boom)
+	require.ErrorIs(t, newTrackServiceOn(nil, missedFails, &bytes.Buffer{}).FileInUse(t.Context(), 1), boom)
 }
 
 type failingUses struct {
-	TrackStore
+	TrackQueries
 	err error
 }
 
-func (f *failingUses) WithTx(db.Tx) TrackStore { return f }
+func (f *failingUses) WithTx(db.Tx) TrackQueries { return f }
 
 func (f *failingUses) Users(context.Context, uint64, int) ([]Ref, error) { return nil, f.err }
 
@@ -99,6 +99,6 @@ type failingMissed struct {
 	err error
 }
 
-func (f *failingMissed) WithTx(db.Tx) TrackStore { return f }
+func (f *failingMissed) WithTx(db.Tx) TrackQueries { return f }
 
 func (f *failingMissed) MissedHours(context.Context, uint64) (*HourRange, error) { return nil, f.err }

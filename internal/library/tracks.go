@@ -285,19 +285,11 @@ type TrackStats struct {
 	AirDurationMS int64
 }
 
-// TrackStore persists tracks (internal/repository/library).
+// TrackStore persists tracks (internal/repository/library, GORM): the
+// writes and the plain reads around them.
 type TrackStore interface {
 	// WithTx returns the store bound to tx.
 	WithTx(tx db.Tx) TrackStore
-	// List returns at most f.Limit tracks in the order of f, after f.After
-	// or skipping f.Offset, and the number of tracks matching the filters
-	// (After, Offset, and Limit aside).
-	List(ctx context.Context, f TrackFilter) ([]Track, int, error)
-	// Stats returns the figures of the tracks matching the filters of f;
-	// its sort and page take no part.
-	Stats(ctx context.Context, f TrackFilter) (TrackStats, error)
-	// Get returns one track, or ErrTrackNotFound.
-	Get(ctx context.Context, id uint64) (Track, error)
 	// Create adds a track without playlists. ErrFilePathTaken,
 	// ErrUnknownType, ErrUnknownArtist.
 	Create(ctx context.Context, in TrackInput) (uint64, error)
@@ -314,18 +306,6 @@ type TrackStore interface {
 	// plan refers to it; ErrInUse when a clock insert or a one-time insert
 	// does.
 	Delete(ctx context.Context, id uint64) error
-	// Users returns the clocks with an insert of the track and its
-	// one-time inserts, at most limit.
-	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
-	// DeleteUnreferenced deletes, in one statement, the tracks of ids that
-	// no play log row, plan item, clock insert, or one-time insert refers to,
-	// and returns their IDs. A reference added while it runs fails the
-	// whole statement with ErrInUse or ErrTrackHasHistory: nothing is
-	// deleted then.
-	DeleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error)
-	// Blockers returns, for each track of ids that exists, its title and
-	// what refers to it (at most limit clocks).
-	Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]TrackBlockers, error)
 	// SetReviewed sets the reviewed mark of the tracks of ids (keeping the
 	// time of an existing mark) or clears it, and returns the IDs of the
 	// tracks that exist.
@@ -342,6 +322,36 @@ type TrackStore interface {
 	CueState(ctx context.Context, id uint64) (CueState, error)
 	// SetCue writes the cue of a track; the reviewed mark stays.
 	SetCue(ctx context.Context, id uint64, c Cue) error
+}
+
+// TrackQueries reads tracks with the complex queries (list, statistics,
+// usage, planned and missed hours) and deletes the unreferenced ones
+// (internal/repository/library, pgx). Bind it to the same transaction as
+// TrackStore when both take part.
+type TrackQueries interface {
+	// WithTx returns the store bound to tx.
+	WithTx(tx db.Tx) TrackQueries
+	// List returns at most f.Limit tracks in the order of f, after f.After
+	// or skipping f.Offset, and the number of tracks matching the filters
+	// (After, Offset, and Limit aside).
+	List(ctx context.Context, f TrackFilter) ([]Track, int, error)
+	// Stats returns the figures of the tracks matching the filters of f;
+	// its sort and page take no part.
+	Stats(ctx context.Context, f TrackFilter) (TrackStats, error)
+	// Get returns one track, or ErrTrackNotFound.
+	Get(ctx context.Context, id uint64) (Track, error)
+	// Users returns the clocks with an insert of the track and its
+	// one-time inserts, at most limit.
+	Users(ctx context.Context, id uint64, limit int) ([]Ref, error)
+	// DeleteUnreferenced deletes, in one statement, the tracks of ids that
+	// no play log row, plan item, clock insert, or one-time insert refers to,
+	// and returns their IDs. A reference added while it runs fails the
+	// whole statement with ErrInUse or ErrTrackHasHistory: nothing is
+	// deleted then.
+	DeleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error)
+	// Blockers returns, for each track of ids that exists, its title and
+	// what refers to it (at most limit clocks).
+	Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]TrackBlockers, error)
 	// PlannedHours returns the range of the built plan hours that hold a
 	// planned item of the track; nil when none does.
 	PlannedHours(ctx context.Context, id uint64) (*HourRange, error)
@@ -386,7 +396,7 @@ func (s *Service) ListTracks(ctx context.Context, f TrackFilter) (TrackPage, err
 		// One more row tells whether a next page exists.
 		f.Limit++
 	}
-	ts, total, err := s.tracks.List(ctx, f)
+	ts, total, err := s.trackQueries.List(ctx, f)
 	if err != nil {
 		return TrackPage{}, fmt.Errorf("list tracks: %w", err)
 	}
@@ -404,7 +414,7 @@ func (s *Service) ListTracks(ctx context.Context, f TrackFilter) (TrackPage, err
 func (s *Service) TrackStats(ctx context.Context, f TrackFilter) (TrackStats, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	stats, err := s.tracks.Stats(ctx, f)
+	stats, err := s.trackQueries.Stats(ctx, f)
 	if err != nil {
 		return TrackStats{}, fmt.Errorf("track stats: %w", err)
 	}
@@ -415,7 +425,7 @@ func (s *Service) TrackStats(ctx context.Context, f TrackFilter) (TrackStats, er
 func (s *Service) GetTrack(ctx context.Context, id uint64) (Track, error) {
 	ctx, cancel := context.WithTimeout(ctx, dbTimeout)
 	defer cancel()
-	t, err := s.tracks.Get(ctx, id)
+	t, err := s.trackQueries.Get(ctx, id)
 	if err != nil {
 		return Track{}, err
 	}
@@ -460,7 +470,7 @@ func (s *Service) CreateTrack(ctx context.Context, in TrackInput) (Track, error)
 	if err != nil {
 		return Track{}, asFieldError(err)
 	}
-	return s.tracks.Get(ctx, id)
+	return s.trackQueries.Get(ctx, id)
 }
 
 // UpdateTrack replaces the metadata and the playlists of a track. A new
@@ -488,7 +498,7 @@ func (s *Service) UpdateTrack(ctx context.Context, id uint64, in TrackEdit) (Tra
 	if err != nil {
 		return Track{}, asFieldError(err)
 	}
-	return s.tracks.Get(ctx, id)
+	return s.trackQueries.Get(ctx, id)
 }
 
 // DeleteTrack deletes a track that has no play history, is not planned, and
@@ -498,7 +508,7 @@ func (s *Service) DeleteTrack(ctx context.Context, id uint64) error {
 	defer cancel()
 	err := s.tracks.Delete(ctx, id)
 	return refuseDelete(ctx, err, ErrTrackInUse, func(ctx context.Context) ([]Ref, error) {
-		return s.tracks.Users(ctx, id, MaxUsers)
+		return s.trackQueries.Users(ctx, id, MaxUsers)
 	})
 }
 
@@ -575,7 +585,7 @@ func (s *Service) DeleteTracks(ctx context.Context, ids []uint64) (DeleteTracksR
 
 	if len(kept) > 0 {
 		bctx, cancel := context.WithTimeout(ctx, dbTimeout)
-		blockers, err := s.tracks.Blockers(bctx, kept, MaxUsers)
+		blockers, err := s.trackQueries.Blockers(bctx, kept, MaxUsers)
 		cancel()
 		if err != nil {
 			return DeleteTracksResult{}, &DeleteTracksError{
@@ -610,7 +620,7 @@ func (s *Service) DeleteTracks(ctx context.Context, ids []uint64) (DeleteTracksR
 func (s *Service) deleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error) {
 	for attempt := 1; ; attempt++ {
 		dctx, cancel := context.WithTimeout(ctx, dbTimeout)
-		deleted, err := s.tracks.DeleteUnreferenced(dctx, ids)
+		deleted, err := s.trackQueries.DeleteUnreferenced(dctx, ids)
 		cancel()
 		raced := errors.Is(err, ErrInUse) || errors.Is(err, ErrTrackHasHistory)
 		switch {
@@ -800,18 +810,18 @@ func (s *Service) TrackInUse(ctx context.Context, id uint64) (bool, error) {
 // trackUsers lists what uses the track, as FileInUse names it. ctx carries
 // the caller's deadline.
 func (s *Service) trackUsers(ctx context.Context, id uint64) ([]Ref, error) {
-	users, err := s.tracks.Users(ctx, id, MaxUsers)
+	users, err := s.trackQueries.Users(ctx, id, MaxUsers)
 	if err != nil {
 		return nil, fmt.Errorf("list users of track %d: %w", id, err)
 	}
-	planned, err := s.tracks.PlannedHours(ctx, id)
+	planned, err := s.trackQueries.PlannedHours(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("list planned hours of track %d: %w", id, err)
 	}
 	if planned != nil {
 		users = append(users, Ref{Kind: KindPlanItem, Name: "planned from " + planned.From.Format(time.RFC3339)})
 	}
-	missed, err := s.tracks.MissedHours(ctx, id)
+	missed, err := s.trackQueries.MissedHours(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("list missed hours of track %d: %w", id, err)
 	}

@@ -26,25 +26,25 @@ func TestTrackUsesLookupsForInUse(t *testing.T) {
 	f.item(clock, planned, h.Add(10*time.Minute), "planned")
 	f.item(clock, aired, h.Add(20*time.Minute), "aired")
 
-	users, err := f.tracks.Users(ctx, unused, library.MaxUsers)
+	users, err := f.queries.Users(ctx, unused, library.MaxUsers)
 	require.NoError(t, err)
 	require.Empty(t, users)
-	hours, err := f.tracks.PlannedHours(ctx, unused)
+	hours, err := f.queries.PlannedHours(ctx, unused)
 	require.NoError(t, err)
 	require.Nil(t, hours)
 
-	users, err = f.tracks.Users(ctx, inClock, library.MaxUsers)
+	users, err = f.queries.Users(ctx, inClock, library.MaxUsers)
 	require.NoError(t, err)
 	require.Equal(t, []library.Ref{{Kind: library.KindClock, ID: clock, Name: "Morning"}}, users)
 
-	hours, err = f.tracks.PlannedHours(ctx, planned)
+	hours, err = f.queries.PlannedHours(ctx, planned)
 	require.NoError(t, err)
 	require.Equal(t, &library.HourRange{From: h, To: h.Add(time.Hour)}, hours)
 
-	users, err = f.tracks.Users(ctx, aired, library.MaxUsers)
+	users, err = f.queries.Users(ctx, aired, library.MaxUsers)
 	require.NoError(t, err)
 	require.Empty(t, users, "an aired item is not a use")
-	hours, err = f.tracks.PlannedHours(ctx, aired)
+	hours, err = f.queries.PlannedHours(ctx, aired)
 	require.NoError(t, err)
 	require.Nil(t, hours, "an aired item is not a use")
 }
@@ -91,7 +91,7 @@ VALUES ($1, $2, 'icecast', 'icecast') RETURNING id`, start.Add(-time.Hour), star
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hours, err := f.tracks.MissedHours(ctx, tt.track)
+			hours, err := f.queries.MissedHours(ctx, tt.track)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, hours)
 		})

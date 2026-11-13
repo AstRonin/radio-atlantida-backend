@@ -42,7 +42,7 @@ func TestAirDurationColumnEqualsTheMethod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			id := f.id(`INSERT INTO tracks (title, file_path, type_id, duration_ms, cue_in_ms, cue_out_ms)
 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, tt.name, fmt.Sprintf("music/air-%d.mp3", i), f.music, tt.duration, tt.cueIn, tt.cueOut)
-			tr, err := f.tracks.Get(t.Context(), id)
+			tr, err := f.queries.Get(t.Context(), id)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, f.airColumn(id))
 			require.Equal(t, tr.AirDurationMS(), f.airColumn(id))
@@ -69,7 +69,7 @@ func TestAirDurationColumnFollowsSetCueAndRefusesWrites(t *testing.T) {
 func TestTrackStatsEmptyLibrary(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	got, err := f.tracks.Stats(t.Context(), library.TrackFilter{})
+	got, err := f.queries.Stats(t.Context(), library.TrackFilter{})
 	require.NoError(t, err)
 	require.Equal(t, library.TrackStats{}, got)
 }
@@ -92,7 +92,7 @@ func TestTrackStatsMixedSet(t *testing.T) {
 	f.exec(`UPDATE tracks SET analyzed_at = now(), quality_ok = false, reviewed_at = now() WHERE id = $1`, clean)
 	f.exec(`UPDATE tracks SET analyzed_at = now() WHERE id = $1`, noDuration)
 
-	got, err := f.tracks.Stats(ctx, library.TrackFilter{})
+	got, err := f.queries.Stats(ctx, library.TrackFilter{})
 	require.NoError(t, err)
 	require.Equal(t, library.TrackStats{
 		Total: 5, Reviewed: 2, WithIssues: 2, Unanalysed: 1, AirDurationMS: 700000,
@@ -107,7 +107,7 @@ func TestTrackStatsSumIsBigint(t *testing.T) {
 		f.exec(`INSERT INTO tracks (title, file_path, type_id, duration_ms) VALUES ('Long', $1, $2, 2000000000)`,
 			fmt.Sprintf("music/long-%d.mp3", i), f.music)
 	}
-	got, err := f.tracks.Stats(t.Context(), library.TrackFilter{})
+	got, err := f.queries.Stats(t.Context(), library.TrackFilter{})
 	require.NoError(t, err)
 	require.Equal(t, int64(6_000_000_000), got.AirDurationMS)
 }
@@ -148,12 +148,12 @@ func TestTrackStatsMatchTheList(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := f.tracks.Stats(ctx, tt.filter)
+			got, err := f.queries.Stats(ctx, tt.filter)
 			require.NoError(t, err)
 
 			list := tt.filter
 			list.Limit = 100
-			tracks, total, err := f.tracks.List(ctx, list)
+			tracks, total, err := f.queries.List(ctx, list)
 			require.NoError(t, err)
 			want := library.TrackStats{Total: total}
 			for _, tr := range tracks {
@@ -173,7 +173,7 @@ func TestTrackStatsMatchTheList(t *testing.T) {
 			require.Equal(t, want, got)
 		})
 	}
-	all, err := f.tracks.Stats(ctx, library.TrackFilter{})
+	all, err := f.queries.Stats(ctx, library.TrackFilter{})
 	require.NoError(t, err)
 	require.Equal(t, len(rows), all.Total)
 }
@@ -200,7 +200,7 @@ func TestTrackSortDurationUsesTheOnAirLength(t *testing.T) {
 
 	titles := func(desc bool) []string {
 		t.Helper()
-		ts, _, err := f.tracks.List(ctx, library.TrackFilter{Sort: library.SortDuration, Desc: desc, Limit: 10})
+		ts, _, err := f.queries.List(ctx, library.TrackFilter{Sort: library.SortDuration, Desc: desc, Limit: 10})
 		require.NoError(t, err)
 		out := make([]string, len(ts))
 		for i, tr := range ts {

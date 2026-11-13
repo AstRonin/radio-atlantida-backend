@@ -103,7 +103,7 @@ func TestDeletePlaylistEmergency(t *testing.T) {
 			t.Parallel()
 			store := tt.store
 			store.names = map[uint64]string{id: "Reserve"}
-			svc := NewService(fakeTx{}, nil, &store, nil, nil, nil, nil, fakeOnAir(0), tt.emergency, slog.New(slog.DiscardHandler))
+			svc := NewService(fakeTx{}, nil, &store, nil, nil, nil, nil, nil, fakeOnAir(0), tt.emergency, slog.New(slog.DiscardHandler))
 
 			err := svc.DeletePlaylist(t.Context(), id)
 
@@ -130,7 +130,7 @@ func TestDeletePlaylistEmergency(t *testing.T) {
 func TestDeletePlaylistEmergencySettingDangling(t *testing.T) {
 	t.Parallel()
 	store := fakePlaylists{}
-	svc := NewService(fakeTx{}, nil, &store, nil, nil, nil, nil, fakeOnAir(0),
+	svc := NewService(fakeTx{}, nil, &store, nil, nil, nil, nil, nil, fakeOnAir(0),
 		fakeEmergency{id: new(uint64(9))}, slog.New(slog.DiscardHandler))
 
 	require.ErrorIs(t, svc.DeletePlaylist(t.Context(), 9), ErrPlaylistNotFound)

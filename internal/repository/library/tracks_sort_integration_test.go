@@ -195,7 +195,7 @@ func readPages(ctx context.Context, t *testing.T, fx *fixture, f library.TrackFi
 	t.Helper()
 	var ids []uint64
 	for f.Offset = 0; ; f.Offset += f.Limit {
-		page, n, err := fx.tracks.List(ctx, f)
+		page, n, err := fx.queries.List(ctx, f)
 		require.NoError(t, err)
 		require.Equal(t, total, n, "total at offset %d", f.Offset)
 		for _, tr := range page {
@@ -315,7 +315,7 @@ func TestTrackSortWithFilters(t *testing.T) {
 			require.Equal(t, want, readPages(ctx, t, f, tt.filter, len(tt.rows)))
 
 			tt.filter.Offset = 1000
-			page, total, err := f.tracks.List(ctx, tt.filter)
+			page, total, err := f.queries.List(ctx, tt.filter)
 			require.NoError(t, err)
 			require.Empty(t, page, "an offset past the end is not an error")
 			require.Equal(t, len(tt.rows), total)
@@ -334,7 +334,7 @@ func TestTrackCursorDefaultOrder(t *testing.T) {
 	var got []uint64
 	filter := library.TrackFilter{Limit: 7}
 	for {
-		page, total, err := f.tracks.List(ctx, filter)
+		page, total, err := f.queries.List(ctx, filter)
 		require.NoError(t, err)
 		require.Equal(t, len(rows), total)
 		for _, tr := range page {

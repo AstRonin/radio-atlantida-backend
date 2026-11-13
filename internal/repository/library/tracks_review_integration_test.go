@@ -49,7 +49,7 @@ func TestReviewedMark(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, *before, *f.reviewedAt(ctx, a))
 
-	got, err := f.tracks.Get(ctx, a)
+	got, err := f.queries.Get(ctx, a)
 	require.NoError(t, err)
 	require.Equal(t, before.UTC(), *got.ReviewedAt)
 
@@ -125,7 +125,7 @@ func TestReviewedFilterAndSort(t *testing.T) {
 	titles := func(f2 library.TrackFilter) ([]string, int) {
 		t.Helper()
 		f2.Limit = 100
-		ts, total, err := f.tracks.List(ctx, f2)
+		ts, total, err := f.queries.List(ctx, f2)
 		require.NoError(t, err)
 		out := make([]string, len(ts))
 		for i, tr := range ts {
@@ -151,7 +151,7 @@ func TestReviewedFilterAndSort(t *testing.T) {
 }
 
 func newService(f *fixture) *library.Service {
-	return library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, noneOnAir{}, nil,
+	return library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, f.queries, nil, nil, noneOnAir{}, nil,
 		slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)))
 }
 
@@ -184,7 +184,7 @@ func TestRenameTracks(t *testing.T) {
 		Refused:   []library.RenameRefusal{{TrackID: 999999, Err: library.ErrTrackNotFound}},
 	}
 	require.Equal(t, want, preview)
-	got, err := f.tracks.Get(ctx, site)
+	got, err := f.queries.Get(ctx, site)
 	require.NoError(t, err)
 	require.Equal(t, "Song [www.site.com]", got.Title, "a dry run writes nothing")
 	require.NotNil(t, got.ReviewedAt)
@@ -198,7 +198,7 @@ func TestRenameTracks(t *testing.T) {
 	require.Equal(t, []library.TitleChange{{TrackID: site, OldTitle: "Song [www.site.com]", NewTitle: "Song"}}, applied.Changed)
 	require.Equal(t, []uint64{upper, plain, only}, applied.Unchanged)
 
-	got, err = f.tracks.Get(ctx, site)
+	got, err = f.queries.Get(ctx, site)
 	require.NoError(t, err)
 	require.Equal(t, "Song", got.Title)
 	require.Nil(t, got.ReviewedAt, "a renamed track loses its mark")
@@ -239,7 +239,7 @@ func TestRenameLocksTheRows(t *testing.T) {
 		return f.tracks.WithTx(tx).SetTitles(ctx, map[uint64]string{id: `Quote "and" 'apostrophe' \ slash`})
 	})
 	require.NoError(t, err)
-	got, err := f.tracks.Get(ctx, id)
+	got, err := f.queries.Get(ctx, id)
 	require.NoError(t, err)
 	require.Equal(t, `Quote "and" 'apostrophe' \ slash`, got.Title)
 }

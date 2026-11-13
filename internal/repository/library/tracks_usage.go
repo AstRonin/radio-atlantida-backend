@@ -16,7 +16,7 @@ type trackUserRow struct {
 
 // Users returns the clocks with an insert of the track and its one-time
 // inserts, at most limit.
-func (s *Tracks) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
+func (s *TrackQueries) Users(ctx context.Context, id uint64, limit int) ([]library.Ref, error) {
 	var users []trackUserRow
 	err := s.g.WithContext(ctx).Raw(usersOfTracks, []uint64{id}, []uint64{id}, limit).Scan(&users).Error
 	rows := make([]refRow, len(users))
@@ -40,7 +40,7 @@ func (s *Tracks) Users(ctx context.Context, id uint64, limit int) ([]library.Ref
 // 1 000 IDs: Index Only Scan on pk_tracks, anti joins to the reference
 // tables, 1.7 ms; the delete of 666 tracks with their links 15 ms.
 // Blockers on the 334 kept: 8 ms.
-func (s *Tracks) DeleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error) {
+func (s *TrackQueries) DeleteUnreferenced(ctx context.Context, ids []uint64) ([]uint64, error) {
 	var deleted []uint64
 	err := s.g.WithContext(ctx).Raw(`
 DELETE FROM tracks t
@@ -59,7 +59,7 @@ RETURNING t.id`, ids).Scan(&deleted).Error
 // Blockers returns the title of each existing track of ids, whether its
 // history refers to it, and the clocks and one-time inserts that use it (at
 // most limit per track).
-func (s *Tracks) Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]library.TrackBlockers, error) {
+func (s *TrackQueries) Blockers(ctx context.Context, ids []uint64, limit int) (map[uint64]library.TrackBlockers, error) {
 	g := s.g.WithContext(ctx)
 	var tracks []struct {
 		ID      uint64

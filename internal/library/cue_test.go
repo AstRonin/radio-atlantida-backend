@@ -68,7 +68,7 @@ func TestAirDurationMS(t *testing.T) {
 	require.Equal(t, 55_000, *tr.AirDurationMS())
 }
 
-// cueTracks is the store of SetCue.
+// cueTracks is the store of SetCue; cueQueries answers its queries.
 type cueTracks struct {
 	TrackStore // unused methods panic
 	state      CueState
@@ -87,22 +87,29 @@ func (f *cueTracks) SetCue(_ context.Context, _ uint64, c Cue) error {
 	return nil
 }
 
-func (f *cueTracks) PlannedHours(context.Context, uint64) (*HourRange, error) {
-	f.askedHours = true
-	return f.hours, nil
+type cueQueries struct {
+	TrackQueries // unused methods panic
+	f            *cueTracks
 }
 
-func (f *cueTracks) Get(_ context.Context, id uint64) (Track, error) {
-	t := Track{ID: id, DurationMS: f.state.DurationMS}
-	if f.saved != nil {
-		t.Cue = *f.saved
+func (q *cueQueries) WithTx(db.Tx) TrackQueries { return q }
+
+func (q *cueQueries) PlannedHours(context.Context, uint64) (*HourRange, error) {
+	q.f.askedHours = true
+	return q.f.hours, nil
+}
+
+func (q *cueQueries) Get(_ context.Context, id uint64) (Track, error) {
+	t := Track{ID: id, DurationMS: q.f.state.DurationMS}
+	if q.f.saved != nil {
+		t.Cue = *q.f.saved
 	}
 	return t, nil
 }
 
 func newCueService(tracks *cueTracks, onAir fakeOnAir) *Service {
 	var logs bytes.Buffer
-	svc := newTrackServiceOn(tracks, &logs)
+	svc := newTrackServiceOn(tracks, &cueQueries{f: tracks}, &logs)
 	svc.onAir = onAir
 	return svc
 }

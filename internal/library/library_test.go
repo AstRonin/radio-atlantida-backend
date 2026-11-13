@@ -37,11 +37,19 @@ func (f *fakeTracks) Create(_ context.Context, in TrackInput) (uint64, error) {
 
 func (f *fakeTracks) SetPlaylists(context.Context, uint64, []uint64) error { return nil }
 
-func (f *fakeTracks) Get(context.Context, uint64) (Track, error) { return Track{ID: 1}, nil }
-
 func (f *fakeTracks) Delete(context.Context, uint64) error { return f.deleteErr }
 
-func (f *fakeTracks) Users(context.Context, uint64, int) ([]Ref, error) { return f.users, nil }
+// fakeTrackQueries answers the queries of fakeTracks.
+type fakeTrackQueries struct {
+	TrackQueries // unused methods panic
+	f            *fakeTracks
+}
+
+func (q *fakeTrackQueries) WithTx(db.Tx) TrackQueries { return q }
+
+func (q *fakeTrackQueries) Get(context.Context, uint64) (Track, error) { return Track{ID: 1}, nil }
+
+func (q *fakeTrackQueries) Users(context.Context, uint64, int) ([]Ref, error) { return q.f.users, nil }
 
 type fakeProber struct {
 	info media.Info
@@ -56,11 +64,13 @@ type fakeOnAir uint64
 func (f fakeOnAir) OnAirTrack() (uint64, bool) { return uint64(f), f != 0 }
 
 func newTrackService(tracks *fakeTracks, prober Prober, logs *bytes.Buffer) *Service {
-	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, prober, fakeOnAir(0), nil, slog.New(slog.NewJSONHandler(logs, nil)))
+	return NewService(fakeTx{}, nil, nil, nil, tracks, &fakeTrackQueries{f: tracks}, nil, prober, fakeOnAir(0), nil, slog.New(slog.NewJSONHandler(logs, nil)))
 }
 
-func newTrackServiceOn(tracks TrackStore, logs *bytes.Buffer) *Service {
-	return NewService(fakeTx{}, nil, nil, nil, tracks, nil, fakeProber{}, fakeOnAir(0), nil, slog.New(slog.NewJSONHandler(logs, nil)))
+// newTrackServiceOn returns a service on the fakes; either may be nil when
+// the test does not reach it.
+func newTrackServiceOn(tracks TrackStore, queries TrackQueries, logs *bytes.Buffer) *Service {
+	return NewService(fakeTx{}, nil, nil, nil, tracks, queries, nil, fakeProber{}, fakeOnAir(0), nil, slog.New(slog.NewJSONHandler(logs, nil)))
 }
 
 func TestCreateTrackFillsMetadataFromFile(t *testing.T) {
@@ -196,7 +206,7 @@ func (f *fakeTypes) Delete(context.Context, uint64) error {
 func TestDeleteSystemTypeIsRefused(t *testing.T) {
 	t.Parallel()
 	types := &fakeTypes{t: PlaylistType{ID: 1, Code: "music", IsSystem: true}}
-	svc := NewService(fakeTx{}, types, nil, nil, nil, nil, nil, fakeOnAir(0), nil, slog.New(slog.DiscardHandler))
+	svc := NewService(fakeTx{}, types, nil, nil, nil, nil, nil, nil, fakeOnAir(0), nil, slog.New(slog.DiscardHandler))
 
 	require.ErrorIs(t, svc.DeleteType(t.Context(), 1), ErrSystemType)
 	require.False(t, types.deleted)

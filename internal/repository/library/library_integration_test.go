@@ -24,6 +24,7 @@ type fixture struct {
 	playlists *libraryrepo.Playlists
 	artists   *libraryrepo.Artists
 	tracks    *libraryrepo.Tracks
+	queries   *libraryrepo.TrackQueries
 	music     uint64
 }
 
@@ -34,6 +35,7 @@ func newFixture(t *testing.T) *fixture {
 		t: t, d: d,
 		types: libraryrepo.NewTypes(d), playlists: libraryrepo.NewPlaylists(d),
 		artists: libraryrepo.NewArtists(d), tracks: libraryrepo.NewTracks(d),
+		queries: libraryrepo.NewTrackQueries(d),
 	}
 	require.NoError(t, d.Pool.QueryRow(t.Context(), `SELECT id FROM playlist_types WHERE code = 'music'`).Scan(&f.music))
 	return f
@@ -154,7 +156,7 @@ func TestPlaylistTracksAndLock(t *testing.T) {
 			}
 			return ps.SetTracks(ctx, pop, ids)
 		}))
-		page, _, err := f.tracks.List(ctx, library.TrackFilter{PlaylistID: pop, Limit: 10})
+		page, _, err := f.queries.List(ctx, library.TrackFilter{PlaylistID: pop, Limit: 10})
 		require.NoError(t, err)
 		out := []uint64{}
 		for _, tr := range page {
@@ -199,7 +201,7 @@ func TestTrackHistoryAndRollback(t *testing.T) {
 		return ts.SetPlaylists(ctx, id, []uint64{9999})
 	})
 	require.ErrorIs(t, err, library.ErrUnknownPlaylist)
-	page, _, err := f.tracks.List(ctx, library.TrackFilter{Query: "new", Limit: 10})
+	page, _, err := f.queries.List(ctx, library.TrackFilter{Query: "new", Limit: 10})
 	require.NoError(t, err)
 	require.Empty(t, page)
 }
@@ -222,7 +224,7 @@ WHERE id = $1`, bad)
 	require.NoError(t, err)
 
 	ids := func(quality string) []uint64 {
-		page, _, lerr := f.tracks.List(ctx, library.TrackFilter{Quality: quality, Limit: 10})
+		page, _, lerr := f.queries.List(ctx, library.TrackFilter{Quality: quality, Limit: 10})
 		require.NoError(t, lerr)
 		var out []uint64
 		for _, tr := range page {
@@ -235,7 +237,7 @@ WHERE id = $1`, bad)
 	require.Equal(t, []uint64{fresh}, ids(library.QualityUnanalysed))
 	require.Len(t, ids(""), 3)
 
-	tr, err := f.tracks.Get(ctx, ok)
+	tr, err := f.queries.Get(ctx, ok)
 	require.NoError(t, err)
 	require.Equal(t, "mp3", *tr.Codec)
 	require.Equal(t, 2, *tr.Channels)
@@ -245,12 +247,12 @@ WHERE id = $1`, bad)
 	require.Empty(t, tr.QualityIssues)
 	require.NotNil(t, tr.AnalyzedAt)
 
-	tr, err = f.tracks.Get(ctx, bad)
+	tr, err = f.queries.Get(ctx, bad)
 	require.NoError(t, err)
 	require.Equal(t, []library.QualityIssue{library.IssueLoudness, library.IssueLowBitrate}, tr.QualityIssues)
 	require.Equal(t, 96000, *tr.SourceBitrate)
 
-	tr, err = f.tracks.Get(ctx, fresh)
+	tr, err = f.queries.Get(ctx, fresh)
 	require.NoError(t, err)
 	require.Nil(t, tr.AnalyzedAt)
 	require.NotNil(t, tr.QualityIssues)
@@ -291,14 +293,14 @@ func TestDeleteTracks(t *testing.T) {
 	evening := f.id(`INSERT INTO clocks (name) VALUES ('Evening') RETURNING id`)
 	f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 0, $2) RETURNING id`, evening, inClock)
 	f.id(`INSERT INTO clock_inserts (clock_id, offset_ms, track_id) VALUES ($1, 60000, $2) RETURNING id`, evening, inClock)
-	blockers, err := f.tracks.Blockers(ctx, []uint64{inClock, played, 9999}, 1)
+	blockers, err := f.queries.Blockers(ctx, []uint64{inClock, played, 9999}, 1)
 	require.NoError(t, err)
 	require.Equal(t, map[uint64]library.TrackBlockers{
 		inClock: {Title: "in clock", UsedBy: []library.Ref{{Kind: library.KindClock, ID: evening, Name: "Evening"}}},
 		played:  {Title: "played", History: true},
 	}, blockers, "a clock once, in name order, at most limit; unknown IDs absent")
 
-	svc := library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, nil, nil, noneOnAir{}, nil, slog.New(slog.DiscardHandler))
+	svc := library.NewService(f.d, f.types, f.playlists, f.artists, f.tracks, f.queries, nil, nil, noneOnAir{}, nil, slog.New(slog.DiscardHandler))
 	res, err := svc.DeleteTracks(ctx, []uint64{free, inClock, played, planned, inserted, 9999})
 	require.NoError(t, err)
 	require.Equal(t, []uint64{free}, res.Deleted)

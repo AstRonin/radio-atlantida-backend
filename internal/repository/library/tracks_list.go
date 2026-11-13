@@ -195,7 +195,7 @@ func whereClause(where []string) string {
 // Join) is 8 ms and the rest the title tie-break, as in the title order's
 // last page on the same table (72 ms). No index: the key is an aggregate of
 // the plan.
-func (s *Tracks) List(ctx context.Context, f library.TrackFilter) ([]library.Track, int, error) {
+func (s *TrackQueries) List(ctx context.Context, f library.TrackFilter) ([]library.Track, int, error) {
 	order, err := trackOrder(f)
 	if err != nil {
 		return nil, 0, err
@@ -235,7 +235,7 @@ ORDER BY ` + order
 }
 
 // count returns the number of tracks matching the filters of f.
-func (s *Tracks) count(ctx context.Context, f library.TrackFilter) (int, error) {
+func (s *TrackQueries) count(ctx context.Context, f library.TrackFilter) (int, error) {
 	where, args := trackWhere(f)
 	var n int
 	if err := s.g.WithContext(ctx).Raw("SELECT count(*)"+fromTracks+whereClause(where), args...).Scan(&n).Error; err != nil {
@@ -257,7 +257,7 @@ type trackStatsRow struct {
 // and the page of f take no part. It scans the filtered tracks, as count does;
 // fromTracks is needed for the joins of q and in_plan. No index
 // (docs/track-stats-plan.md decision 8).
-func (s *Tracks) Stats(ctx context.Context, f library.TrackFilter) (library.TrackStats, error) {
+func (s *TrackQueries) Stats(ctx context.Context, f library.TrackFilter) (library.TrackStats, error) {
 	where, args := trackWhere(f)
 	sql := `SELECT count(*) AS total,
        count(*) FILTER (WHERE ` + condTrackReviewed + `) AS reviewed,
@@ -272,7 +272,7 @@ func (s *Tracks) Stats(ctx context.Context, f library.TrackFilter) (library.Trac
 }
 
 // Get returns one track, or library.ErrTrackNotFound.
-func (s *Tracks) Get(ctx context.Context, id uint64) (library.Track, error) {
+func (s *TrackQueries) Get(ctx context.Context, id uint64) (library.Track, error) {
 	var rows []trackRow
 	if err := s.g.WithContext(ctx).Raw(selectTracks+` WHERE tr.id = ?`, id).Scan(&rows).Error; err != nil {
 		return library.Track{}, fmt.Errorf("select track %d: %w", id, err)
@@ -289,7 +289,7 @@ func (s *Tracks) Get(ctx context.Context, id uint64) (library.Track, error) {
 
 // withLinks adds the playlist and play rule IDs of the tracks, one query
 // each (the primary keys of the link tables lead with track_id).
-func (s *Tracks) withLinks(ctx context.Context, rows []trackRow) ([]library.Track, error) {
+func (s *TrackQueries) withLinks(ctx context.Context, rows []trackRow) ([]library.Track, error) {
 	if len(rows) == 0 {
 		return []library.Track{}, nil
 	}

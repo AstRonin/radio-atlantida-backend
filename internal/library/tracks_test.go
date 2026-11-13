@@ -15,7 +15,7 @@ import (
 
 // fakeBulkTracks keeps tracks and what refers to them.
 type fakeBulkTracks struct {
-	TrackStore // unused methods panic
+	TrackQueries // unused methods panic
 	// tracks are the existing tracks; a track with blockers is kept.
 	tracks map[uint64]TrackBlockers
 	// deleteErrs fail the delete statements in turn.
@@ -75,7 +75,7 @@ func TestDeleteTracksReportsEachTrack(t *testing.T) {
 		6: {Title: "Six", History: true, UsedBy: pool},
 	}}
 	logs := &bytes.Buffer{}
-	res, err := newTrackServiceOn(tracks, logs).DeleteTracks(t.Context(), []uint64{5, 2, 3, 4, 6, 1})
+	res, err := newTrackServiceOn(nil, tracks, logs).DeleteTracks(t.Context(), []uint64{5, 2, 3, 4, 6, 1})
 	require.NoError(t, err)
 	require.Equal(t, []uint64{5, 1}, res.Deleted, "request order")
 	require.Equal(t, []TrackRefusal{
@@ -92,7 +92,7 @@ func TestDeleteTracksReportsEachTrack(t *testing.T) {
 func TestDeleteTracksAllDeleted(t *testing.T) {
 	t.Parallel()
 	tracks := &fakeBulkTracks{tracks: map[uint64]TrackBlockers{1: {}, 2: {}, 3: {}}}
-	res, err := newTrackServiceOn(tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), []uint64{1, 2, 3})
+	res, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), []uint64{1, 2, 3})
 	require.NoError(t, err)
 	require.Equal(t, []uint64{1, 2, 3}, res.Deleted)
 	require.NotNil(t, res.Refused)
@@ -104,7 +104,7 @@ func TestDeleteTracksOutlivesTheCaller(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	tracks := &fakeBulkTracks{tracks: map[uint64]TrackBlockers{1: {}, 2: {}}}
-	res, err := newTrackServiceOn(tracks, &bytes.Buffer{}).DeleteTracks(ctx, []uint64{1, 2})
+	res, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).DeleteTracks(ctx, []uint64{1, 2})
 	require.NoError(t, err)
 	require.Equal(t, []uint64{1, 2}, res.Deleted)
 	require.Equal(t, []error{nil}, tracks.ctxErrs, "the delete ran on a live context")
@@ -118,7 +118,7 @@ func TestDeleteTracksRetriesAfterNewReference(t *testing.T) {
 		tracks:     map[uint64]TrackBlockers{1: {}, 2: {Title: "Two", History: true}},
 		deleteErrs: []error{ErrTrackHasHistory},
 	}
-	res, err := newTrackServiceOn(tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), []uint64{1, 2})
+	res, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), []uint64{1, 2})
 	require.NoError(t, err)
 	require.Equal(t, 2, tracks.calls)
 	require.Equal(t, []uint64{1}, res.Deleted)
@@ -147,7 +147,7 @@ func TestDeleteTracksErrors(t *testing.T) {
 				tracks:     map[uint64]TrackBlockers{1: {}, 2: {History: true}},
 				deleteErrs: tt.deleteErrs, blockersErr: tt.blockersErr,
 			}
-			_, err := newTrackServiceOn(tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), []uint64{1, 2})
+			_, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), []uint64{1, 2})
 			var stopped *DeleteTracksError
 			require.ErrorAs(t, err, &stopped)
 			require.Equal(t, tt.deleted, stopped.Deleted)
@@ -177,7 +177,7 @@ func TestDeleteTracksLimits(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tracks := &fakeBulkTracks{}
-			_, err := newTrackServiceOn(tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), tt.ids)
+			_, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).DeleteTracks(t.Context(), tt.ids)
 			var verr *validation.Error
 			require.ErrorAs(t, err, &verr)
 			require.Len(t, verr.Fields, 1)
@@ -191,10 +191,10 @@ func TestDeleteTracksLimits(t *testing.T) {
 // fakeListTracks holds tracks in the order of every sort and records the
 // filter of the last List.
 type fakeListTracks struct {
-	TrackStore // unused methods panic
-	tracks     []Track
-	got        TrackFilter
-	calls      int
+	TrackQueries // unused methods panic
+	tracks       []Track
+	got          TrackFilter
+	calls        int
 }
 
 func newFakeListTracks(n uint64) *fakeListTracks {
@@ -231,7 +231,7 @@ func TestListTracksPages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tracks := newFakeListTracks(12)
-			page, err := newTrackServiceOn(tracks, &bytes.Buffer{}).ListTracks(t.Context(), tt.filter)
+			page, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).ListTracks(t.Context(), tt.filter)
 			require.NoError(t, err)
 			require.Equal(t, tt.readLimit, tracks.got.Limit)
 			require.Len(t, page.Items, tt.items)
@@ -258,7 +258,7 @@ func TestListTracksRefusals(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tracks := newFakeListTracks(12)
-			_, err := newTrackServiceOn(tracks, &bytes.Buffer{}).ListTracks(t.Context(), tt.filter)
+			_, err := newTrackServiceOn(nil, tracks, &bytes.Buffer{}).ListTracks(t.Context(), tt.filter)
 			var verr *validation.Error
 			require.ErrorAs(t, err, &verr)
 			require.Len(t, verr.Fields, 1)

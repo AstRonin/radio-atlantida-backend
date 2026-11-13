@@ -207,7 +207,7 @@ func TestRenameComputation(t *testing.T) {
 			tracks := newFakeTitleTracks(all)
 			dry := tt.req
 			dry.DryRun = true
-			res, err := newTrackServiceOn(tracks, &bytes.Buffer{}).RenameTracks(t.Context(), dry)
+			res, err := newTrackServiceOn(tracks, nil, &bytes.Buffer{}).RenameTracks(t.Context(), dry)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, res)
 			require.Nil(t, tracks.written, "a dry run writes nothing")
@@ -220,7 +220,7 @@ func TestRenameAppliesInOneTransaction(t *testing.T) {
 	t.Parallel()
 	tracks := newFakeTitleTracks(map[uint64]string{1: "A [x]", 2: "B", 3: "C [x]"})
 	tracks.reviewed = map[uint64]bool{1: true, 2: true}
-	res, err := newTrackServiceOn(tracks, &bytes.Buffer{}).
+	res, err := newTrackServiceOn(tracks, nil, &bytes.Buffer{}).
 		RenameTracks(t.Context(), RenameRequest{TrackIDs: []uint64{1, 2, 3}, Find: "[x]"})
 	require.NoError(t, err)
 	require.Len(t, res.Changed, 2)
@@ -256,7 +256,7 @@ func TestRenameRefusals(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tracks := newFakeTitleTracks(map[uint64]string{1: "a"})
-			_, err := newTrackServiceOn(tracks, &bytes.Buffer{}).RenameTracks(t.Context(), tt.req)
+			_, err := newTrackServiceOn(tracks, nil, &bytes.Buffer{}).RenameTracks(t.Context(), tt.req)
 			var verr *validation.Error
 			require.ErrorAs(t, err, &verr)
 			require.Equal(t, tt.field, verr.Fields[0].Field)
@@ -269,7 +269,7 @@ func TestRenameRefusals(t *testing.T) {
 func TestReviewTracks(t *testing.T) {
 	t.Parallel()
 	tracks := newFakeTitleTracks(map[uint64]string{1: "a", 2: "b", 3: "c"})
-	svc := newTrackServiceOn(tracks, &bytes.Buffer{})
+	svc := newTrackServiceOn(tracks, nil, &bytes.Buffer{})
 	res, err := svc.ReviewTracks(t.Context(), []uint64{3, 9, 1}, true)
 	require.NoError(t, err)
 	require.Equal(t, ReviewTracksResult{Updated: []uint64{3, 1}, NotFound: []uint64{9}}, res, "request order")

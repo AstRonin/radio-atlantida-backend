@@ -55,7 +55,7 @@ func TestCueStateSetCueAndPlannedHours(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, library.CueState{DurationMS: new(200000)}, st)
 
-	got, err := f.tracks.Get(ctx, a)
+	got, err := f.queries.Get(ctx, a)
 	require.NoError(t, err)
 	require.Equal(t, cut, got.Cue)
 	require.Equal(t, 145000, *got.AirDurationMS())
@@ -63,14 +63,14 @@ func TestCueStateSetCueAndPlannedHours(t *testing.T) {
 	require.Equal(t, h1.Add(10*time.Minute), *got.NextPlannedAt)
 	require.Empty(t, got.PlayoutState)
 
-	hours, err := f.tracks.PlannedHours(ctx, a)
+	hours, err := f.queries.PlannedHours(ctx, a)
 	require.NoError(t, err)
 	require.Equal(t, &library.HourRange{From: h1, To: h1.Add(3 * time.Hour)}, hours)
 
 	st, err = f.tracks.CueState(ctx, b)
 	require.NoError(t, err)
 	require.True(t, st.Queued)
-	hours, err = f.tracks.PlannedHours(ctx, b)
+	hours, err = f.queries.PlannedHours(ctx, b)
 	require.NoError(t, err)
 	require.Nil(t, hours, "a queued item is not rebuilt")
 
@@ -99,7 +99,7 @@ func TestUpdateKeepsCueAndAnalysis(t *testing.T) {
 
 	// A PUT without the analysis fields changes the title only.
 	require.NoError(t, f.tracks.Update(ctx, id, library.TrackEdit{Title: "Live (edit)", TypeID: f.music}))
-	got, err := f.tracks.Get(ctx, id)
+	got, err := f.queries.Get(ctx, id)
 	require.NoError(t, err)
 	require.Equal(t, cut, got.Cue)
 	require.Equal(t, "music/live.mp3", got.FilePath)
@@ -127,7 +127,7 @@ func TestUsageMarksFiltersAndSort(t *testing.T) {
 	list := func(filter library.TrackFilter) ([]string, int) {
 		t.Helper()
 		filter.Limit = 50
-		ts, total, err := f.tracks.List(ctx, filter)
+		ts, total, err := f.queries.List(ctx, filter)
 		require.NoError(t, err)
 		var titles []string
 		for _, tr := range ts {
@@ -152,7 +152,7 @@ func TestUsageMarksFiltersAndSort(t *testing.T) {
 	titles, _ = list(library.TrackFilter{Sort: library.SortNextPlanned, Desc: true})
 	require.Equal(t, []string{"Later", "Soon", "Queued", "Idle"}, titles, "not planned last in both orders")
 
-	ts, _, err := f.tracks.List(ctx, library.TrackFilter{Limit: 50})
+	ts, _, err := f.queries.List(ctx, library.TrackFilter{Limit: 50})
 	require.NoError(t, err)
 	byTitle := map[string]library.Track{}
 	for _, tr := range ts {

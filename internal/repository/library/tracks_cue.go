@@ -58,7 +58,7 @@ UPDATE tracks SET cue_in_ms = ?, cue_out_ms = ?, fade_in_ms = ?, fade_out_ms = ?
 // PlannedHours returns the range of the built plan hours that hold a
 // planned item of the track: plan_hours holds the plan horizon (48 rows at
 // most), each probed on ix_scheduled_items_track_id_planned_start_utc.
-func (s *Tracks) PlannedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
+func (s *TrackQueries) PlannedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
 	var r struct {
 		First *time.Time
 		Last  *time.Time
@@ -84,7 +84,7 @@ WHERE EXISTS (SELECT 1 FROM scheduled_items si
 // out of scheduled_items into the play log (outage.MarkMissed), so it is
 // read there and is not bounded by the plan horizon; the probe is on
 // ix_play_log_track_id_started_at.
-func (s *Tracks) MissedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
+func (s *TrackQueries) MissedHours(ctx context.Context, id uint64) (*library.HourRange, error) {
 	var r struct {
 		First *time.Time
 		Last  *time.Time

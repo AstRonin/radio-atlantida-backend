@@ -148,7 +148,7 @@ func (s *Service) SetCue(ctx context.Context, id uint64, c Cue) (SetCueResult, e
 	defer cancel()
 	var rebuild *HourRange
 	err := s.tx.WithTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		ts := s.tracks.WithTx(tx)
+		ts, tq := s.tracks.WithTx(tx), s.trackQueries.WithTx(tx)
 		st, err := ts.CueState(ctx, id)
 		if err != nil {
 			return err
@@ -168,13 +168,13 @@ func (s *Service) SetCue(ctx context.Context, id uint64, c Cue) (SetCueResult, e
 		if st.Cue.sameCut(c) {
 			return nil // fades are read when a request is pushed
 		}
-		rebuild, err = ts.PlannedHours(ctx, id)
+		rebuild, err = tq.PlannedHours(ctx, id)
 		return err
 	})
 	if err != nil {
 		return SetCueResult{}, err
 	}
-	t, err := s.tracks.Get(ctx, id)
+	t, err := s.trackQueries.Get(ctx, id)
 	if err != nil {
 		return SetCueResult{}, fmt.Errorf("read track %d: %w", id, err)
 	}

@@ -122,21 +122,24 @@ type Service struct {
 	playlists PlaylistStore
 	artists   ArtistStore
 	tracks    TrackStore
-	files     Files
-	prober    Prober
-	onAir     OnAir
-	emergency EmergencySetting
-	log       *slog.Logger
+	// trackQueries is bound to the same transaction as tracks when both
+	// take part (SetCue).
+	trackQueries TrackQueries
+	files        Files
+	prober       Prober
+	onAir        OnAir
+	emergency    EmergencySetting
+	log          *slog.Logger
 }
 
 // NewService returns the service. onAir tells which track is on air;
 // emergency tells which playlist is the emergency playlist; log is the root
 // logger.
 func NewService(tx TxRunner, types TypeStore, playlists PlaylistStore, artists ArtistStore, tracks TrackStore,
-	files Files, prober Prober, onAir OnAir, emergency EmergencySetting, log *slog.Logger,
+	trackQueries TrackQueries, files Files, prober Prober, onAir OnAir, emergency EmergencySetting, log *slog.Logger,
 ) *Service {
 	return &Service{
-		tx: tx, types: types, playlists: playlists, artists: artists, tracks: tracks,
+		tx: tx, types: types, playlists: playlists, artists: artists, tracks: tracks, trackQueries: trackQueries,
 		files: files, prober: prober, onAir: onAir, emergency: emergency,
 		log: logging.For(log, logging.ComponentAPI),
 	}
