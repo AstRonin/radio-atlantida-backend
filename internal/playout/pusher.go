@@ -119,6 +119,7 @@ func (s *Service) passDone(err error) {
 // pass keeps the link set up and the queues of the hour on air and, within
 // the pre-push window, of the next hour filled.
 func (s *Service) pass(ctx context.Context) error {
+	defer s.shareHold()
 	set, err := s.settings(ctx)
 	if err != nil {
 		return fmt.Errorf("read playout settings: %w", err)
@@ -168,6 +169,14 @@ func (s *Service) pass(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// shareHold copies the pass's holdUntil for Status (the status runs on
+// request goroutines; the pusher state belongs to Run).
+func (s *Service) shareHold() {
+	s.mu.Lock()
+	s.heldUntil = s.push.holdUntil
+	s.mu.Unlock()
 }
 
 // resync runs on a new control connection: Liquidsoap may have restarted

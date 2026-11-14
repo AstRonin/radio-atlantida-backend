@@ -1,8 +1,8 @@
 # Plan — Output State in the Heartbeat (Contract 2) and Plan Alignment After a Liquidsoap Restart (radio-atlantida-backend)
 
-Status: Implemented (2026-11-14). P2 `75c0250` (+ `731ff6e`, an integration test); P1 `bccef39` (script contract 2, backend) + `3b80975` (liqsmoke); "Docs: output state and resync plan status". The dev-stack checks of §5 and the deploy follow-up (§6) are still to do. Deviations: §8. P3 (`held_until`, §6a): approved 2026-11-14, not started.
+Status: Implemented (2026-11-14). P2 `75c0250` (+ `731ff6e`, an integration test); P1 `bccef39` (script contract 2, backend) + `3b80975` (liqsmoke); "Docs: output state and resync plan status". The dev-stack checks of §5 and the deploy follow-up (§6) are still to do. Deviations: §8. P3 (`held_until`, §6a): backend done ("Playout status: held_until while the first item is held after a resync"); the deploy part follows.
 Based on: `docs/tech-design.md` v7-27 (§6.5, §7.1, §8.1, §8.3, §8.10, §11 items 41–42), `docs/phase-9-plan.md` §2 (pusher), `docs/phase-16-plan.md` §2 (broadcast state), `docs/safety-on-air-state-plan.md` (heartbeat field), `docs/deploy-prereqs-plan.md` A2 (contract header), frontend `docs/output-unknown-plan.md`, `radio-atlantida-docs/deploy/docs/dry-run.md`
-Last updated: 2026-11-14 (implemented)
+Last updated: 2026-11-14 (P3 backend implemented)
 
 ## 1. Goal
 
@@ -147,11 +147,11 @@ After each pass, if `s.push.holdUntil` is set, start a `time.Timer` for `max(0, 
 
 **Dry run result (2026-11-14, release 1.0.3 in `radio-dryrun`):** all checks passed (8 of 8 resynced items within ±1 s, 0.33–0.41 s early), except that `radioctl cutover` failed after a successful cut-over: P2's hold leaves the queue empty until the next item's planned start, and `wait_cutover` requires a queued item within 60 s. Fixed by P3.
 
-## 6a. P3 — `held_until` in the playout status (approved 2026-11-14; not started)
+## 6a. P3 — `held_until` in the playout status (approved 2026-11-14; backend done, deploy in progress)
 
 **Problem.** After every Liquidsoap start the pusher holds the first item until its planned start − 500 ms (P2), so the queue stays empty for up to one track. Deploy's `radioctl` treats an empty queue as unhealthy: `wait_cutover` (`bin/radioctl`, about line 2000) needs `(.queued | length) > 0` within 60 s, so `cutover` exits 1 and does not record `cutover_utc` while the stream is on air; `air_check` waits up to 120 s for `queued >= 2`, so an `update` started soon after a Liquidsoap restart can be refused. Accepting any empty queue (or "emergency on air") would hide a real empty plan, so the backend says when an empty queue is intended.
 
-**Backend.**
+**Backend.** Status (2026-11-14): done. Steps 1, 3, 4 done; step 2 (`held_item_id`) not done: `fill` keeps only the due time, and nothing reads the id. As implemented: `pass` copies `push.holdUntil` into `Service.heldUntil` under `Service.mu` when it returns (`shareHold`, deferred, so a failed pass shares the cleared value), and `Status` reads it under the same lock; `TestStatusHeldUntil` (playout) and `TestPlayoutStatusHeldUntil` (handler). JSON: `"held_until":"2026-10-15T06:05:59.5Z"` (RFC 3339 UTC, fractional seconds as Go writes them).
 
 1. `GET /api/playout/status` gets an optional `held_until` (ISO 8601 UTC): set while the pusher holds an item after a resync (`holdUntil` of P2, i.e. planned start − `holdLead`), absent otherwise. Exposed from the pusher state under its existing lock (no new goroutine); the DTO field is optional, so the frontend's generated types change only by the new field (no frontend work; the frontend picks it up at its next `npm run api:sync`).
 2. Optionally also `held_item_id` if it is free to expose; not required.

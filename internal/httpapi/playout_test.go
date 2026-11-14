@@ -176,6 +176,34 @@ func TestPlayoutStatusOutput(t *testing.T) {
 	}
 }
 
+func TestPlayoutStatusHeldUntil(t *testing.T) {
+	t.Parallel()
+	held := time.Date(2026, 10, 15, 6, 5, 59, 500000000, time.UTC)
+	tests := []struct {
+		name string
+		held *time.Time
+		want string
+	}{
+		{name: "nothing held: absent"},
+		{name: "held", held: &held, want: `"2026-10-15T06:05:59.5Z"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := do(t, newPlayoutRouter(fakePlayout{status: playout.Status{HeldUntil: tt.held}}), http.MethodGet, "/api/playout/status")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var got map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			v, ok := got["held_until"]
+			if tt.want == "" {
+				require.False(t, ok, rec.Body.String())
+				return
+			}
+			require.JSONEq(t, tt.want, string(v))
+		})
+	}
+}
+
 func TestPlayoutHeartbeatSafetyField(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

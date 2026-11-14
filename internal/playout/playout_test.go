@@ -517,6 +517,37 @@ func TestResyncAfterLiquidsoapRestart(t *testing.T) {
 	require.Empty(t, h.svc.push.align)
 }
 
+// The status carries the hold (P3, docs/output-state-and-resync-plan.md
+// §6a): deploy's radioctl accepts an empty queue until held_until.
+func TestStatusHeldUntil(t *testing.T) {
+	t.Parallel()
+	status := func(t *testing.T, h *harness) *time.Time {
+		t.Helper()
+		st, err := h.svc.Status(t.Context())
+		require.NoError(t, err)
+		return st.HeldUntil
+	}
+	h := newHarness(t, item(3, 6*time.Minute), item(4, 9*time.Minute))
+	require.Nil(t, status(t, h), "before the first pass")
+	h.now = h10.Add(3*time.Minute + 40*time.Second)
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Empty(t, h.store.queued(), "item 3 is held")
+	require.Equal(t, new(h10.Add(6*time.Minute-holdLead)), status(t, h))
+
+	// A failed pass (control link down) holds nothing.
+	h.ctl.down = true
+	require.Error(t, h.svc.pass(t.Context()))
+	require.Nil(t, status(t, h))
+	h.ctl.down = false
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Equal(t, new(h10.Add(6*time.Minute-holdLead)), status(t, h), "held again on the same connection")
+
+	h.now = h10.Add(6*time.Minute - holdLead)
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Equal(t, []uint64{3, 4}, h.store.queued())
+	require.Nil(t, status(t, h), "dropped after the push")
+}
+
 // The edge cases of the hold after a resync
 // (docs/output-state-and-resync-plan.md P2.5). Every case starts with a
 // resync (the harness's first pass sees a new connection) with empty queues.

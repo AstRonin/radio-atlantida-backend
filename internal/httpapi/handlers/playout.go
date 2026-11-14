@@ -174,6 +174,7 @@ func playoutStatusDTO(st playout.Status) dto.PlayoutStatus {
 		MusicGain:      st.MusicGain,
 		SafetyOnAir:    st.SafetyOnAir,
 		SafetySince:    st.SafetySince,
+		HeldUntil:      st.HeldUntil,
 		Queued:         make([]dto.PlayoutQueuedItem, len(st.Queued)),
 	}
 	if st.Output != nil {

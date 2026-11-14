@@ -140,7 +140,11 @@ type Status struct {
 	SafetyOnAir bool
 	// SafetySince is when it was counted on air; nil when it is not.
 	SafetySince *time.Time
-	Queued      []QueuedItem
+	// HeldUntil is when the item held after a resync is pushed (its planned
+	// start - holdLead): the queue of the hour on air is empty on purpose
+	// until then. Nil when nothing is held.
+	HeldUntil *time.Time
+	Queued    []QueuedItem
 }
 
 // Store persists playout (internal/repository/playout).
@@ -278,6 +282,9 @@ type Service struct {
 	gainPending   bool
 	lastEmergency uint64
 	safety        safetyState
+	// heldUntil is the pusher's holdUntil as of its last pass, shared with
+	// Status; zero when nothing is held.
+	heldUntil time.Time
 }
 
 // NewService returns the service. outputs follows the Icecast output
@@ -332,6 +339,9 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		st.MusicGain = new(*s.gain)
 	}
 	st.SafetyOnAir, st.SafetySince = s.safety.onAir, s.safety.since()
+	if !s.heldUntil.IsZero() {
+		st.HeldUntil = new(s.heldUntil)
+	}
 	return st, nil
 }
 

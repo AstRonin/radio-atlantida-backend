@@ -90,6 +90,7 @@ type PlayoutStatus struct {
 	MusicGain      *float64            `json:"music_gain,omitempty" doc:"The gain last set; absent before the first connect."`
 	SafetyOnAir    bool                `json:"safety_on_air" doc:"The safety tone is on air: two heartbeats in a row reported it. False after the heartbeats are lost."`
 	SafetySince    *time.Time          `json:"safety_since,omitempty" doc:"When the backend counted the safety tone on air; absent when it is not."`
+	HeldUntil      *time.Time          `json:"held_until,omitempty" doc:"After a Liquidsoap (re)start the first item of the hour on air is held until its planned start - 0.5 s, so the hour stays on its plan: until this time the queue is empty on purpose and the emergency source fills the gap. Absent when nothing is held."`
 	Queued         []PlayoutQueuedItem `json:"queued" nullable:"false" doc:"In planned order."`
 }
 
