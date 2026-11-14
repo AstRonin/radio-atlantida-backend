@@ -1,8 +1,8 @@
 # Plan — Output State in the Heartbeat (Contract 2) and Plan Alignment After a Liquidsoap Restart (radio-atlantida-backend)
 
-Status: Approved design (2026-11-14); not started. P2 blocks `v1.0.0`; P1 should ship in `v1.0.0` too (it changes the script contract, which is free before the first release).
+Status: Implemented (2026-11-14). P2 `75c0250` (+ `731ff6e`, an integration test); P1 `bccef39` (script contract 2, backend) + `3b80975` (liqsmoke); "Docs: output state and resync plan status". The dev-stack checks of §5 and the deploy follow-up (§6) are still to do. Deviations: §8.
 Based on: `docs/tech-design.md` v7-27 (§6.5, §7.1, §8.1, §8.3, §8.10, §11 items 41–42), `docs/phase-9-plan.md` §2 (pusher), `docs/phase-16-plan.md` §2 (broadcast state), `docs/safety-on-air-state-plan.md` (heartbeat field), `docs/deploy-prereqs-plan.md` A2 (contract header), frontend `docs/output-unknown-plan.md`, `radio-atlantida-docs/deploy/docs/dry-run.md`
-Last updated: 2026-11-14
+Last updated: 2026-11-14 (implemented)
 
 ## 1. Goal
 
@@ -26,6 +26,8 @@ After this plan, the output state corrects itself every heartbeat and becomes `u
 9. **Order.** P2 lands first and alone (no contract change, no API change). P1 follows; it changes the script, the DTO, the WebSocket event, and the OpenAPI snapshot, so the frontend plan (`output-unknown-plan.md`) follows it.
 
 ## 3. Steps — P2 (resync alignment)
+
+**Status (2026-11-14): done** (75c0250, 731ff6e). Deviations: §8 items 1–4 and 10.
 
 ### P2.1 Pusher state (`internal/playout/pusher.go:41-58`)
 
@@ -77,6 +79,8 @@ After each pass, if `s.push.holdUntil` is set, start a `time.Timer` for `max(0, 
 - `go test -race ./internal/playout/...`.
 
 ## 4. Steps — P1 (output state, contract 2)
+
+**Status (2026-11-14): done** (bccef39; liqsmoke 3b80975). Deviations: §8 items 5–9.
 
 ### P1.1 Script (`dev/liquidsoap/radio.liq`)
 
@@ -146,3 +150,16 @@ After each pass, if `s.push.holdUntil` is set, start a `time.Timer` for `max(0, 
 - **§7.2 gap rule.** "A gap between anchors shorter than `rotation.min_gap_ms` gets no music: the next insert starts earlier within its window, else the gap stays." If the gap stays in the plan, the pusher pushes the insert as soon as the item before it is queued, so it starts early by that gap even without a restart. Verify in the builder (`internal/rotation`) whether such a gap can remain, and if so either close it in the builder or extend P2's hold to every empty-queue case (developer decision 2026-11-14: keep the hold scoped to resync in this plan; decide the extension after the builder check).
 - **A held mount is not an outage.** With the mount held by another source, the mount check is OK and the outage detector opens nothing; after P1 the header says `reconnecting` indefinitely. Developer decision 2026-11-14: a Grafana alert in radio-atlantida-deploy when the broadcast state stays `reconnecting` longer than 2 minutes (a separate small deploy task).
 - Option B (resume the interrupted track), decision 8.
+
+## 8. Deviations (as implemented)
+
+1. **`align` is created in `NewService`**, not in `Run`: `Run` and the test harness both go through the constructor.
+2. **`holdUntil` is cleared at the start of `pass`**, not just before the `fill` loop: a pass that fails before `fill` (link down) would otherwise keep a due time in the past, and `Run`'s timer (`max(0, …)`) would pass again at once, in a loop.
+3. **The `align` entry is dropped after the first successful push**, not before the push loop; and when `markQueued` refuses an item while the hour is still held (rebuilt or started meanwhile), `fill` returns instead of going on to the next item, which would then be pushed early. The next pass holds again on the current plan.
+4. **Tests.** `TestResyncKeepsHourAligned` failed on the old `pusher.go` (insert 2 min early; 8 min with the 10-minute track) and passes now. Its fake Liquidsoap resolves a request at once, so a held item starts `holdLead` early in the simulation and the hour ends `holdLead` early: the "no emergency after the plan resumed" assertion allows that last 0.5 s. The "new resync during the hold" case of `TestResyncHoldEdgeCases` reconnects to a Liquidsoap whose queue still plays (the hold is dropped and the items are pushed).
+5. **Liveness for the silence reset.** `outputBeat` is set at the receipt time (backend clock) by every heartbeat, with or without the output fields, and by every `output` callback, not only by heartbeats with the fields: otherwise a contract 1 script (no fields) would show `unknown` 10 s after every connect although its heartbeats keep coming.
+6. **`output_since` absent.** A heartbeat with `output_connected` and without `output_since` takes the heartbeat time only when the state changes; with the state unchanged the stored `since` is kept (the heartbeat time differs every time and would send `icecast.state` every 5 s). An `output` callback whose time differs from the stored `since` with the same state now sends one event (a reconnect whose disconnect was lost), as a heartbeat does.
+7. **Events under `mu`.** `recordOutput` and `outputExpire` publish `icecast.state` under `Service.mu`, as `setSafetyLocked` does, so the callback goroutine and the pusher send them in the order of the changes.
+8. **Handler tests** are new tests, `TestPlayoutHeartbeatOutputFields` (contract 2 body, an offset `output_since` mapped to UTC, contract 1 body, unknown field `output_state` → 422) and `TestPlayoutStatusOutput` (absent, `connected`, `unknown`); `TestPlayoutHeartbeatSafetyField` is unchanged.
+9. **liqsmoke.** The Icecast stop/start check is a new last step (8) on a plain output `/smoke-heartbeat`: the TLS proxy resolves `icecast` once at its start, so a restarted Icecast could break it for the TLS steps. Icecast comes back with `docker compose up -d --wait icecast`. The stub answers 422 to a body the strict DTO refuses (as the backend), and the run fails on any. First run: 172 callbacks, all accepted.
+10. **An integration test not named in P2.6.** `TestAirWindowOnAir` (`internal/httpapi/airwindow_integration_test.go`) starts a fresh pusher, whose first pass is a resync with an empty queue, so the next item is now held until its planned start − 500 ms; the test clock (fixture time + real time) never reached it within the 10 s wait. The test moves the clock to that moment for the push check and back afterwards (731ff6e). No other test changed behaviour.
