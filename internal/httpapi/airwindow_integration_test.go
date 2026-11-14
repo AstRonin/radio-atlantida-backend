@@ -138,11 +138,18 @@ func TestAirWindowOnAir(t *testing.T) {
 		require.Equal(t, f.items[i+1], *r.ItemID)
 		require.Equal(t, "queued", r.Kind)
 	}
-	// The pusher keeps three items of the hour in Liquidsoap.
+	// The pusher keeps three items of the hour in Liquidsoap. Its first
+	// pass was a resync with an empty queue, so the next item is held until
+	// its planned start - 500 ms (docs/output-state-and-resync-plan.md P2):
+	// the test clock moves there, and the next pass (within 5 s) pushes it.
+	f.clock.set(f.now.Add(4*time.Minute - 500*time.Millisecond))
 	require.Eventually(t, func() bool {
 		q := f.window().Rows[11:]
 		return q[0].InLiquidsoap && q[0].Status == "queued"
 	}, 10*time.Second, 20*time.Millisecond)
+	// Back to the fixture's moment (the clock moves on from there): the rest
+	// reads the window as the manager sees it with the item on air.
+	f.clock.set(f.now)
 
 	// It ends cut short: no now row, and it is the newest played row,
 	// truncated, with the length that aired.
