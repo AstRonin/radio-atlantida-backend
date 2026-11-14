@@ -1,6 +1,6 @@
 # Phase 23 Plan — Playlist Placement Rules, Clock Inserts, No Filler, Separation in Play Rules (radio-atlantida-backend)
 
-Status: Approved by the operator (2026-10-17); not started
+Status: Done (verified 2026-11-15). Commit: 8c06e8c. Frontend counterpart: F21 (5b4da0c).
 Based on: `docs/base.md`, `tech-design.md` (§4, §6.0, §6.2–§6.5, §7, §7.1, §7.2, §7.3), `docs/phase-7-plan.md` (clocks), `docs/phase-8-plan.md` (rotation engine), `docs/phase-10-plan.md` (hour inserts, reschedule), `docs/phase-22-plan.md` (on-air length), frontend `docs/f21-playlist-rules-clock-plan.md`
 Last updated: 2026-10-17
 

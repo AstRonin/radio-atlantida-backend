@@ -1,5 +1,7 @@
 # Track plan up to six months: two recalculations, limits, logs
 
+Status: Done (verified 2026-11-15). Commit: 7901f7e (full pass, pass log, migrations 0015 and 0017).
+
 ## Goal
 
 The grid and the track plan cover up to six months ahead. Two ways keep the

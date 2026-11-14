@@ -1,5 +1,7 @@
 # Artists list paging and sort: backend plan
 
+Status: Done (verified 2026-11-15). Commits: backend 4ca646b; frontend d19ffef, dd7003c.
+
 Frontend counterpart: `frontend/docs/artists-paging-plan.md`.
 
 ## Goal

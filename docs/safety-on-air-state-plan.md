@@ -1,6 +1,6 @@
 # Plan — Report When the Safety Tone Is on Air (radio-atlantida-backend)
 
-Status: Requested by the operator (2026-11-10); not started
+Status: Done (verified 2026-11-15). Commit: 3ea6851. Frontend counterpart: on-air-indicator (28eb7f5).
 Based on: `docs/tech-design.md` (§8.3, §8.6), frontend `docs/on-air-indicator-plan.md`
 Last updated: 2026-11-10
 

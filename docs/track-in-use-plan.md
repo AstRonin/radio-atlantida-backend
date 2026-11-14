@@ -1,5 +1,7 @@
 # Track in use on the track detail: backend plan
 
+Status: Done (verified 2026-11-15). Commits: backend 6cecdf6; frontend a811a49.
+
 ## Goal
 
 The track edit page must disable "Replace file" before the request when the track is in use by a clock insert, a one-time insert, or a plan item that has not aired. Today the page cannot know this: the track response has no usage data, so the refusal (409 `track_in_use`) is only seen after the click.

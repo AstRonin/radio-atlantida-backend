@@ -1,6 +1,6 @@
 # Plan — Refuse to Delete the Emergency Playlist (radio-atlantida-backend)
 
-Status: Written for the operator's review (2026-11-10); not approved, not started
+Status: Done (verified 2026-11-15). Commit: 3ea6851. Frontend counterpart: emergency-playlist-checkbox (28eb7f5).
 Based on: `docs/tech-design.md` (§8.6), frontend `docs/emergency-playlist-checkbox-plan.md`
 Last updated: 2026-11-10
 

@@ -1,6 +1,6 @@
 # Plan — Fix Three Stale Integration Tests (radio-atlantida-backend)
 
-Status: Approved by the operator (2026-11-10); documents of §3.4 updated, tests not started
+Status: Done (verified 2026-11-15). Commits: 7f94022, 7901f7e, 24b786b.
 Based on: `docs/tech-design.md` (import API), `docs/phase-15-plan.md`, `docs/phase-18-plan.md`
 Last updated: 2026-11-10
 

@@ -1,6 +1,6 @@
 # Plan — Deploy Prerequisites: Runtime Stream Output, TLS, Migration Recovery and Downgrade Guard, Multi-arch Release (radio-atlantida-backend)
 
-Status: Approved scope (deploy plan and tech-design v7-24, 2026-11-12). Phase A done (commits 6b270a5, e2b9178, 7214870; see §2.3; dev check A10 passed 2026-11-12; A11 done in 460e8f0, a722b20). Phase B done (137cc5d; B3 dirty-database decision 341702c), Phase C done (37cd98c), Phase D1 done (8efa7bc). A12 (B13, Liquidsoap stays up on an output switch, crash-loop guard) done (a53eba8, 1867efa; §2.5). Next: tag `v1.0.0` (§5 item 9). Deviations: §2.3, §2.4, §2.5.
+Status: Phases A–D and A12 done (verified 2026-11-15; commits 6b270a5 … 1867efa, see §2.3–§2.5). Remaining: the annotated tag `v1.0.0` (§5 item 9). Deviations: §2.3, §2.4, §2.5.
 Based on: `docs/tech-design.md` v7-26 (§1.1, §6.3, §7.1, §8.1, §8.5, §8.8, §9, §9.2, §11 items 32–38), `radio-atlantida-docs/deploy/docs/deploy-init-plan.md` (§5 Phase D3, §6 Phase D4, §7.3, §10, §12 cross-repo tasks B1–B10, B12), frontend `docs/deploy-prereqs-plan.md` (F1–F4)
 Last updated: 2026-11-13
 
@@ -279,7 +279,7 @@ C1–C4: commit 37cd98c.
 
 ## 6. Done when
 
-- `make test`, `make lint`, `make openapi-lint` pass, and `make test-integration` has no failure beyond the known ones (`TestPipeline`, `TestImportFolder`, `TestRotationSimulate`).
+- `make test`, `make lint`, `make openapi-lint` pass, and `make test-integration` has no failure beyond the known ones (`TestPipeline`, `TestImportFolder`, `TestRotationSimulate`). Note (2026-11-15): these three are fixed (24b786b and related commits; see `fix-stale-integration-tests-plan.md`), so `make test-integration` is expected to pass in full.
 - `make liquidsoap-smoke` and the CI job pass for every codec × channels × sample rate, on both sides of every encoder limit, plain and TLS.
 - `PATCH /api/settings` saves a batch all or nothing with one change notification (one `output.set`); a combination over an encoder limit, in a batch or a single-key PUT, is refused with 422 and the field code `encoder_limit` whatever the order of the fields; the limits live in one Go package used by the check and `dev/liqsmoke`, with a unit test against `ENCODER_LIMITS` (A11; done, a722b20, 460e8f0).
 - The script's `OUTPUT_STATE_FILE` default is `/var/cache/liquidsoap/output.json` (A11; done, 460e8f0).

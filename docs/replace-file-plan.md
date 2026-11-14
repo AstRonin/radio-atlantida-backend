@@ -1,5 +1,7 @@
 # Replace track file: plan
 
+Status: Done (verified 2026-11-15). Commits: backend b03ec30; frontend a9dc923.
+
 ## Goal
 
 The file path and the length of a track are no longer edited by hand. A track's file is changed only through one explicit action, Replace file. The action points the track at another file under the media root, re-analyses it, and stores the result in one step.

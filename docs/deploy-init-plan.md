@@ -1,6 +1,6 @@
 # Deploy Initialization Plan (radio-atlantida-deploy)
 
-Status: Phases D1–D7 done (deploy commits c55eb5e … 13b62cd; §0.1). Not yet installed on the production machine: see "Remaining before the first production install" (§0.1). Deviations from the plan text are listed at the end of each phase.
+Status: Phases D1–D7 done (deploy commits c55eb5e … 13b62cd; §0.1). Not yet installed on the production machine: see "Remaining before the first production install" (§0.1; checked 2026-11-15: no `v1.0.0` tags yet, `release.env` digests empty). Deviations from the plan text are listed at the end of each phase.
 Based on: `tech-design.md` v7-26 (§1.1, §3.1, §6.3, §7.1, §8, §9, §10), `base.md`, backend plans `backend-init-plan.md`, `phase-12-plan.md` (live voice), `phase-13-plan.md` (release pipeline), `phase-21-plan.md` (stream metadata, mount charset), `phase-22-plan.md` (cue fades), `safety-on-air-state-plan.md`, `logs-loki-plan.md`; frontend plans `frontend-init-plan.md`, `f12-release-plan.md`, `f13-grafana-link-plan.md`
 Last updated: 2026-11-13
 
@@ -35,8 +35,8 @@ Last updated: 2026-11-13
 
 **Remaining before the first production install:**
 
-1. Backend and frontend annotated tags `v1.0.0` (backend: `git tag -a v1.0.0 -m "migrations: expand"`).
-2. `release.env` with the manifest list digests of both tags, and `scripts/check-backend-sync.sh --update` at the backend tag (rewrites `config/` and `config/backend-source.env`).
+1. Backend and frontend annotated tags `v1.0.0` (backend: `git tag -a v1.0.0 -m "migrations: expand"`). Neither tag exists yet (2026-11-15).
+2. `release.env` with the manifest list digests of both tags, and `scripts/check-backend-sync.sh --update` at the backend tag (rewrites `config/` and `config/backend-source.env`). As of 2026-11-15 the `release.env` digests are empty and `config/` is synced from backend commit `8cf6772`, not from a tag.
 3. The repository variable `GHCR_USER` and the secret `GHCR_READ_TOKEN`, then green CI including the `windows` job.
 4. Revoke the token shared in plain text during planning (11.10) and record the new token's expiry date (runbook §1.6).
 5. Ask the server owner for `<charset>UTF-8</charset>` on `/atlantida` (11.15).
@@ -47,7 +47,7 @@ Last updated: 2026-11-13
    - a stale `install/versions.env` on an engine upgrade: `install.ps1` now compares the Windows copy's pins with `/opt/radio-atlantida/deploy/install/versions.env` in the distribution and stops on a difference before any change; `-UseLocalVersions` overrides (deploy `8ca582e`, runbook §6.3);
    - `GRAFANA_URL` on the same release: `update.bat` re-derives it on every run and, if it changed, rewrites `runtime/applied.env` and recreates only the frontend (deploy `9fe2f24`, runbook §5.4).
    - Also resolved: free-disk minimum 20 GB with `-MinFreeGB` (deploy `560bc62`); no fixed Icecast server in `radioctl`, defaults in `config/stream-defaults.json`, cut-over checks and shows the panel settings, a source-password change is pending maintenance (deploy `1869697`, runbook §10.7).
-10. The database directory on a bind mount, `/srv/radio/pgdata` instead of the named volume (6.11, decided 2026-11-14). Before the first production install, so no production move is needed.
+10. The database directory on a bind mount, `/srv/radio/pgdata` instead of the named volume (6.11, decided 2026-11-14). Before the first production install, so no production move is needed. Done (deploy `85a16c5`).
 
 ## 1. Ground rules
 

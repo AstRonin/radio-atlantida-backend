@@ -1,6 +1,6 @@
 # Phase 22 Plan — Track Cue Points, Waveform, Usage Marks (radio-atlantida-backend)
 
-Status: Implemented in the backend (2026-10-16); emergency dev check and the deploy script copy pending (§10)
+Status: Implemented in the backend (2026-10-16); the deploy script copy is done (deploy `config/liquidsoap/radio.liq` matches backend `dev/`, verified 2026-11-15). Remaining: the emergency source cue/fade dev check (§10).
 Based on: `tech-design.md` (§4 `scheduled_items` and `play_log`, §6 track list, §7 plan, §8.1 requests, §8.5 fades), `docs/phase-9-plan.md` (Liquidsoap requests), `docs/phase-11-plan.md` (analysis, transcode), `docs/phase-20-plan.md` (list filters and sort), `docs/phase-21-plan.md` (annotations, reviewed mark), frontend `docs/f20-track-cue-editor-plan.md`
 Last updated: 2026-10-16
 
@@ -179,7 +179,7 @@ Where the work differs from the draft above, or fills a gap in it:
 
 **Dev check** (§3.2, `savonet/liquidsoap:v2.4.6`, the stream recorded from Icecast and its envelope measured every 250 ms):
 
-- *Found:* with the script as it was (Phase 9), plan items aired as **silence**: `fade.out` with the default `track_sensitive=false` starts one fade on the first frame of the source and never resets it; with `duration=0.` the gain is 0 from then on. A plain 20 s item and a truncated 5 s item recorded silent, the safety tone before and after. The production script in `radio-atlantida-deploy/config/` has the same line and must take the fix.
+- *Found:* with the script as it was (Phase 9), plan items aired as **silence**: `fade.out` with the default `track_sensitive=false` starts one fade on the first frame of the source and never resets it; with `duration=0.` the gain is 0 from then on. A plain 20 s item and a truncated 5 s item recorded silent, the safety tone before and after. The production script in `radio-atlantida-deploy/config/` has the same line and must take the fix (done: deploy `config/liquidsoap/radio.liq` matches backend `dev/`, verified 2026-11-15).
 - *Found:* `fade.in` reads `liq_fade_in` in `on_metadata` but starts in `on_track`; for a track that starts after an empty queue the metadata comes second and the fade is lost (the tone came in at once). The script uses its own fade in (`cue_fade_in`), which takes the duration from the metadata `on_track` passes, and `fade.out(..., track_sensitive=true)`.
 - *Result:* a 60 s tone with clicks at 0 s and 50 s, pushed with `liq_cue_in="5."`, `liq_cue_out="45."`, `liq_fade_in="1."`, `liq_fade_out="2."`: on air for 40 s, rising over 1 s from the start, falling over 2 s to the end; no click (no peak above the tone in any window). Back to back: cue only (10 s, hard edges), cue with fade in, cue with fade out, fades without a cut (whole 20 s): each as annotated.
-- *Pending:* the emergency source with the same annotations end to end (the dev backend on `:8090` was the old build during the check). The emergency source uses the same two fade operators.
+- *Pending (still open 2026-11-15):* the emergency source with the same annotations end to end (the dev backend on `:8090` was the old build during the check). The emergency source uses the same two fade operators.

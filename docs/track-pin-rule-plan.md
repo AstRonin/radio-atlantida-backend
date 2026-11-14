@@ -1,6 +1,6 @@
 # Pin a planned Rule track inside its hour (backend and frontend)
 
-Status: approved by the developer.
+Status: Done (verified 2026-11-15). Commits: backend 21cd83a; frontend 7429496.
 
 Builds on `track-pin-plan.md` (pinning Fill tracks), which must be in place first.
 

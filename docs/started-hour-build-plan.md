@@ -1,6 +1,6 @@
 # Plan — First Build of a Started Hour That Has No Plan (radio-atlantida-backend)
 
-Status: Requested by the operator (2026-11-10); not started
+Status: Done (verified 2026-11-15). Commit: backend 3ea6851; no frontend work.
 Based on: `docs/tech-design.md` (§7, §8.6), `docs/phase-8-plan.md` (sync), `docs/phase-9-plan.md` (freeze), `docs/phase-23-plan.md` (build)
 Last updated: 2026-11-10
 

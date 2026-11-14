@@ -1,6 +1,6 @@
 # Logs in Loki: plan
 
-Status: Approved in principle by the owner (2026-10-28); to be copied into the backend repository after the final check
+Status: Done (verified 2026-11-15). Commits: backend 7f94022, f8d515e; frontend 3922e71.
 Based on: `tech-design.md` (§7.1, §10.1, §10.4, decision 30), `docs/phase-15-plan.md` (Loki and Alloy, files as the source), `docs/phase-14-plan.md` (Grafana, `monitoring` profile), `radio-atlantida-frontend/docs/f11-logs-plan.md` (logs page), `radio-atlantida-frontend/docs/f13-grafana-link-plan.md`
 Companion: `frontend/docs/logs-loki-plan.md`
 Last updated: 2026-10-28

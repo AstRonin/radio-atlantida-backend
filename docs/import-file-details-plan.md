@@ -1,5 +1,7 @@
 # Import file details: backend plan
 
+Status: Done (verified 2026-11-15). Commits: backend 8b1e037; frontend 3b970b4.
+
 ## Goal
 
 The Import page shows what each file is before the manager imports it:

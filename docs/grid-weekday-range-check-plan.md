@@ -1,5 +1,7 @@
 # Grid: refuse a clock assignment whose weekdays do not occur in its dates
 
+Status: Done (verified 2026-11-15). Commits: backend 7901f7e; frontend 7901f7e.
+
 ## Problem
 
 The grid assigns a clock to chosen weekdays and hours for a range of dates

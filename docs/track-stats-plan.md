@@ -1,6 +1,6 @@
 # Plan — Library Statistics and Stored On-Air Length (radio-atlantida-backend)
 
-Status: Approved by the operator (2026-11-10); not started
+Status: Done (verified 2026-11-15). Commit: f8bb8e4. Frontend counterpart: 9c3c080.
 Based on: `docs/tech-design.md` (§4 `tracks`, §6 tracks API), frontend `docs/track-stats-plan.md`
 Last updated: 2026-11-10
 

@@ -1,5 +1,7 @@
 # Track plan simulation for a date range (backend, measurement first)
 
+Status: Done (verified 2026-11-15). Commit: 7901f7e.
+
 ## Goal
 
 Let the operator see how a range of future days would be laid out, without

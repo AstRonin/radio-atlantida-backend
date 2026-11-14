@@ -1,5 +1,7 @@
 # Pin a planned track by dragging it inside its hour (backend and frontend)
 
+Status: Done (verified 2026-11-15). Commits: backend 0c0bfaa; frontend 43c8644.
+
 ## Goal
 
 On the Track plan page the operator drags a planned track to another position
