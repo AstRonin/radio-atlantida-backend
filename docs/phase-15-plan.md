@@ -2,7 +2,7 @@
 
 Status: Code done (verified 2026-11-15). Open manual checks (§6): the "Logs" dashboard, stopping `liquidsoap`, media playing. The §6 checks on `monitoring-down`, the Loki port and reloaded files are superseded by logs-loki-plan.md.
 Superseded in part by logs-loki-plan.md (2026-10-29): the backend pushes its log to Loki, Alloy collects only the playout journal, Loki and Alloy are core services.
-Based on: `tech-design.md` (§7.1 playout journal, §9, §10.1, §10.3, §10.4, decision 30), `docs/phase-14-plan.md` (Grafana, the `monitoring` profile), deploy plan (`radio-atlantida-deploy/docs/deploy-init-plan.md`: D1, D2, D4 step 10a, D5, decision 8.12)
+Based on: `tech-design.md` (§7.1 playout journal, §9, §10.1, §10.3, §10.4, decision 30), `radio-atlantida-docs/archive/backend/phase-14-plan.md` (Grafana, the `monitoring` profile), deploy plan (`radio-atlantida-deploy/docs/deploy-init-plan.md`: D1, D2, D4 step 10a, D5, decision 8.12)
 Last updated: 2026-10-15
 
 ## 1. Goal

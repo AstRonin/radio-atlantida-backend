@@ -1,7 +1,7 @@
 # Plan — Fix Three Stale Integration Tests (radio-atlantida-backend)
 
 Status: Done (verified 2026-11-15). Commits: 7f94022, 7901f7e, 24b786b.
-Based on: `docs/tech-design.md` (import API), `docs/phase-15-plan.md`, `docs/phase-18-plan.md`
+Based on: `docs/tech-design.md` (import API), `docs/phase-15-plan.md`, `radio-atlantida-docs/archive/backend/phase-18-plan.md`
 Last updated: 2026-11-10
 
 ## 1. Goal
@@ -50,7 +50,7 @@ This test returns early without ffmpeg, so run it where ffmpeg is installed, or 
 ### 3.4 Documents (docs repository)
 
 - `tech-design.md`, `POST /api/import`: after "the summary starts with the folder", add that the import counts are followed by `; analysis: ...`, the counts of the analysis of the new tracks (`internal/ingest/import.go:169-171`).
-- `backend/docs/phase-18-plan.md`, the summary paragraph of decision 7: the same addition.
+- `archive/backend/phase-18-plan.md`, the summary paragraph of decision 7: the same addition.
 - `backend/docs/phase-15-plan.md`, decision 7: replace the sentence saying `discover_service_name` and `discover_log_levels` are off. New text: `discover_service_name` is `[job]`, so `service_name` is one-to-one with `job` and adds no streams, and `discover_log_levels` is on, which adds `detected_level` as structured metadata, not an index label. Both are for the Logs Drilldown app.
 
 Push `tech-design.md` to backend, frontend, and deploy, and `phase-15-plan.md` and `phase-18-plan.md` to backend.

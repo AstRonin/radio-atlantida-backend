@@ -20,7 +20,7 @@ Loudness and true peak are out of scope: they need a full decode. The analysis t
 - Import naming (`internal/ingest/import.go`, `internal/ingest/names.go`): title = title tag (`library.CleanTitle`), else the file-name part; artist = form `artist_id`, else artist tag, else the file-name part. `nameParts`: exactly one hyphen (`-`, en dash, em dash) with text on both sides gives "Artist - Title", otherwise the whole name is the title and there is no artist.
 - Probe: `internal/media/probe.go` (`Prober.Probe`, `parseProbe`): duration, format, codec, bitrate, sample rate, channels, title and artist tags; 10 s timeout.
 - Quality check: `internal/ingest/quality.go` `Check` over `Measurements` against `Standard`.
-- `docs/phase-18-plan.md` decision 4: the folder counts compare paths only, without reading files. This stays true. Decision 11 (one media operation at a time) does not apply: the probe is not an operation.
+- `radio-atlantida-docs/archive/backend/phase-18-plan.md` decision 4: the folder counts compare paths only, without reading files. This stays true. Decision 11 (one media operation at a time) does not apply: the probe is not an operation.
 
 ## Design
 

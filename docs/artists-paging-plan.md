@@ -6,7 +6,7 @@ Frontend counterpart: `frontend/docs/artists-paging-plan.md`.
 
 ## Goal
 
-The Artists page and the artist picker must work with thousands of artists. Today `GET /api/artists` returns every artist in one response (`internal/repository/library/artists.go:36-37`: "The library has hundreds of artists, so the list is not paged"). This plan adds offset paging, sort, and a total, following `GET /api/tracks` (`docs/phase-20-plan.md` §2).
+The Artists page and the artist picker must work with thousands of artists. Today `GET /api/artists` returns every artist in one response (`internal/repository/library/artists.go:36-37`: "The library has hundreds of artists, so the list is not paged"). This plan adds offset paging, sort, and a total, following `GET /api/tracks` (`radio-atlantida-docs/archive/backend/phase-20-plan.md` §2).
 
 The delete rule does not change: an artist with tracks is refused with 409 `artist_in_use` (with `used_by`), an artist with play history with 409 `artist_has_history`. Nothing cascades.
 

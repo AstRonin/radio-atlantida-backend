@@ -1,7 +1,7 @@
 # Phase 22 Plan — Track Cue Points, Waveform, Usage Marks (radio-atlantida-backend)
 
 Status: Implemented in the backend (2026-10-16); the deploy script copy is done (deploy `config/liquidsoap/radio.liq` matches backend `dev/`, verified 2026-11-15). Remaining: the emergency source cue/fade dev check (§10).
-Based on: `tech-design.md` (§4 `scheduled_items` and `play_log`, §6 track list, §7 plan, §8.1 requests, §8.5 fades), `docs/phase-9-plan.md` (Liquidsoap requests), `docs/phase-11-plan.md` (analysis, transcode), `docs/phase-20-plan.md` (list filters and sort), `docs/phase-21-plan.md` (annotations, reviewed mark), frontend `docs/f20-track-cue-editor-plan.md`
+Based on: `tech-design.md` (§4 `scheduled_items` and `play_log`, §6 track list, §7 plan, §8.1 requests, §8.5 fades), `radio-atlantida-docs/archive/backend/phase-9-plan.md` (Liquidsoap requests), `radio-atlantida-docs/archive/backend/phase-11-plan.md` (analysis, transcode), `radio-atlantida-docs/archive/backend/phase-20-plan.md` (list filters and sort), `radio-atlantida-docs/archive/backend/phase-21-plan.md` (annotations, reviewed mark), `radio-atlantida-docs/archive/frontend/f20-track-cue-editor-plan.md`
 Last updated: 2026-10-16
 
 ## 1. Goal

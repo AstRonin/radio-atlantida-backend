@@ -1,7 +1,7 @@
 # Plan — First Build of a Started Hour That Has No Plan (radio-atlantida-backend)
 
 Status: Done (verified 2026-11-15). Commit: backend 3ea6851; no frontend work.
-Based on: `docs/tech-design.md` (§7, §8.6), `docs/phase-8-plan.md` (sync), `docs/phase-9-plan.md` (freeze), `docs/phase-23-plan.md` (build)
+Based on: `docs/tech-design.md` (§7, §8.6), `radio-atlantida-docs/archive/backend/phase-8-plan.md` (sync), `radio-atlantida-docs/archive/backend/phase-9-plan.md` (freeze), `docs/phase-23-plan.md` (build)
 Last updated: 2026-11-10
 
 ## 1. Goal
