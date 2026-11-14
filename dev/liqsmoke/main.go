@@ -21,7 +21,12 @@
 //     file, over TLS again;
 //   - after three quick starts in a row (the crash-loop guard of the
 //     script), a start ignores the state file: its output is then applied
-//     by output.set as a change.
+//     by output.set as a change;
+//   - the heartbeat carries the output state (contract 2): connected since
+//     the time of the output callback, not connected while Icecast is
+//     stopped, connected again after it starts;
+//   - every callback decodes into the backend's strict body
+//     (dto.PlayoutCallbackBody, unknown fields refused, as Huma does).
 //
 // Exit code non-zero on any miss. A Liquidsoap container that stops while
 // an output is awaited fails the case at once (an encoder that raises makes
@@ -50,6 +55,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/streamformat"
 )
 
@@ -123,6 +129,48 @@ type stub struct {
 	mu        sync.Mutex
 	output    *output // nil: the output endpoint answers 503
 	connected atomic.Int64
+	// callbacks are the decoded callbacks with the moment they arrived;
+	// badCallbacks the ones the backend's strict body refuses.
+	callbacks    []received
+	badCallbacks []string
+}
+
+// received is a callback as the stub decoded it, and when it arrived.
+type received struct {
+	at   time.Time
+	body dto.PlayoutCallbackBody
+}
+
+// find returns the first callback that arrived after after and matches ok.
+func (s *stub) find(after time.Time, ok func(dto.PlayoutCallbackBody) bool) (received, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.callbacks {
+		if r.at.After(after) && ok(r.body) {
+			return r, true
+		}
+	}
+	return received{}, false
+}
+
+// waitCallback waits until a callback that arrived after after matches ok.
+func (s *stub) waitCallback(ctx context.Context, after time.Time, wait time.Duration, what string,
+	ok func(dto.PlayoutCallbackBody) bool,
+) (received, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		if r, found := s.find(after, ok); found {
+			return r, nil
+		}
+		if time.Now().After(deadline) {
+			return received{}, fmt.Errorf("no %s within %s", what, wait)
+		}
+		select {
+		case <-ctx.Done():
+			return received{}, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func (s *stub) setOutput(o *output) {
@@ -134,11 +182,27 @@ func (s *stub) setOutput(o *output) {
 func (s *stub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/playout/callback":
-		var e struct {
-			Event     string `json:"event"`
-			Connected bool   `json:"connected"`
+		// Strict, as the backend: a field the DTO does not know is refused
+		// (422 from Huma), so script and backend drift is caught here.
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		var e dto.PlayoutCallbackBody
+		if err == nil {
+			dec := json.NewDecoder(strings.NewReader(string(raw)))
+			dec.DisallowUnknownFields()
+			err = dec.Decode(&e)
 		}
-		if json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&e) == nil && e.Event == "output" && e.Connected {
+		s.mu.Lock()
+		if err != nil {
+			s.badCallbacks = append(s.badCallbacks, fmt.Sprintf("%s: %v", raw, err))
+		} else {
+			s.callbacks = append(s.callbacks, received{at: time.Now(), body: e})
+		}
+		s.mu.Unlock()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		if e.Event == "output" && e.Connected {
 			s.connected.Add(1)
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -331,12 +395,81 @@ func run(ctx context.Context, c config) error {
 	}
 	pass("crash-loop guard: after three quick starts the environment output, then output.set applies")
 
+	// 8. The output state in the heartbeat (contract 2), on a plain output:
+	// the TLS proxy resolves Icecast once at its start.
+	if err = heartbeatOutput(ctx, c, st, ctl, plain("/smoke-heartbeat", "mp3", 128, 44100, 2)); err != nil {
+		return fmt.Errorf("heartbeat output state: %w", err)
+	}
+	pass("heartbeat carries the output state")
+
+	st.mu.Lock()
+	strictErrs, total := st.badCallbacks, len(st.callbacks)
+	st.mu.Unlock()
+	if len(strictErrs) > 0 {
+		return fmt.Errorf("%d callbacks refused by the backend's strict body, first: %s", len(strictErrs), strictErrs[0])
+	}
+	pass(fmt.Sprintf("%d callbacks, all accepted by the backend's strict body", total))
+
 	if st.connected.Load() == 0 {
 		return errors.New("no output connected callback arrived")
 	}
 	pass(fmt.Sprintf("%d output connected callbacks", st.connected.Load()))
 	fmt.Println("liqsmoke: PASS")
 	return nil
+}
+
+// heartbeatWait is how long a heartbeat with an expected output state may
+// take: the script sends one every 5 s; an output reconnects within about a
+// second (on_error restarts it after 1 s).
+const heartbeatWait = 20 * time.Second
+
+// heartbeatOutput checks the output fields of the heartbeat: after o
+// connects, a heartbeat says connected since the time of its output
+// callback; with Icecast stopped, not connected; after Icecast starts again,
+// connected.
+func heartbeatOutput(ctx context.Context, c config, st *stub, ctl *telnet, o output) error {
+	t0 := time.Now()
+	if err := expectReply(ctl, o, "OK applied"); err != nil {
+		return err
+	}
+	if err := waitOutput(ctx, c, o); err != nil {
+		return err
+	}
+	up, err := st.waitCallback(ctx, t0, heartbeatWait, "output connected callback",
+		func(b dto.PlayoutCallbackBody) bool { return b.Event == "output" && b.Connected })
+	if err != nil {
+		return err
+	}
+	if _, err = st.waitCallback(ctx, up.at, heartbeatWait, "heartbeat with output_connected true since "+up.body.Time.String(),
+		func(b dto.PlayoutCallbackBody) bool {
+			return b.Event == "heartbeat" && b.OutputConnected != nil && *b.OutputConnected &&
+				b.OutputSince != nil && b.OutputSince.Equal(up.body.Time)
+		}); err != nil {
+		return err
+	}
+
+	t1 := time.Now()
+	if err = docker(ctx, c, "stop", "icecast"); err != nil {
+		return err
+	}
+	if _, err = st.waitCallback(ctx, t1, heartbeatWait, "heartbeat with output_connected false",
+		func(b dto.PlayoutCallbackBody) bool {
+			return b.Event == "heartbeat" && b.OutputConnected != nil && !*b.OutputConnected && b.OutputSince != nil
+		}); err != nil {
+		return err
+	}
+
+	t2 := time.Now()
+	if err = docker(ctx, c, "up", "-d", "--wait", "icecast"); err != nil {
+		return err
+	}
+	if _, err = st.waitCallback(ctx, t2, heartbeatWait, "heartbeat with output_connected true after Icecast started",
+		func(b dto.PlayoutCallbackBody) bool {
+			return b.Event == "heartbeat" && b.OutputConnected != nil && *b.OutputConnected
+		}); err != nil {
+		return err
+	}
+	return waitOutput(ctx, c, o)
 }
 
 // rapidSwitchCount is how many outputs rapidSwitches applies, rapidSwitchGap
