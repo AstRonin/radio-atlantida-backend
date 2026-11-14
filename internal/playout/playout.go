@@ -282,6 +282,7 @@ func NewService(tx TxRunner, store Store, ctl Control, settings SettingsFunc, pu
 		tx: tx, store: store, ctl: ctl, settings: settings, pub: pub, outputs: outputs,
 		log: logging.For(log, logging.ComponentLiquidsoap), now: now, rnd: rnd,
 		wake: make(chan struct{}, 1),
+		push: pusherState{align: map[time.Time]bool{}},
 	}
 }
 

@@ -3,10 +3,12 @@ package playout
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -430,11 +432,13 @@ func TestPassFillsLookahead(t *testing.T) {
 func TestPassSkipsLateItems(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, item(1, 0), item(2, 3*time.Minute), item(3, 6*time.Minute), item(4, 9*time.Minute))
+	h.svc.push.gen = 1                              // no resync: the late rules only
 	h.now = h10.Add(3*time.Minute + 40*time.Second) // item 2 is 40 s late
 	require.NoError(t, h.svc.pass(t.Context()))
 	require.Equal(t, []uint64{3, 4}, h.store.queued(), "no catch-up")
 
 	h2 := newHarness(t, item(1, 0), item(2, 3*time.Minute))
+	h2.svc.push.gen = 1
 	h2.now = h10.Add(3*time.Minute + 10*time.Second)
 	require.NoError(t, h2.svc.pass(t.Context()))
 	require.Equal(t, []uint64{2}, h2.store.queued(), "a little late is still pushed")
@@ -485,8 +489,102 @@ func TestResyncAfterLiquidsoapRestart(t *testing.T) {
 	h.ctl.vars = map[string]string{}
 	require.NoError(t, h.svc.pass(t.Context()))
 	require.Len(t, h.ctl.pushed["hour_0"], 2, "items 1 and 2 are pushed again")
+	require.True(t, h.svc.push.holdUntil.IsZero(), "item 1 is due: pushed at once, nothing held")
 	require.Equal(t, "0.2", h.ctl.vars[varMusicGain], "the live gain survives a reconnect")
 	require.Equal(t, "0.", h.ctl.vars[varHourShift])
+
+	// A restart when the next item is in the future: item 1 (0:00-3:00)
+	// ended, item 2 (3:00) started, items 3 and 4 were queued.
+	c, d := item(3, 6*time.Minute), item(4, 9*time.Minute)
+	c.Queued, d.Queued = true, true
+	h = newHarness(t, c, d)
+	h.svc.push.gen = 1
+	h.ctl.gen = 2
+	h.now = h10.Add(3*time.Minute + 40*time.Second)
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Empty(t, h.ctl.pushed["hour_0"], "item 3 is held until its planned start")
+	require.Empty(t, h.store.queued())
+	require.Equal(t, h10.Add(6*time.Minute-holdLead), h.svc.push.holdUntil)
+	h.now = h10.Add(6*time.Minute - 600*time.Millisecond)
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Empty(t, h.ctl.pushed["hour_0"], "still held")
+	h.now = h10.Add(6*time.Minute - holdLead)
+	require.NoError(t, h.svc.pass(t.Context()))
+	require.Equal(t, []uint64{3, 4}, h.store.queued(), "the held item and the rest of the lookahead")
+	require.True(t, h.svc.push.holdUntil.IsZero())
+	require.Empty(t, h.svc.push.align)
+}
+
+// The edge cases of the hold after a resync
+// (docs/output-state-and-resync-plan.md P2.5). Every case starts with a
+// resync (the harness's first pass sees a new connection) with empty queues.
+func TestResyncHoldEdgeCases(t *testing.T) {
+	t.Parallel()
+	pass := func(t *testing.T, h *harness, at time.Duration) {
+		t.Helper()
+		h.now = h10.Add(at)
+		require.NoError(t, h.svc.pass(t.Context()))
+	}
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"held item late by 10 s: pushed at once", func(t *testing.T) {
+			h := newHarness(t, item(2, 3*time.Minute), item(3, 6*time.Minute))
+			pass(t, h, 3*time.Minute+10*time.Second)
+			require.Equal(t, []uint64{2, 3}, h.store.queued())
+			require.True(t, h.svc.push.holdUntil.IsZero())
+		}},
+		{"held item late by 40 s: skipped, the next one held", func(t *testing.T) {
+			h := newHarness(t, item(2, 3*time.Minute), item(3, 6*time.Minute))
+			pass(t, h, 3*time.Minute+40*time.Second)
+			require.Empty(t, h.store.queued())
+			require.Equal(t, h10.Add(6*time.Minute-holdLead), h.svc.push.holdUntil)
+		}},
+		{"the next hour in the pre-push window is pushed during the hold", func(t *testing.T) {
+			h := newHarness(t, item(1, 54*time.Minute), item(2, 57*time.Minute), item(3, 60*time.Minute))
+			pass(t, h, 55*time.Minute+30*time.Second)
+			require.Empty(t, h.ctl.pushed["hour_0"])
+			require.Len(t, h.ctl.pushed["hour_1"], 1, "the next hour starts by the script's switch")
+			require.Equal(t, h10.Add(57*time.Minute-holdLead), h.svc.push.holdUntil)
+		}},
+		{"a new connection during the hold decides again", func(t *testing.T) {
+			h := newHarness(t, item(3, 6*time.Minute), item(4, 9*time.Minute))
+			pass(t, h, 3*time.Minute+40*time.Second)
+			require.NotZero(t, h.svc.push.holdUntil)
+			// A reconnect to a Liquidsoap whose queue still plays.
+			h.ctl.gen++
+			h.ctl.queues["hour_0"] = []int{42}
+			pass(t, h, 4*time.Minute)
+			require.Empty(t, h.svc.push.align)
+			require.True(t, h.svc.push.holdUntil.IsZero())
+			require.Equal(t, []uint64{3, 4}, h.store.queued(), "no hold: the queue plays on its own")
+		}},
+		{"a rebuilt hour moves the due time", func(t *testing.T) {
+			h := newHarness(t, item(3, 6*time.Minute), item(4, 9*time.Minute))
+			pass(t, h, 3*time.Minute+40*time.Second)
+			h.store.mu.Lock()
+			h.store.items = []Item{item(30, 7*time.Minute), item(40, 10*time.Minute)}
+			h.store.mu.Unlock()
+			pass(t, h, 6*time.Minute-holdLead)
+			require.Empty(t, h.store.queued())
+			require.Equal(t, h10.Add(7*time.Minute-holdLead), h.svc.push.holdUntil)
+		}},
+		{"a pass after the hour boundary drops the old hour", func(t *testing.T) {
+			h := newHarness(t, item(1, 54*time.Minute))
+			pass(t, h, 58*time.Minute)
+			require.True(t, h.svc.push.align[h10], "nothing can air; the hour stays held")
+			require.True(t, h.svc.push.holdUntil.IsZero())
+			pass(t, h, 60*time.Minute+10*time.Second)
+			require.Empty(t, h.svc.push.align)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.run(t)
+		})
+	}
 }
 
 func TestPassLinkDown(t *testing.T) {
@@ -654,4 +752,135 @@ func TestEmergency(t *testing.T) {
 		TrackID: 1, Source: SourceEmergency, Status: "aired", StartedAt: h10, EndedAt: h10.Add(5 * time.Second),
 		ActualDurationMS: 5000,
 	}, h.pub.events[1].(ws.TrackEndedEvent).Data)
+}
+
+// airSim is a fake Liquidsoap that plays what the pusher queued in hour_0:
+// a request starts at max(its push, the end of the one before); with the
+// queue empty the emergency source plays, and a pushed item takes over from
+// it at once (automation_main is track_sensitive=false).
+type airSim struct {
+	h       *harness
+	lengths map[uint64]time.Duration
+	// next is the first request of hour_0 not played yet.
+	next int
+	// playing is the plan item on air; 0: the emergency source or nothing.
+	playing uint64
+	until   time.Time
+	starts  map[uint64]time.Time
+	// emergency are the moments the emergency source was on air.
+	emergency []time.Time
+}
+
+func (a *airSim) step(t *testing.T, alive bool) {
+	t.Helper()
+	now := a.h.now
+	if !alive {
+		a.playing = 0
+		return
+	}
+	if a.playing != 0 && !now.Before(a.until) {
+		a.playing = 0
+	}
+	pushed := a.h.ctl.pushed["hour_0"]
+	if a.playing == 0 && a.next < len(pushed) {
+		uri := pushed[a.next]
+		a.next++
+		a.h.ctl.queues["hour_0"] = a.h.ctl.queues["hour_0"][1:]
+		var id uint64
+		_, err := fmt.Sscanf(uri[strings.Index(uri, `item_id="`)+len(`item_id="`):], "%d", &id)
+		require.NoError(t, err)
+		a.playing, a.until, a.starts[id] = id, now.Add(a.lengths[id]), now
+		require.NoError(t, a.h.svc.Callback(t.Context(), Event{Kind: EventStart, Source: SourcePlan, ItemID: new(id), Time: now}))
+	}
+	if a.playing == 0 {
+		a.emergency = append(a.emergency, now)
+	}
+}
+
+// TestResyncKeepsHourAligned: Liquidsoap dies at 01:00 and comes back with
+// empty queues at 10:00; the rest of the hour, with a one-time insert at
+// 30:00, airs at its planned seconds (docs/output-state-and-resync-plan.md
+// P2). Before the fix the first item after the restart was pushed at once
+// and the whole hour moved early by up to the length of a track.
+func TestResyncKeepsHourAligned(t *testing.T) {
+	t.Parallel()
+	const insert = uint64(100)
+	plan := func(lengths ...time.Duration) ([]Item, map[uint64]time.Duration) {
+		var items []Item
+		byID := map[uint64]time.Duration{}
+		at := time.Duration(0)
+		for i, l := range lengths {
+			id := uint64(i + 1)
+			if at == 30*time.Minute {
+				id = insert
+			}
+			it := item(id, at)
+			it.OutMS = int(l / time.Millisecond)
+			items, byID[id] = append(items, it), l
+			at += l
+		}
+		require.Equal(t, time.Hour, at)
+		return items, byID
+	}
+	threes := func(n int) []time.Duration { return slices.Repeat([]time.Duration{3 * time.Minute}, n) }
+	tests := []struct {
+		name    string
+		lengths []time.Duration
+	}{
+		{"3-minute items", threes(20)},
+		{
+			"a 10-minute track planned over the restart",
+			slices.Concat(threes(2), []time.Duration{2 * time.Minute, 10 * time.Minute}, threes(4), threes(10)),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			items, lengths := plan(tt.lengths...)
+			h := newHarness(t, slices.Clone(items)...)
+			h.now = h10
+			sim := &airSim{h: h, lengths: lengths, starts: map[uint64]time.Time{}}
+			down, back := h10.Add(time.Minute), h10.Add(10*time.Minute)
+			var nextPass time.Time
+			for ; h.now.Before(h10.Add(time.Hour)); h.now = h.now.Add(100 * time.Millisecond) {
+				alive := h.now.Before(down) || !h.now.Before(back)
+				if h.now.Equal(back) { // a new Liquidsoap: new connection, empty queues
+					h.ctl.gen++
+					h.ctl.queues, h.ctl.pushed, sim.next = map[string][]int{}, map[string][]string{}, 0
+				}
+				h.ctl.down = !alive
+				hold := h.svc.push.holdUntil
+				if !h.now.Before(nextPass) || (!hold.IsZero() && !h.now.Before(hold)) {
+					err := h.svc.pass(t.Context())
+					if alive {
+						require.NoError(t, err)
+					}
+					nextPass = h.now.Add(passInterval)
+				}
+				sim.step(t, alive)
+			}
+
+			require.Contains(t, sim.starts, insert)
+			require.WithinDuration(t, h10.Add(30*time.Minute), sim.starts[insert], time.Second, "the insert airs at its planned second")
+			var resumed time.Time
+			for id, at := range sim.starts {
+				require.WithinDuration(t, items[slices.IndexFunc(items, func(it Item) bool { return it.ID == id })].Start, at, time.Second,
+					"item %d airs at its planned start", id)
+				if !at.Before(back) && (resumed.IsZero() || at.Before(resumed)) {
+					resumed = at
+				}
+			}
+			require.False(t, resumed.IsZero())
+			require.LessOrEqual(t, resumed.Sub(back), 10*time.Minute, "the plan resumes within one track")
+			// The fake resolves a request at once, so the held item starts
+			// holdLead early and the hour ends holdLead early.
+			for _, at := range sim.emergency {
+				require.True(t, at.Before(resumed) || !at.Before(h10.Add(time.Hour-holdLead)),
+					"no emergency fill after the plan resumed (at %s)", at.Sub(h10))
+			}
+			last := items[len(items)-1]
+			require.Contains(t, sim.starts, last.ID)
+			require.False(t, sim.starts[last.ID].Add(lengths[last.ID]).After(h10.Add(time.Hour)), "the hour ends on its plan")
+		})
+	}
 }
