@@ -129,6 +129,7 @@ func (s *Service) pass(ctx context.Context) error {
 	s.push.holdUntil = time.Time{}
 	// Before the link: heartbeats are lost exactly when Liquidsoap is gone.
 	s.safetyExpire(now, set.HeartbeatTimeout)
+	s.outputExpire(now, set.HeartbeatTimeout)
 	cur := hourStart(now, set.Location)
 	// An hour that ended while its first item was held needs no alignment:
 	// the next hour starts at the boundary by the script's switch.

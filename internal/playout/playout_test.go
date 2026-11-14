@@ -260,12 +260,14 @@ func (p *publisher) Publish(e any) {
 type outputs struct {
 	mu      sync.Mutex
 	reports []bool
+	ats     []time.Time
 }
 
-func (o *outputs) OnOutput(_ context.Context, connected bool, _ time.Time) {
+func (o *outputs) OnOutput(_ context.Context, connected bool, at time.Time) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.reports = append(o.reports, connected)
+	o.ats = append(o.ats, at)
 }
 
 var yerevan = mustLoad("Asia/Yerevan")
@@ -703,11 +705,184 @@ func TestOutputCallback(t *testing.T) {
 	require.NoError(t, h.svc.Callback(ctx, Event{Kind: EventOutput, Time: h10.Add(time.Second), Connected: false}))
 	require.Len(t, h.pub.events, 2, "only changes are sent")
 	require.Equal(t, ws.IcecastDisconnected, h.pub.events[1].(ws.IcecastStateEvent).Data.State)
+	require.Equal(t, ws.IcecastStateEvent{
+		Type: ws.EventIcecastState, Time: h10, Data: ws.IcecastStateData{State: ws.IcecastConnected},
+	}, h.pub.events[0], "the event time is the reported time")
 	require.Equal(t, []bool{true, true, false}, h.out.reports, "every report goes on to the broadcast state")
 	st, err := h.svc.Status(ctx)
 	require.NoError(t, err)
-	require.False(t, st.Output.Connected)
+	require.Equal(t, ws.IcecastDisconnected, st.Output.State)
 	require.Equal(t, h10.Add(time.Second), st.Output.Since)
+}
+
+// icecastStates returns the states of the icecast.state events sent.
+func icecastStates(h *harness) []string {
+	h.pub.mu.Lock()
+	defer h.pub.mu.Unlock()
+	var got []string
+	for _, e := range h.pub.events {
+		if ev, ok := e.(ws.IcecastStateEvent); ok {
+			got = append(got, ev.Data.State)
+		}
+	}
+	return got
+}
+
+// The output state in the heartbeat (contract 2,
+// docs/output-state-and-resync-plan.md P1).
+func TestHeartbeatOutput(t *testing.T) {
+	t.Parallel()
+	since := h10.Add(-time.Hour)
+	beat := func(n int, connected *bool, since *time.Time) Event {
+		return Event{
+			Kind: EventHeartbeat, Time: h10.Add(time.Duration(n) * 5 * time.Second), OutputConnected: connected, OutputSince: since,
+		}
+	}
+	tests := []struct {
+		name        string
+		events      []Event
+		wantState   string // empty: absent
+		wantSince   time.Time
+		wantEvents  []string
+		wantReports []bool
+	}{
+		{
+			name: "after a backend start the first heartbeat sets the state", events: []Event{beat(1, new(true), &since)},
+			wantState: ws.IcecastConnected, wantSince: since, wantEvents: []string{"connected"}, wantReports: []bool{true},
+		},
+		{
+			name:      "repeated identical heartbeats send nothing but reach the broadcast state",
+			events:    []Event{beat(1, new(true), &since), beat(2, new(true), &since), beat(3, new(true), &since)},
+			wantState: ws.IcecastConnected, wantSince: since, wantEvents: []string{"connected"}, wantReports: []bool{true, true, true},
+		},
+		{
+			name:      "false after true sends disconnected",
+			events:    []Event{beat(1, new(true), &since), beat(2, new(false), new(h10.Add(8*time.Second)))},
+			wantState: ws.IcecastDisconnected, wantSince: h10.Add(8 * time.Second),
+			wantEvents: []string{"connected", "disconnected"}, wantReports: []bool{true, false},
+		},
+		{
+			name:      "the same state with a newer since sends one event",
+			events:    []Event{beat(1, new(true), &since), beat(2, new(true), new(h10.Add(7*time.Second)))},
+			wantState: ws.IcecastConnected, wantSince: h10.Add(7 * time.Second),
+			wantEvents: []string{"connected", "connected"}, wantReports: []bool{true, true},
+		},
+		{name: "a heartbeat without the fields changes nothing", events: []Event{beat(1, nil, nil)}},
+		{
+			name:      "without output_since: the heartbeat time, kept while the state holds",
+			events:    []Event{beat(1, new(false), nil), beat(2, new(false), nil)},
+			wantState: ws.IcecastDisconnected, wantSince: h10.Add(5 * time.Second),
+			wantEvents: []string{"disconnected"}, wantReports: []bool{false, false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			for _, e := range tt.events {
+				require.NoError(t, h.svc.Callback(t.Context(), e))
+			}
+			st, err := h.svc.Status(t.Context())
+			require.NoError(t, err)
+			if tt.wantState == "" {
+				require.Nil(t, st.Output)
+			} else {
+				require.Equal(t, Output{State: tt.wantState, Since: tt.wantSince}, *st.Output)
+			}
+			require.Equal(t, tt.wantEvents, icecastStates(h))
+			require.Equal(t, tt.wantReports, h.out.reports)
+			for i, at := range h.out.ats {
+				require.Equal(t, tt.events[i].Time, at, "the broadcast state gets the heartbeat time")
+			}
+		})
+	}
+}
+
+func TestOutputExpire(t *testing.T) {
+	t.Parallel()
+	const timeout = 10 * time.Second
+	connected := Event{Kind: EventHeartbeat, OutputConnected: new(true), OutputSince: new(h10.Add(-time.Hour))}
+	tests := []struct {
+		name       string
+		first      *Event // nil: no report before the silence
+		wait       time.Duration
+		linkDown   bool
+		after      bool // a heartbeat with the state after the silence
+		wantState  string
+		wantEvents []string
+	}{
+		{
+			name: "silent past the timeout: unknown", first: &connected, wait: timeout + time.Second,
+			wantState: ws.IcecastUnknown, wantEvents: []string{"connected", "unknown"},
+		},
+		{
+			name: "exactly the timeout is not silent", first: &connected, wait: timeout,
+			wantState: ws.IcecastConnected, wantEvents: []string{"connected"},
+		},
+		{
+			name: "the link down does not stop the reset", first: &connected, wait: timeout + time.Second, linkDown: true,
+			wantState: ws.IcecastUnknown, wantEvents: []string{"connected", "unknown"},
+		},
+		{name: "nothing before the first heartbeat", wait: timeout + time.Second},
+		{
+			name: "an output callback alone expires too", wait: timeout + time.Second,
+			first:     &Event{Kind: EventOutput, Connected: true},
+			wantState: ws.IcecastUnknown, wantEvents: []string{"connected", "unknown"},
+		},
+		{
+			name: "a heartbeat after the reset restores the state", first: &connected, wait: timeout + time.Second, after: true,
+			wantState: ws.IcecastConnected, wantEvents: []string{"connected", "unknown", "connected"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.set.HeartbeatTimeout = timeout
+			if tt.first != nil {
+				e := *tt.first
+				e.Time = h.now
+				require.NoError(t, h.svc.Callback(t.Context(), e))
+			}
+			h.now = h.now.Add(tt.wait)
+			h.ctl.down = tt.linkDown
+			err := h.svc.pass(t.Context())
+			if tt.linkDown {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			_ = h.svc.pass(t.Context()) // a second pass sends nothing more
+			if tt.after {
+				e := connected
+				e.Time = h.now
+				require.NoError(t, h.svc.Callback(t.Context(), e))
+			}
+			st, err := h.svc.Status(t.Context())
+			require.NoError(t, err)
+			if tt.wantState == "" {
+				require.Nil(t, st.Output)
+			} else {
+				require.Equal(t, tt.wantState, st.Output.State)
+			}
+			if tt.wantState == ws.IcecastUnknown {
+				require.Equal(t, h.now, st.Output.Since, "since: when the silence was found")
+			}
+			require.Equal(t, tt.wantEvents, icecastStates(h))
+		})
+	}
+
+	// Heartbeats without the fields (a contract 1 script) keep an output
+	// callback's state alive.
+	h := newHarness(t)
+	h.set.HeartbeatTimeout = timeout
+	require.NoError(t, h.svc.Callback(t.Context(), Event{Kind: EventOutput, Time: h.now, Connected: true}))
+	for range 5 {
+		h.now = h.now.Add(5 * time.Second)
+		require.NoError(t, h.svc.Callback(t.Context(), Event{Kind: EventHeartbeat, Time: h.now}))
+		require.NoError(t, h.svc.pass(t.Context()))
+	}
+	require.Equal(t, []string{"connected"}, icecastStates(h))
 }
 
 func TestEmergency(t *testing.T) {

@@ -94,6 +94,88 @@ func TestPlayoutOutput(t *testing.T) {
 	require.NotContains(t, strings.ToLower(rec.Body.String()), "password")
 }
 
+// The output state in the heartbeat (contract 2): optional fields, and a
+// strict body, which is why a new field is a contract change.
+func TestPlayoutHeartbeatOutputFields(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		body          string
+		wantCode      int
+		wantConnected *bool
+		wantSince     *time.Time
+	}{
+		{
+			name:     "contract 2",
+			body:     `{"event":"heartbeat","time":"2026-10-15T06:00:05Z","safety_on_air":false,"output_connected":true,"output_since":"2026-10-15T05:00:00Z"}`,
+			wantCode: http.StatusNoContent, wantConnected: new(true), wantSince: new(time.Date(2026, 10, 15, 5, 0, 0, 0, time.UTC)),
+		},
+		{
+			name:     "contract 2, not connected, offset time in UTC",
+			body:     `{"event":"heartbeat","time":"2026-10-15T06:00:05Z","output_connected":false,"output_since":"2026-10-15T09:00:00+04:00"}`,
+			wantCode: http.StatusNoContent, wantConnected: new(false), wantSince: new(time.Date(2026, 10, 15, 5, 0, 0, 0, time.UTC)),
+		},
+		{name: "contract 1: no fields", body: `{"event":"heartbeat","time":"2026-10-15T06:00:05Z","safety_on_air":true}`, wantCode: http.StatusNoContent},
+		{
+			name:     "an unknown field is refused",
+			body:     `{"event":"heartbeat","time":"2026-10-15T06:00:05Z","output_state":"x"}`,
+			wantCode: http.StatusUnprocessableEntity,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := fakePlayout{events: make(chan playout.Event, 1)}
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/playout/callback", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			newPlayoutRouter(f).ServeHTTP(rec, req)
+			require.Equal(t, tt.wantCode, rec.Code, rec.Body.String())
+			if tt.wantCode != http.StatusNoContent {
+				require.Empty(t, f.events)
+				return
+			}
+			e := <-f.events
+			require.Equal(t, playout.EventHeartbeat, e.Kind)
+			require.Equal(t, tt.wantConnected, e.OutputConnected)
+			require.Equal(t, tt.wantSince, e.OutputSince)
+			if e.OutputSince != nil {
+				require.Equal(t, time.UTC, e.OutputSince.Location())
+			}
+		})
+	}
+}
+
+func TestPlayoutStatusOutput(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 10, 15, 6, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		output *playout.Output
+		want   string
+	}{
+		{name: "unknown after a backend start: absent", want: `null`},
+		{name: "connected", output: &playout.Output{State: "connected", Since: since}, want: `{"state":"connected","since":"2026-10-15T06:00:00Z"}`},
+		{name: "unknown after a silence", output: &playout.Output{State: "unknown", Since: since}, want: `{"state":"unknown","since":"2026-10-15T06:00:00Z"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := do(t, newPlayoutRouter(fakePlayout{status: playout.Status{Output: tt.output}}), http.MethodGet, "/api/playout/status")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var got struct {
+				Output json.RawMessage `json:"output"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			if tt.want == `null` {
+				require.Nil(t, got.Output)
+				return
+			}
+			require.JSONEq(t, tt.want, string(got.Output))
+		})
+	}
+}
+
 func TestPlayoutHeartbeatSafetyField(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

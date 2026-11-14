@@ -19,6 +19,10 @@ type PlayoutCallbackBody struct {
 	// SafetyOnAir is a pointer: a script that does not report it means
 	// unknown, not false.
 	SafetyOnAir *bool `json:"safety_on_air,omitempty" doc:"heartbeat: the safety tone is on air. Absent: unknown, nothing changes."`
+	// OutputConnected and OutputSince are optional: a contract 1 script
+	// (until the next maintenance) does not send them.
+	OutputConnected *bool      `json:"output_connected,omitempty" doc:"heartbeat: the Icecast output is connected (contract 2). Absent: unknown, nothing changes."`
+	OutputSince     *time.Time `json:"output_since,omitempty" doc:"heartbeat: when the output last changed state (UTC). Absent: the heartbeat time."`
 }
 
 // StreamOutputConfig is the stream output Liquidsoap applies (the stream.*
@@ -47,8 +51,8 @@ type PlayoutLink struct {
 
 // PlayoutOutput is the Icecast output state reported by Liquidsoap.
 type PlayoutOutput struct {
-	State string    `json:"state" enum:"connected,disconnected"`
-	Since time.Time `json:"since"`
+	State string    `json:"state" enum:"connected,disconnected,unknown" doc:"unknown: no heartbeat from Liquidsoap for longer than outage.heartbeat_timeout_seconds."`
+	Since time.Time `json:"since" doc:"When the state last changed: the time Liquidsoap reported, or when the heartbeat was found silent (unknown)."`
 }
 
 // NowPlaying is the track on air.
@@ -80,7 +84,7 @@ type PlayoutQueuedItem struct {
 // PlayoutStatus is the playout state.
 type PlayoutStatus struct {
 	ControlLink    PlayoutLink         `json:"control_link"`
-	Output         *PlayoutOutput      `json:"output,omitempty" doc:"Absent until Liquidsoap reports it."`
+	Output         *PlayoutOutput      `json:"output,omitempty" doc:"Absent until Liquidsoap reports it after the backend started (unknown)."`
 	NowPlaying     *NowPlaying         `json:"now_playing,omitempty" doc:"Absent between tracks or when nothing is known."`
 	LastCallbackAt *time.Time          `json:"last_callback_at,omitempty" doc:"When the last callback from Liquidsoap arrived."`
 	MusicGain      *float64            `json:"music_gain,omitempty" doc:"The gain last set; absent before the first connect."`

@@ -232,6 +232,9 @@ const EventIcecastState = "icecast.state"
 const (
 	IcecastConnected    = "connected"
 	IcecastDisconnected = "disconnected"
+	// IcecastUnknown: no heartbeat from Liquidsoap for longer than
+	// outage.heartbeat_timeout_seconds.
+	IcecastUnknown = "unknown"
 )
 
 // IcecastStateEvent reports the connection state of the Icecast output, as
@@ -245,7 +248,7 @@ type IcecastStateEvent struct {
 
 // IcecastStateData is the payload of [IcecastStateEvent].
 type IcecastStateData struct {
-	State string `json:"state" enum:"connected,disconnected"`
+	State string `json:"state" enum:"connected,disconnected,unknown" doc:"unknown: no heartbeat from Liquidsoap for longer than outage.heartbeat_timeout_seconds."`
 }
 
 // EventBroadcastState is the type of [BroadcastStateEvent].

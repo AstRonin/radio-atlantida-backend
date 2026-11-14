@@ -118,8 +118,12 @@ type QueuedItem struct {
 
 // Output is the Icecast output state reported by Liquidsoap.
 type Output struct {
-	Connected bool
-	Since     time.Time
+	// State is ws.IcecastConnected, ws.IcecastDisconnected, or
+	// ws.IcecastUnknown (the heartbeat went silent).
+	State string
+	// Since is when the state changed: the time Liquidsoap reported, or
+	// when the silence was found (unknown).
+	Since time.Time
 }
 
 // Status is the playout state for the panel.
@@ -223,7 +227,7 @@ type Settings struct {
 	DuckGain            float64
 	EmergencyPlaylistID *uint64
 	// HeartbeatTimeout: heartbeats silent this long reset the safety state
-	// (outage.heartbeat_timeout_seconds).
+	// and the output state (outage.heartbeat_timeout_seconds).
 	HeartbeatTimeout time.Duration
 	// Output is the stream output (stream.* settings), sent on every
 	// connect and when it changes.
@@ -262,11 +266,14 @@ type Service struct {
 	// Owned by the Run goroutine.
 	push pusherState
 
-	mu            sync.Mutex
-	rnd           *rand.Rand
-	nowPlaying    *NowPlaying
-	lastCallback  *time.Time
-	output        *Output
+	mu           sync.Mutex
+	rnd          *rand.Rand
+	nowPlaying   *NowPlaying
+	lastCallback *time.Time
+	output       *Output
+	// outputBeat is when the last heartbeat or output callback arrived;
+	// zero after the output state was reset to unknown (outputExpire).
+	outputBeat    time.Time
 	gain          *float64
 	gainPending   bool
 	lastEmergency uint64

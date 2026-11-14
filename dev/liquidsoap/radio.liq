@@ -1,4 +1,4 @@
-# radio-atlantida-contract: 1
+# radio-atlantida-contract: 2
 # min-backend: 1.0.0
 #
 # Minimal development playout script for Liquidsoap 2.4.x.
@@ -22,7 +22,8 @@
 #     the environment output after three quick starts in a row; an
 #     output.dummy that keeps the sources awake while the output changes;
 #   - a UTC playout journal and an HTTP callback on every track start and end;
-#   - a heartbeat callback every 5 seconds, for the outage detector.
+#   - a heartbeat callback every 5 seconds, for the outage detector, with
+#     the safety tone and the Icecast output state.
 #
 # Every startup value comes from the environment (set in docker-compose.dev.yml).
 # The production script lives in radio-atlantida-deploy/config/ and is this
@@ -35,6 +36,8 @@
 # by one and set min-backend to the first backend release that implements
 # the new contract. The deploy tool refuses a backend below min-backend and
 # restarts Liquidsoap (maintenance) when the contract number changes.
+# Contract 2: the heartbeat reports the output state (output_connected,
+# output_since).
 
 def env(name, default) =
   environment.get(default=default, name)
@@ -159,12 +162,19 @@ thread.run(
     )
 )
 
-# The Icecast output connection state (§8.3), for the outage detector.
+# The Icecast output connection state (§8.3), for the outage detector and
+# the broadcast state. The last report is kept for the heartbeat, which
+# repeats it (a backend restart or a lost callback heals within 5 s): not
+# connected since the script started until the first connect.
+output_up = ref(false)
+output_changed = ref(utc_now())
+
 def report_output(connected) =
+  t = utc_now()
+  output_up := connected
+  output_changed := t
   line =
-    json.stringify(
-      compact=true, {event="output", time=utc_now(), connected=connected}
-    )
+    json.stringify(compact=true, {event="output", time=t, connected=connected})
   journal(line)
   callback(line)
 end
@@ -326,7 +336,9 @@ automation = fallback(id="automation", track_sensitive=false, [music, safety])
 # detector tells a stalled Liquidsoap from a long track by it (§7.1). It also
 # says whether the safety tone is on air, that is, whether the source before
 # it in the fallback (the hour queues and the emergency source) has nothing
-# to play. Below `music`, because it reads it.
+# to play, and repeats the last output report (contract 2): connected or
+# not, and since when (the time of that report). Below `music`, because it
+# reads it.
 thread.run(
   every=5.,
   fun () ->
@@ -336,7 +348,9 @@ thread.run(
         {
           event="heartbeat",
           time=utc_now(),
-          safety_on_air=not source.is_ready(music)
+          safety_on_air=not source.is_ready(music),
+          output_connected=output_up(),
+          output_since=output_changed()
         }
       )
     )

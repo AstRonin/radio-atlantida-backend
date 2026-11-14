@@ -45,6 +45,12 @@ type Event struct {
 	// SafetyOnAir is whether the safety tone is on air (heartbeat); nil
 	// when the script does not report it.
 	SafetyOnAir *bool
+	// OutputConnected is the Icecast output state (heartbeat, contract 2);
+	// nil when the script does not report it.
+	OutputConnected *bool
+	// OutputSince is when the output last changed state (heartbeat); nil:
+	// the heartbeat time.
+	OutputSince *time.Time
 }
 
 // Callback records an event from Liquidsoap. Every event is idempotent: a
@@ -59,9 +65,14 @@ func (s *Service) Callback(ctx context.Context, e Event) error {
 	switch {
 	case e.Kind == EventHeartbeat:
 		s.safetyHeartbeat(at, e.SafetyOnAir)
+		s.outputHeartbeat(at)
+		if e.OutputConnected != nil {
+			s.recordOutput(ctx, *e.OutputConnected, e.OutputSince, e.Time)
+		}
 		return nil
 	case e.Kind == EventOutput:
-		s.setOutput(ctx, e)
+		s.outputHeartbeat(at)
+		s.recordOutput(ctx, e.Connected, new(e.Time), e.Time)
 		return nil
 	case e.Source == SourcePlan && e.ItemID != nil && e.Kind == EventStart:
 		defer s.Wake() // a queue slot was freed
@@ -254,28 +265,69 @@ func nowPlayingData(np NowPlaying) ws.NowPlayingData {
 	}
 }
 
-// setOutput records the Icecast output state and sends icecast.state when
-// it changes. Every report goes on to the broadcast state, which may have
-// forgotten an unchanged one (a silent heartbeat).
-func (s *Service) setOutput(ctx context.Context, e Event) {
-	defer s.outputs.OnOutput(ctx, e.Connected, e.Time)
-	s.mu.Lock()
-	changed := s.output == nil || s.output.Connected != e.Connected
-	if changed {
-		s.output = &Output{Connected: e.Connected, Since: e.Time.UTC()}
+// recordOutput records a report of the Icecast output state: an output
+// callback (since is its time) or a heartbeat (contract 2; since is
+// output_since, nil when absent). It sends icecast.state, with since as
+// its time, when the state changes or since moves (a flap between two
+// heartbeats whose callbacks were lost); a heartbeat repeating the state
+// sends nothing and logs nothing. Every report goes on to the broadcast
+// state at at, which may have forgotten an unchanged one (a silent
+// heartbeat).
+func (s *Service) recordOutput(ctx context.Context, connected bool, since *time.Time, at time.Time) {
+	defer s.outputs.OnOutput(ctx, connected, at)
+	state := ws.IcecastConnected
+	if !connected {
+		state = ws.IcecastDisconnected
 	}
-	s.mu.Unlock()
-	if !changed {
+	from := at
+	if since != nil {
+		from = *since
+	}
+	from = from.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.output
+	stateChanged := prev == nil || prev.State != state
+	if !stateChanged && (since == nil || prev.Since.Equal(from)) {
 		return
 	}
-	state := ws.IcecastConnected
-	if !e.Connected {
-		state = ws.IcecastDisconnected
-		s.log.Warn("liquidsoap lost its icecast output")
-	} else {
+	s.output = &Output{State: state, Since: from}
+	if stateChanged && connected {
 		s.log.Info("liquidsoap connected its icecast output")
+	} else if stateChanged {
+		s.log.Warn("liquidsoap lost its icecast output")
 	}
-	s.pub.Publish(ws.IcecastStateEvent{Type: ws.EventIcecastState, Time: e.Time.UTC(), Data: ws.IcecastStateData{State: state}})
+	// Under mu, as setSafetyLocked: the events leave in the order of the
+	// changes, also against outputExpire on the pusher goroutine.
+	s.pub.Publish(ws.IcecastStateEvent{Type: ws.EventIcecastState, Time: from, Data: ws.IcecastStateData{State: state}})
+}
+
+// outputHeartbeat records that Liquidsoap is alive (a heartbeat, with or
+// without the output fields, or an output callback), received at at, so
+// outputExpire does not reset a state a contract 1 script keeps up to date.
+func (s *Service) outputHeartbeat(at time.Time) {
+	s.mu.Lock()
+	s.outputBeat = at
+	s.mu.Unlock()
+}
+
+// outputExpire sets the output state to unknown when Liquidsoap has been
+// silent longer than timeout (outage.heartbeat_timeout_seconds): the last
+// report may no longer hold (Liquidsoap stopped). Nothing when the state is
+// unknown already or was never reported. The next report restores it.
+func (s *Service) outputExpire(now time.Time, timeout time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outputBeat.IsZero() || now.Sub(s.outputBeat) <= timeout {
+		return
+	}
+	s.outputBeat = time.Time{}
+	if s.output == nil || s.output.State == ws.IcecastUnknown {
+		return
+	}
+	s.output = &Output{State: ws.IcecastUnknown, Since: now}
+	s.log.Info("icecast output state unknown: no heartbeat from liquidsoap")
+	s.pub.Publish(ws.IcecastStateEvent{Type: ws.EventIcecastState, Time: now, Data: ws.IcecastStateData{State: ws.IcecastUnknown}})
 }
 
 // EmergencyNext returns the request of the next emergency track (§8.2,

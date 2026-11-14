@@ -11,7 +11,6 @@ import (
 
 	"github.com/AstRonin/radio-atlantida-backend/internal/httpapi/dto"
 	"github.com/AstRonin/radio-atlantida-backend/internal/playout"
-	"github.com/AstRonin/radio-atlantida-backend/internal/ws"
 )
 
 // Playout puts the plan on air (*playout.Service).
@@ -146,8 +145,16 @@ func callbackEvent(b dto.PlayoutCallbackBody) playout.Event {
 	return playout.Event{
 		Kind: playout.EventKind(b.Event), Time: b.Time.UTC(), Source: b.Source,
 		ItemID: parseID(b.ItemID), TrackID: parseID(b.TrackID), ElapsedMS: b.ElapsedMS, Connected: b.Connected,
-		SafetyOnAir: b.SafetyOnAir,
+		SafetyOnAir: b.SafetyOnAir, OutputConnected: b.OutputConnected, OutputSince: utcPtr(b.OutputSince),
 	}
+}
+
+// utcPtr returns the time in UTC; nil stays nil.
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	return new(t.UTC())
 }
 
 // parseID reads an annotation: empty when absent. The DTO pattern allows
@@ -170,11 +177,7 @@ func playoutStatusDTO(st playout.Status) dto.PlayoutStatus {
 		Queued:         make([]dto.PlayoutQueuedItem, len(st.Queued)),
 	}
 	if st.Output != nil {
-		state := ws.IcecastConnected
-		if !st.Output.Connected {
-			state = ws.IcecastDisconnected
-		}
-		out.Output = &dto.PlayoutOutput{State: state, Since: st.Output.Since}
+		out.Output = &dto.PlayoutOutput{State: st.Output.State, Since: st.Output.Since}
 	}
 	if np := st.NowPlaying; np != nil {
 		out.NowPlaying = &dto.NowPlaying{
