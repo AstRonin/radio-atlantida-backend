@@ -22,6 +22,9 @@
 //   - after three quick starts in a row (the crash-loop guard of the
 //     script), a start ignores the state file: its output is then applied
 //     by output.set as a change;
+//   - switches between a TLS and a plain mount: the replaced output's late
+//     disconnect is not reported, the heartbeat says connected since the
+//     new output's report;
 //   - the heartbeat carries the output state (contract 2): connected since
 //     the time of the output callback, not connected while Icecast is
 //     stopped, connected again after it starts;
@@ -395,6 +398,14 @@ func run(ctx context.Context, c config) error {
 	}
 	pass("crash-loop guard: after three quick starts the environment output, then output.set applies")
 
+	// 7b. Switches between mounts (TLS through the proxy and plain): the
+	// new output connects before the old one has gone, whose late
+	// disconnect must not be reported.
+	if err = mountSwitches(ctx, c, st, ctl, tlsOut, plain("/smoke-switch", "mp3", 128, 44100, 2)); err != nil {
+		return fmt.Errorf("switch between mounts: %w", err)
+	}
+	pass(fmt.Sprintf("%d switches between a TLS and a plain mount: no late disconnected report, heartbeat connected", 2*mountSwitchRounds))
+
 	// 8. The output state in the heartbeat (contract 2), on a plain output:
 	// the TLS proxy resolves Icecast once at its start.
 	if err = heartbeatOutput(ctx, c, st, ctl, plain("/smoke-heartbeat", "mp3", 128, 44100, 2)); err != nil {
@@ -470,6 +481,69 @@ func heartbeatOutput(ctx context.Context, c config, st *stub, ctl *telnet, o out
 		return err
 	}
 	return waitOutput(ctx, c, o)
+}
+
+// mountSwitchRounds is how many times mountSwitches goes from the running
+// output a to b and back.
+const mountSwitchRounds = 3
+
+// mountSwitches switches from a (running) to b and back mountSwitchRounds
+// times; a and b are on different mounts. After every switch the new output
+// must report connected, a heartbeat must say connected since that report,
+// and no output disconnected report may come after it. output.set shuts the
+// old output down without waiting: with another mount the new output
+// connects first and the old one closes about 100-200 ms later. Before the
+// output generation in radio.liq (2026-11-14), that late disconnect was
+// reported and every heartbeat then said disconnected while the stream was
+// on air (deploy's smoke test, /smoke-tls to /smoke-heartbeat, 2 of 2 runs).
+func mountSwitches(ctx context.Context, c config, st *stub, ctl *telnet, a, b output) error {
+	for i := range 2 * mountSwitchRounds {
+		o := b
+		if i%2 == 1 {
+			o = a
+		}
+		t0 := time.Now()
+		if err := expectReply(ctl, o, "OK applied"); err != nil {
+			return fmt.Errorf("switch %d to %s: %w", i+1, o.Mount, err)
+		}
+		if err := waitOutput(ctx, c, o); err != nil {
+			return fmt.Errorf("switch %d to %s: %w", i+1, o.Mount, err)
+		}
+		up, err := st.waitCallback(ctx, t0, heartbeatWait, "output connected callback",
+			func(b dto.PlayoutCallbackBody) bool { return b.Event == "output" && b.Connected })
+		if err != nil {
+			return fmt.Errorf("switch %d to %s: %w", i+1, o.Mount, err)
+		}
+		// The heartbeat comes up to 5 s later, long after the old output
+		// closed: a late disconnect report would have changed its state.
+		hb, err := st.waitCallback(ctx, up.at, heartbeatWait, "heartbeat after the output connected callback",
+			func(b dto.PlayoutCallbackBody) bool {
+				return b.Event == "heartbeat" && b.OutputConnected != nil && b.Time.After(up.body.Time)
+			})
+		if err != nil {
+			return fmt.Errorf("switch %d to %s: %w", i+1, o.Mount, err)
+		}
+		// By the report time, not the arrival: each callback is posted from
+		// its own thread.
+		if late, found := st.find(t0, func(b dto.PlayoutCallbackBody) bool {
+			return b.Event == "output" && !b.Connected && b.Time.After(up.body.Time)
+		}); found {
+			return fmt.Errorf("switch %d to %s: output disconnected reported at %s, after connected at %s, while the output is on Icecast",
+				i+1, o.Mount, late.body.Time.Format(time.RFC3339Nano), up.body.Time.Format(time.RFC3339Nano))
+		}
+		if !*hb.body.OutputConnected || hb.body.OutputSince == nil || !hb.body.OutputSince.Equal(up.body.Time) {
+			since := "none"
+			if hb.body.OutputSince != nil {
+				since = hb.body.OutputSince.Format(time.RFC3339Nano)
+			}
+			return fmt.Errorf("switch %d to %s: heartbeat output_connected %t since %s, want true since %s",
+				i+1, o.Mount, *hb.body.OutputConnected, since, up.body.Time.Format(time.RFC3339Nano))
+		}
+		if err = waitOutput(ctx, c, o); err != nil {
+			return fmt.Errorf("switch %d to %s: after the heartbeat: %w", i+1, o.Mount, err)
+		}
+	}
+	return nil
 }
 
 // rapidSwitchCount is how many outputs rapidSwitches applies, rapidSwitchGap

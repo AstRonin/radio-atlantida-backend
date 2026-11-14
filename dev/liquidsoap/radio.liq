@@ -169,14 +169,27 @@ thread.run(
 output_up = ref(false)
 output_changed = ref(utc_now())
 
-def report_output(connected) =
-  t = utc_now()
-  output_up := connected
-  output_changed := t
-  line =
-    json.stringify(compact=true, {event="output", time=t, connected=connected})
-  journal(line)
-  callback(line)
+# Every Icecast output gets the generation current when it is made;
+# output.set raises it before it shuts the old output down. Only the
+# current generation reports: shutdown() does not wait, so a replaced
+# output's disconnect can come after the new output connected (another
+# mount or host: seen ~160 ms later), and would say disconnected while the
+# stream is on air. A late report of a replaced output is dropped (not
+# journaled, not sent, the state above unchanged).
+output_gen = ref(0)
+
+def report_output(gen, connected) =
+  if
+    gen == output_gen()
+  then
+    t = utc_now()
+    output_up := connected
+    output_changed := t
+    line =
+      json.stringify(compact=true, {event="output", time=t, connected=connected})
+    journal(line)
+    callback(line)
+  end
 end
 
 # Reports start and end of every track of s.
@@ -601,15 +614,19 @@ def make_output(c) =
   # Icecast refuses the new source (403) until the old one has gone.
   o.on_error(synchronous=false, fun (~restart_in, _) -> restart_in(1.))
   key = output_json(c)
+  # A replaced output neither reports nor saves its output (see output_gen).
+  gen = output_gen()
   o.on_connect(
     synchronous=false,
     fun () ->
-      begin
-        report_output(true)
+      if
+        gen == output_gen()
+      then
+        report_output(gen, true)
         save_output(key)
       end
   )
-  o.on_disconnect(synchronous=false, fun () -> report_output(false))
+  o.on_disconnect(synchronous=false, fun () -> report_output(gen, false))
   o
 end
 
@@ -753,7 +770,12 @@ log.important(label="output", "output: #{current_cfg()}")
 # output.set <json>: "OK unchanged" when it equals the running output (so
 # the backend may send it on every connect), "OK applied" after the switch,
 # "ERROR <reason>" when refused (the running output stays). The old output
-# is shut down first: Icecast takes the mount only after it has gone.
+# is shut down first: Icecast takes the mount only after it has gone. The
+# generation is raised before, so the old output's own reports are dropped;
+# its disconnect is reported here instead, at the switch, before the new
+# output can connect (when it was connected: a repeated "disconnected" would
+# move output_since), so a new output that never connects is not shown
+# connected.
 def set_output(arg) =
   try
     c = parse_output(arg)
@@ -769,6 +791,8 @@ def set_output(arg) =
       then
         "OK unchanged"
       else
+        output_gen := output_gen() + 1
+        if output_up() then report_output(output_gen(), false) end
         current_output().shutdown()
         current_output := make_output(c)
         current_cfg := key
