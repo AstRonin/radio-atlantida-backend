@@ -1,8 +1,8 @@
 # Plan — Output State in the Heartbeat (Contract 2) and Plan Alignment After a Liquidsoap Restart (radio-atlantida-backend)
 
-Status: Implemented (2026-11-14). P2 `75c0250` (+ `731ff6e`, an integration test); P1 `bccef39` (script contract 2, backend) + `3b80975` (liqsmoke); "Docs: output state and resync plan status". The dev-stack checks of §5 and the deploy follow-up (§6) are still to do. Deviations: §8. P3 (`held_until`, §6a): backend done ("Playout status: held_until while the first item is held after a resync"); the deploy part follows.
+Status: Implemented (2026-11-14). P2 `75c0250` (+ `731ff6e`, an integration test); P1 `bccef39` (script contract 2, backend) + `3b80975` (liqsmoke); "Docs: output state and resync plan status". The dev-stack checks of §5 and the deploy follow-up (§6) are still to do. Deviations: §8. P3 (`held_until`, §6a): backend done (043d6ea), deploy done (radio-atlantida-deploy a42aabf); the dry run in `radio-dryrun` is still to do.
 Based on: `docs/tech-design.md` v7-27 (§6.5, §7.1, §8.1, §8.3, §8.10, §11 items 41–42), `docs/phase-9-plan.md` §2 (pusher), `docs/phase-16-plan.md` §2 (broadcast state), `docs/safety-on-air-state-plan.md` (heartbeat field), `docs/deploy-prereqs-plan.md` A2 (contract header), frontend `docs/output-unknown-plan.md`, `radio-atlantida-docs/deploy/docs/dry-run.md`
-Last updated: 2026-11-14 (P3 backend implemented)
+Last updated: 2026-11-14 (P3 backend and deploy implemented)
 
 ## 1. Goal
 
@@ -147,7 +147,7 @@ After each pass, if `s.push.holdUntil` is set, start a `time.Timer` for `max(0, 
 
 **Dry run result (2026-11-14, release 1.0.3 in `radio-dryrun`):** all checks passed (8 of 8 resynced items within ±1 s, 0.33–0.41 s early), except that `radioctl cutover` failed after a successful cut-over: P2's hold leaves the queue empty until the next item's planned start, and `wait_cutover` requires a queued item within 60 s. Fixed by P3.
 
-## 6a. P3 — `held_until` in the playout status (approved 2026-11-14; backend done, deploy in progress)
+## 6a. P3 — `held_until` in the playout status (approved 2026-11-14; backend and deploy done, dry run to do)
 
 **Problem.** After every Liquidsoap start the pusher holds the first item until its planned start − 500 ms (P2), so the queue stays empty for up to one track. Deploy's `radioctl` treats an empty queue as unhealthy: `wait_cutover` (`bin/radioctl`, about line 2000) needs `(.queued | length) > 0` within 60 s, so `cutover` exits 1 and does not record `cutover_utc` while the stream is on air; `air_check` waits up to 120 s for `queued >= 2`, so an `update` started soon after a Liquidsoap restart can be refused. Accepting any empty queue (or "emergency on air") would hide a real empty plan, so the backend says when an empty queue is intended.
 
@@ -159,6 +159,8 @@ After each pass, if `s.push.holdUntil` is set, start a `time.Timer` for `max(0, 
 4. Not a script contract change (no callback, telnet, or journal change).
 
 **Deploy** (after the backend commit, `check-backend-sync.sh --update` only if `config/` changes; the deploy repository reads the API, not the backend source):
+
+Status (2026-11-14): steps 1–3 done (deploy a42aabf); step 4 (dry run) to do. `config/` is unchanged at 043d6ea (`check-backend-sync.sh --ref 043d6ea` passes), so `config/backend-source.env` was not bumped. As implemented: `held_ok` (control link and output connected, `held_until` + 5 s after now); `wait_cutover` accepts it at once; `air_check` waits for the held item when `held_until` + 15 s is within its 2-minute window and accepts the empty queue when it is later; **also the update's health gate** (deploy plan 7.3 step 10, `queued` not empty) accepts it, because a backend restarted while the item is held finds the same empty queue and holds again (not in the steps above; without it the update would roll back). Messages: "next item held until 07:33:50 UTC (plan alignment)" (UTC).
 
 1. `wait_cutover` and `air_check` accept an empty queue (or fewer than 2 items) while `held_until` is present and in the future (compared with the VM clock; allow a few seconds of skew) and the control link and output are connected; once `held_until` has passed, the old requirement applies again (`air_check` waits until a few seconds after `held_until` if it is within its window rather than failing).
 2. Messages say why it waits ("next item held until 07:33:50 (plan alignment)").
