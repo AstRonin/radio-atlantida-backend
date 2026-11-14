@@ -1,7 +1,7 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-26)
-Last updated: 2026-11-13
+Status: Draft (v7-27)
+Last updated: 2026-11-14
 
 ## 1. Overview
 
@@ -511,7 +511,7 @@ Some backend operations take time and run asynchronously. Examples: building a t
 
 - `broadcast_outage.started`: outage opened, with `started_at`, `component`, and `reason`.
 - `broadcast_outage.ended`: outage closed, with `started_at`, `ended_at`, and the number of items marked missed.
-- `icecast.state`: connection state of the Icecast output (`connected`, `disconnected`): the raw report of Liquidsoap. The panel does not show it.
+- `icecast.state`: connection state of the Icecast output (`connected`, `disconnected`, `unknown`): the raw report of Liquidsoap. The Live page shows it in its on-air card; the header shows `broadcast.state`. Since v7-27 (backend `docs/output-state-and-resync-plan.md`) it is also sent when a heartbeat shows a change that no callback reported, and with `unknown` when the heartbeat is silent beyond the timeout (§8.3).
 - `broadcast.state`: the derived broadcast state (§7.1): `state` (`connected`, `reconnecting`, `unreachable`, `unknown`), `since`, `reason`, `outage_id`, `mount_ok`, `last_check_at`. Sent only when the state changes (v7-16).
 - `live.state`: state of the live voice input (`off`, `connecting`, `on_air`, `reconnecting`), with the reason when a session ends (v7-15).
 
@@ -592,7 +592,7 @@ An outage is a period when the station's audio did not reach listeners, for exam
   1. **Icecast state**: the backend checks the mount point on the Icecast server at the configured interval (§6.3), by reading its `/status-json.xsl` over HTTP, or HTTPS when the server uses TLS (§8.8). Liquidsoap also reports its output connection state through its callbacks (§8.3).
   2. **Liquidsoap callbacks**: track start and end events. If no callback arrives within the heartbeat timeout while the station should be on air, the detector treats the playout as stalled.
   3. **Liquidsoap control link**: the backend's connection to the control interface (§8.1). Loss of this link for longer than the heartbeat timeout is treated as an outage while planned items are due: Liquidsoap keeps streaming (its queue, then the emergency source), but planned items cannot be pushed, so they become missed and the manager can reschedule them (decided 2026-10-14, v7-13).
-- Liquidsoap sends a heartbeat callback every 5 seconds, so a stalled playout is told apart from a long track (v7-13). The heartbeat also carries the optional `safety_on_air`: true when the source before the safety tone is not ready. The backend keeps this in memory: two true reports in a row (about 10 seconds) turn the state on, so a short gap between tracks is not reported, one false report turns it off, a heartbeat without the field changes nothing, and the state is reset when the heartbeat is silent beyond the timeout.
+- Liquidsoap sends a heartbeat callback every 5 seconds, so a stalled playout is told apart from a long track (v7-13). The heartbeat also carries the optional `safety_on_air`: true when the source before the safety tone is not ready. The backend keeps this in memory: two true reports in a row (about 10 seconds) turn the state on, so a short gap between tracks is not reported, one false report turns it off, a heartbeat without the field changes nothing, and the state is reset when the heartbeat is silent beyond the timeout. Since v7-27 (backend `docs/output-state-and-resync-plan.md`) the heartbeat also carries the Icecast output state, `output_connected` and `output_since` (§8.3).
 - An outage opens after the configured number of consecutive failed checks, so a single dropped request does not create a false outage. It is written to `broadcast_outages` with `started_at`, `detected_by`, and `component`.
 - The outage closes when all signals report normal operation again. `ended_at` is set and `broadcast_outage.ended` is sent (§6.5).
 - Detection must not block playout. It runs in its own goroutine and only writes state.
@@ -607,14 +607,16 @@ An outage is a period when the station's audio did not reach listeners, for exam
 
 **Implementation decisions (v7-13, `docs/phase-10-plan.md` §2).** The journal decides what aired: an item Liquidsoap started counts as aired even if Icecast was down at that moment. Items that did not air while no outage was open (a leftover flushed at the hour switch, an item more than 30 seconds late) are dropped from the plan like tracks removed by overflow: not missed, no play rule count. Before marking or dropping, the journal of the window is replayed through the same idempotent logic as the callbacks, so no cursor is kept. At startup, if the backend was down longer than the heartbeat timeout and planned items did not air, the downtime is recorded as a closed outage (`component = backend`) and its items are marked missed.
 
+**Plan alignment after a Liquidsoap restart (v7-27, backend `docs/output-state-and-resync-plan.md`).** A Liquidsoap restart (a crash, a maintenance restart, the first start mid-hour at install or cut-over) empties its queues. The backend pushes the lost items again (§8.1), but it does not push the first one at once: in an empty queue it would play immediately and move the rest of the hour early by the time left before its planned start (up to several minutes, so an insert such as the news at 30:00 aired early and the hour ran dry before its end). The backend holds that item until its planned start minus 0.5 seconds; the gap before it, at most one track, is covered by the emergency playlist, else the safety tone. The no-catch-up rule above is unchanged: the held item may already be up to 30 seconds late and is then pushed at once, and an item later than that is dropped and the next one is held. Resuming the interrupted track in the middle (cue in at the elapsed position) is deferred.
+
 **Broadcast state (v7-16, `docs/phase-16-plan.md` §2)**
 
 The panel shows on every page whether the stream reaches Icecast, and for how long. The backend derives one state from the signals above, in this order:
 
 - `unreachable` while any outage is open (every component: listeners hear nothing).
-- `unknown` while Liquidsoap's heartbeat is silent beyond the timeout, and after the backend starts until the first evidence (an output report or a mount check). Liquidsoap's last output report is forgotten while the heartbeat is silent.
+- `unknown` while Liquidsoap's heartbeat is silent beyond the timeout, and after the backend starts until the first evidence (an output report or a mount check). Liquidsoap's last output report is forgotten while the heartbeat is silent. Since v7-27 every heartbeat is an output report (§8.3), so after a backend restart the first evidence comes within 5 seconds from Liquidsoap, and an output that never connected (a cut-over while the mount still holds the old source and Icecast refuses ours with 403) shows `reconnecting`, not the mount check's `connected` (v7-27, backend `docs/output-state-and-resync-plan.md`).
 - `connected` or `reconnecting` from Liquidsoap's last output report (connected or not). `reconnecting` is the time before the detector opens an outage; Liquidsoap retries on its own.
-- Without an output report since the start (Liquidsoap reports the output only when it changes), the last mount check decides in the same way.
+- Without an output report since the start, the last mount check decides in the same way. Before v7-27 Liquidsoap reported the output only when it changed, so this was the usual case after a backend restart; since v7-27 it lasts until the first heartbeat.
 
 The timer measures continuous broadcasting: `since` is the moment of the last state change, and any drop resets it. For `unreachable` it is the outage's start (the first failed check) when that is not before the previous change. The state is stored in `broadcast_state` only when it changes; a transition caused by an outage is stored in the same transaction as the outage row. After a restart of the backend, the first evidence that confirms the stored state keeps its `since`; evidence that contradicts it starts a new `since` at that moment, so after a restart with the stream down `since` is the first failed check. A failed write leaves the state unchanged and is retried at the next signal.
 
@@ -722,6 +724,8 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 
 **Implementation (v7-12, `docs/phase-9-plan.md` §2).** Liquidsoap has two request queues, `hour_0` and `hour_1`; each station hour is pushed into the queue of its parity, and a time switch in the script plays the queue of the current hour (§8.10). Each request is annotated with its `item_id` and, for a truncated item, `liq_cue_out` and `liq_fade_out`. Since v7-22 (`docs/phase-22-plan.md` §3.2) a request also carries the cut the item was planned with: `liq_cue_in` when the in point is not 0 and `liq_cue_out` when the out point is before the end of the file; and the track's fades as read at the push: `liq_fade_in` when set, and `liq_fade_out` (the setting `fade_out_ms` for a truncated item, else the track's fade out when set). Emergency tracks carry their cue and fades the same way. Since v7-21 (`docs/phase-21-plan.md` §2) every request, of a plan item or an emergency track, also carries the library `title` and `artist` (empty for a track without an artist), so the stream metadata is what the manager entered, never the tags of the file: an annotation wins over a tag, and an empty artist hides the artist tag (checked on the dev stack). Every value is quoted, with `\` and `"` escaped and control characters removed, by one helper (`liquidsoap.Annotate`). The backend keeps `rotation.lookahead_items` items waiting in the queue of the hour on air, pushes the first items of the next hour `playout.prepush_minutes` before it starts, marks pushed items `queued`, and never pushes an item that is already more than 30 seconds late (no catch-up, §7.1).
 
+**Resync alignment (v7-27, backend `docs/output-state-and-resync-plan.md` P2).** On a new control connection the pusher checks the queues (resync). When the queue of the hour on air is empty, it holds that hour's first pushable item until its planned start minus a push lead of 0.5 seconds, wakes for it with a timer (not only the 5-second pass), and then fills the lookahead as usual. The next hour's queue is not held: it plays only from the boundary (§8.10). A new resync during the hold decides again; every pass reads the plan again, so a changed plan moves the hold. Without the hold the first item played at once in the empty queue and the hour drifted early (§7.1).
+
 ### 8.2 Emergency mode: request.dynamic
 
 `request.dynamic` is used only for emergencies, for example when the Go plan is empty or the backend is unavailable and Liquidsoap must ask for the next item itself. It is not the normal path because it makes Go's response time critical.
@@ -729,7 +733,9 @@ Liquidsoap performs the fade itself, so control-path latency does not affect it.
 ### 8.3 Feedback and playout journal
 
 - Liquidsoap reports actual playback events to Go (an HTTP callback on track start and end). Go writes them to `play_log`, including `truncated` and the actual duration. The log reflects what aired, not what was planned. A plan item moves from `scheduled_items` to `play_log` when it starts (the `aired` status of `scheduled_items` is not used); its end sets the actual duration, and an item that played more than one second less than planned is `truncated` (v7-12).
-- Liquidsoap also reports its Icecast output state (connected or not) in the same callbacks, so the outage detector knows whether listeners could receive the stream (§7.1).
+- Liquidsoap also reports its Icecast output state (connected or not) in the same callbacks, for the broadcast state (§7.1); the outage detector itself relies on the mount check.
+- **Output state in the heartbeat (v7-27, backend `docs/output-state-and-resync-plan.md` P1).** The 5-second heartbeat carries `output_connected` and `output_since` (the time of the last change), so the backend's state repairs itself after a backend restart, a lost callback, or an output that never connected. When no heartbeat arrives for longer than `outage.heartbeat_timeout_seconds` (default 10 s), the backend sets the output state to `unknown` and sends `icecast.state`; after a backend start it is unknown until the first report. The fields are optional in the callback body, so a backend with this change works with an older script.
+- **Script contract 2 (v7-27).** The callback body is validated strictly (an unknown field is refused), so the new heartbeat fields are a contract change: the script header is `radio-atlantida-contract: 2` with `min-backend: 1.0.0`, because 1.0.0 is the first release and ships with contract 2. The deploy tool restarts Liquidsoap in maintenance when the contract number changes (§9.2).
 - Liquidsoap writes every track start and end to a local playout journal in `PLAYOUT_JOURNAL_ROOT`, independently of the callbacks (§7.1). If a callback cannot be delivered, the journal still holds the event, and reconciliation uses it after the backend recovers.
 
 ### 8.4 Live voice
@@ -816,6 +822,7 @@ Every other codec, channel, sample rate, and bitrate combination of the settings
 - `request.push` does not guarantee a start at a specific second. Clock starts are therefore tied to the hour grid: Liquidsoap switches sources by time, aligned to UTC hour boundaries adjusted for the station timezone (§10.2).
 - Each clock start is a scheduled switch. Items from the new clock are pushed before the boundary, so the switch is a source change, not a late push.
 - The script switches between its two hour queues at `floor((t − hour_shift) / 3600)` parity, where `hour_shift` (set by the backend) is the station UTC offset modulo one hour. The queue an hour leaves is flushed, and a track cut by the switch reports its end at once (v7-12). Measured on the dev stack: the clock started 18 ms after the boundary.
+- After a Liquidsoap restart only the hour on air is held to its plan (§8.1, v7-27); its first item is due before the hour ends, so the hold never crosses the boundary, and the next hour, pushed within the pre-push window as usual, still starts by the switch.
 - The start and end accuracy are verified on the test stand before the first air date. Acceptance target: a clock starts within one second of the scheduled time.
 - If the station timezone ever becomes DST-dependent, the switch logic must handle 23- and 25-hour days (§10.2).
 
@@ -1126,6 +1133,8 @@ The open questions from the previous version are closed. The decisions are recor
 38. **Media stays in the Windows folder** (v7-24). The existing Windows folder of tracks is the media root, through WSL's drive mount; copying it into the distribution is the fallback (§9.1).
 39. **Encoder limits refused at save** (v7-25). A stream format that the pinned Liquidsoap encoder cannot start (some Vorbis bitrates per sample rate and channels) is refused by the backend when the settings are saved (checked against the whole batch, which is saved all or nothing), with a per-field message, and by the script if it ever arrives; one Go table is shared by the settings validation and the script's smoke test (§6.3, §8.8).
 40. **Liquidsoap stays up when the output changes** (v7-26). A permanent dummy output keeps the source graph awake through an output switch, and a crash-loop guard starts Liquidsoap with the environment output after three quick starts in a row, so a switch does not make it exit and a startup output that makes it exit is not used again and again (§8.8).
+41. **Output state in the heartbeat, contract 2** (v7-27). Liquidsoap's 5-second heartbeat carries the Icecast output state and the time of its last change; the backend applies it on every heartbeat and resets it to `unknown` when the heartbeat is silent beyond the timeout. The strict callback body makes this script contract 2, taken before the first release, so `min-backend` stays 1.0.0 (§6.5, §7.1, §8.3; backend `docs/output-state-and-resync-plan.md`).
+42. **No early drift after a Liquidsoap restart** (v7-27). After a resync with an empty queue of the hour on air, the first item is held until its planned start minus 0.5 seconds; the emergency playlist covers the gap. Resuming the interrupted track mid-way is deferred (§7.1, §8.1; backend `docs/output-state-and-resync-plan.md`).
 
 ## 12. Non-functional Requirements
 
