@@ -1,6 +1,6 @@
 # Plan — Output State in the Heartbeat (Contract 2) and Plan Alignment After a Liquidsoap Restart (radio-atlantida-backend)
 
-Status: Implemented (2026-11-14). P2 `75c0250` (+ `731ff6e`, an integration test); P1 `bccef39` (script contract 2, backend) + `3b80975` (liqsmoke); "Docs: output state and resync plan status". The dev-stack checks of §5 and the deploy follow-up (§6) are still to do. Deviations: §8.
+Status: Implemented (2026-11-14). P2 `75c0250` (+ `731ff6e`, an integration test); P1 `bccef39` (script contract 2, backend) + `3b80975` (liqsmoke); "Docs: output state and resync plan status". The dev-stack checks of §5 and the deploy follow-up (§6) are still to do. Deviations: §8. P3 (`held_until`, §6a): approved 2026-11-14, not started.
 Based on: `docs/tech-design.md` v7-27 (§6.5, §7.1, §8.1, §8.3, §8.10, §11 items 41–42), `docs/phase-9-plan.md` §2 (pusher), `docs/phase-16-plan.md` §2 (broadcast state), `docs/safety-on-air-state-plan.md` (heartbeat field), `docs/deploy-prereqs-plan.md` A2 (contract header), frontend `docs/output-unknown-plan.md`, `radio-atlantida-docs/deploy/docs/dry-run.md`
 Last updated: 2026-11-14 (implemented)
 
@@ -141,15 +141,38 @@ After each pass, if `s.push.holdUntil` is set, start a `time.Timer` for `max(0, 
 3. Repeat the dry run in the OrbStack VM `radio-dryrun` (`deploy/docs/dry-run.md` §6) with these extra checks:
    - cut-over (`bin/radioctl cutover`) while the test mount still has a source: the Live page shows `disconnected` and the header `reconnecting` until the old source leaves, then `connected`;
    - `update.bat maintenance` (Liquidsoap restart) mid-hour and a plain `docker restart` of `liquidsoap` mid-hour: the next item and a timed one-time insert added for that hour air at their planned second (journal vs plan), the gap is the emergency playlist;
-   - `bin/radioctl compose stop liquidsoap`: the Live page shows "unknown" within 15 s and the header `unknown`;
+   - `bin/radioctl compose stop liquidsoap`: the Live page shows "unknown" within 15 s; the header shows `unreachable` (the control link is lost, an outage opens, and an open outage wins over `unknown`; corrected after the dry run of 2026-11-14);
    - backend restart (`bin/radioctl compose restart backend`) with Liquidsoap running: the output state is correct within 5 s, with the `since` from before the restart.
 4. Record the results in `dry-run.md` (pull to the docs repository afterwards).
+
+**Dry run result (2026-11-14, release 1.0.3 in `radio-dryrun`):** all checks passed (8 of 8 resynced items within ±1 s, 0.33–0.41 s early), except that `radioctl cutover` failed after a successful cut-over: P2's hold leaves the queue empty until the next item's planned start, and `wait_cutover` requires a queued item within 60 s. Fixed by P3.
+
+## 6a. P3 — `held_until` in the playout status (approved 2026-11-14; not started)
+
+**Problem.** After every Liquidsoap start the pusher holds the first item until its planned start − 500 ms (P2), so the queue stays empty for up to one track. Deploy's `radioctl` treats an empty queue as unhealthy: `wait_cutover` (`bin/radioctl`, about line 2000) needs `(.queued | length) > 0` within 60 s, so `cutover` exits 1 and does not record `cutover_utc` while the stream is on air; `air_check` waits up to 120 s for `queued >= 2`, so an `update` started soon after a Liquidsoap restart can be refused. Accepting any empty queue (or "emergency on air") would hide a real empty plan, so the backend says when an empty queue is intended.
+
+**Backend.**
+
+1. `GET /api/playout/status` gets an optional `held_until` (ISO 8601 UTC): set while the pusher holds an item after a resync (`holdUntil` of P2, i.e. planned start − `holdLead`), absent otherwise. Exposed from the pusher state under its existing lock (no new goroutine); the DTO field is optional, so the frontend's generated types change only by the new field (no frontend work; the frontend picks it up at its next `npm run api:sync`).
+2. Optionally also `held_item_id` if it is free to expose; not required.
+3. Tests: unit test that the status carries `held_until` during a hold and drops it after the push; handler test for the field; `make openapi`, `make openapi-lint`.
+4. Not a script contract change (no callback, telnet, or journal change).
+
+**Deploy** (after the backend commit, `check-backend-sync.sh --update` only if `config/` changes; the deploy repository reads the API, not the backend source):
+
+1. `wait_cutover` and `air_check` accept an empty queue (or fewer than 2 items) while `held_until` is present and in the future (compared with the VM clock; allow a few seconds of skew) and the control link and output are connected; once `held_until` has passed, the old requirement applies again (`air_check` waits until a few seconds after `held_until` if it is within its window rather than failing).
+2. Messages say why it waits ("next item held until 07:33:50 (plan alignment)").
+3. bats tests for both paths (held in the future: pass; held in the past with an empty queue: fail as before; field absent: old behaviour, so an older backend works unchanged).
+4. Dry run in `radio-dryrun`: `cutover --undo` + `cutover` during a long item records `cutover_utc` at once; `update` right after a Liquidsoap restart passes the air check.
+
+**Done when:** both checks pass in the dry run, CI is green.
 
 ## 7. Follow-ups (not in this plan)
 
 - **§7.2 gap rule.** "A gap between anchors shorter than `rotation.min_gap_ms` gets no music: the next insert starts earlier within its window, else the gap stays." If the gap stays in the plan, the pusher pushes the insert as soon as the item before it is queued, so it starts early by that gap even without a restart. Verify in the builder (`internal/rotation`) whether such a gap can remain, and if so either close it in the builder or extend P2's hold to every empty-queue case (developer decision 2026-11-14: keep the hold scoped to resync in this plan; decide the extension after the builder check).
 - **A held mount is not an outage.** With the mount held by another source, the mount check is OK and the outage detector opens nothing; after P1 the header says `reconnecting` indefinitely. Developer decision 2026-11-14: a Grafana alert in radio-atlantida-deploy when the broadcast state stays `reconnecting` longer than 2 minutes (a separate small deploy task).
 - Option B (resume the interrupted track), decision 8.
+- **An interrupted item is recorded as aired with its full duration** (dry run 2026-11-14): item 504 (music-4m-c) played about 34 s before a Liquidsoap restart and the play history shows `aired`, `actual_duration_ms` 240039. Analyse the journal reconcile / missing `end` handling separately.
 
 ## 8. Deviations (as implemented)
 
