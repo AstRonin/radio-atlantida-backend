@@ -1,6 +1,6 @@
 # Radio Automation System: Technical Design
 
-Status: Draft (v7-27)
+Status: Draft (v7-28)
 Last updated: 2026-11-14
 
 ## 1. Overview
@@ -831,7 +831,7 @@ Every other codec, channel, sample rate, and bitrate combination of the settings
 Services in a single `docker-compose.yml` (kept in `radio-atlantida-deploy`):
 
 - `backend`: Go backend (image `radio-atlantida-backend`, built from `radio-atlantida-backend`).
-- `db`: PostgreSQL with a named volume for database data.
+- `db`: PostgreSQL. Database data: a named volume in development; in production a bind-mounted directory of the distribution's disk (v7-28, §9.1).
 - `liquidsoap`: Liquidsoap image (Linux), media directory mounted read-only, and a bind mount of `PLAYOUT_JOURNAL_ROOT` for the playout journal (see §7.1).
 - `icecast`: test stream server with default configuration, in the dev stack only. The production compose has no Icecast container: it streams to an external server (§8.8, v7-24).
 - `frontend`: Angular build served by a static server (image `radio-atlantida-frontend`, built from `radio-atlantida-frontend`).
@@ -856,7 +856,7 @@ Guidelines:
 - **Runtime** (v7-24, deploy plan §6): a Windows 10 PC (21H2, build 19044, or later, with the Microsoft Store WSL) on SSD storage; Windows 11 works the same way and is recommended later. Windows 10 reached end of support on 14 October 2025: the station's machine is most likely Windows 10 Home without paid Extended Security Updates, so it gets no more security fixes (and no update-driven reboots); the station accepts this for now because it exposes no inbound port, and the machine is not used for email or browsing. The installer sets the active hours over the broadcast day and uses no edition-specific update policy. Docker Engine and the Compose plugin run inside a dedicated WSL2 distribution (`radio-atlantida`, Ubuntu LTS, systemd enabled), installed by `install.bat`; Docker Desktop is not used. A Windows scheduled task of a dedicated local account starts the distribution at boot without a sign-in and keeps it running; systemd starts Docker, and Docker restarts the containers (`restart: unless-stopped`). The network mode follows the Windows build. On Windows 10 (NAT mode), WSL's localhost forwarding makes the panel and Grafana, published on `127.0.0.1` inside WSL, reachable at `127.0.0.1` on Windows; it does not forward UDP, so the live voice port is published in the VM and the browser reaches it at the VM's address, which changes at every boot: a boot unit writes it to `LIVE_PUBLIC_IPS` and recreates the backend when it changed. On Windows 11 22H2 or later the installer chooses mirrored mode, where `127.0.0.1` works for TCP and UDP and `LIVE_PUBLIC_IPS` is `127.0.0.1`. The panel is always opened at `http://127.0.0.1`, a secure context, so the microphone works without HTTPS.
 - Because development is on macOS and runtime is on Windows, the `MEDIA_ROOT` and `PLAYOUT_JOURNAL_ROOT` paths are set per machine in `.env`. Paths in the database stay relative (§8.7).
 - The media directory is the station's existing Windows folder of tracks, seen in WSL through the drive mount (`/mnt/d/...`) with a fixed owner, group, and group write, so the backend can write fixed files and Liquidsoap reads them; the import works in place and nothing watches the folder (§8.7), so the drive mount's slower access and missing file notifications do not matter for it. A Defender exclusion keeps scans away from files on air. The playout journal, the backups, and the deploy repository live on the distribution's own ext4 file system (`/srv/radio/...`, `/opt/radio-atlantida/deploy`) for speed, real `fsync`, and permissions.
-- The database is a named volume of that Docker Engine (on the distribution's disk), never a bind mount from the Windows filesystem. Data moves one way only, production to development, by restoring a dump; there is no replication (v7-24).
+- The database is a directory of the distribution's ext4 disk, `/srv/radio/pgdata`, bind-mounted into `db`, so no Docker command (`volume prune`, `compose down -v`, removal of Docker's storage) can delete it (v7-28, deploy `docs/deploy-init-plan.md` 6.11; it was a named volume of that Docker Engine before); never a bind mount from the Windows filesystem. Data moves one way only, production to development, by restoring a dump; there is no replication (v7-24).
 - File paths and line endings are checked in the build pipeline because they differ between macOS and Windows.
 
 ### 9.2 Deployment and Updates

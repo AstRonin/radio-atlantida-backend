@@ -47,6 +47,7 @@ Last updated: 2026-11-13
    - a stale `install/versions.env` on an engine upgrade: `install.ps1` now compares the Windows copy's pins with `/opt/radio-atlantida/deploy/install/versions.env` in the distribution and stops on a difference before any change; `-UseLocalVersions` overrides (deploy `8ca582e`, runbook §6.3);
    - `GRAFANA_URL` on the same release: `update.bat` re-derives it on every run and, if it changed, rewrites `runtime/applied.env` and recreates only the frontend (deploy `9fe2f24`, runbook §5.4).
    - Also resolved: free-disk minimum 20 GB with `-MinFreeGB` (deploy `560bc62`); no fixed Icecast server in `radioctl`, defaults in `config/stream-defaults.json`, cut-over checks and shows the panel settings, a source-password change is pending maintenance (deploy `1869697`, runbook §10.7).
+10. The database directory on a bind mount, `/srv/radio/pgdata` instead of the named volume (6.11, decided 2026-11-14). Before the first production install, so no production move is needed.
 
 ## 1. Ground rules
 
@@ -460,6 +461,27 @@ The external mount carries the current playout system's source until the develop
 - **Switches:** `-Yes` accepts the defaults of the questions (media folder, active hours) but never answers a question that interrupts the air; `-Elevated` is internal, set by the self-elevation so the elevated window waits for Enter before it closes. Also `-MediaFolder`, `-ActiveHoursStart`, `-ActiveHoursEnd`, `-AccountName`, `-RepoUrl`.
 - **No `install/wslconfig.template`:** `install.ps1` merges the keys into `.wslconfig` itself.
 - **First run:** `install.ps1` step 11 starts `radio-network.service` once after the clone and calls `radioctl first-run`; the first-run logic lives in `radioctl` (D5).
+
+### 6.11 Database directory on a bind mount (decided 2026-11-14; not started)
+
+**Why.** Today the database is the named volume `radio-atlantida_pgdata`, which lives in Docker's own storage (`/var/lib/docker/volumes`). It survives container removal, `compose down`, updates, rollbacks, and a reinstall of the Docker packages, but a `docker compose down -v`, a `docker volume rm` or `docker volume prune -a` (a stopped stack's volume counts as unused), a `docker system prune --volumes`, or a purge of `/var/lib/docker` deletes it. A plain directory of the distribution is not touched by any Docker command. This does not protect against `wsl --unregister` or a failed disk: the dumps and their Windows copy (D6) stay the protection against those.
+
+**Decision.** The database lives in `/srv/radio/pgdata` on the distribution's ext4 file system, next to the journal and the backups, bind-mounted into `db` at `/var/lib/postgresql/data` (the `PGDATA` of `postgres:17`; the 18 images moved it to `/var/lib/postgresql`, so a major upgrade revisits this path). Never a Windows path (`/mnt/...`): PostgreSQL over the 9p mount is slow and unreliable for `fsync` and permissions (design §9.1). No production machine has a database yet, so the change needs no migration there; only the dry-run VM does.
+
+**Tasks.**
+
+1. `setup-distro.sh`: create `/srv/radio/pgdata` with mode `0700` (owner left to the image: the `postgres` entrypoint, started as root, sets the owner of an empty data directory to its `postgres` user, uid 999, at the first start; check this, and if it does not, create it as `999:999`). Idempotent: an existing non-empty directory is never touched. Tests in `tests/distro`.
+2. `docker-compose.yml`: the `db` volume becomes the long syntax `type: bind`, `source: /srv/radio/pgdata` (written literally, not from `.env`, so a typo cannot start an empty database somewhere else), `target: /var/lib/postgresql/data`, `bind: create_host_path: false`, so a missing directory fails the start instead of creating an empty one. Remove `pgdata` from the top-level `volumes:`. Keep `scripts/check-compose.sh` and any CI job that starts the stack working (CI creates the directory or overrides the path in its own override file; never in the production file).
+3. `bin/radioctl`:
+   - `first-run`: the guard "volume exists but `state.json` does not" (`bin/radioctl:2167`) checks that `/srv/radio/pgdata` is empty (and, during the transition, that no volume `radio-atlantida_pgdata` exists); a non-empty directory without `state.json` stops with the same "manual decision" message.
+   - Every start (`update`, `maintenance`, `boot-check`, `status`): if the volume `radio-atlantida_pgdata` still exists and holds data, warn ("old database volume found; see runbook <section>") and never start `db` on an empty `/srv/radio/pgdata` while that volume holds data: stop with the move instruction.
+   - `status` shows the database directory and its size.
+   - Check that `restore`, `restore-drill`, `backup`, and the dirty-migration recovery (they work through `pg_dump`/`pg_restore` in the running container) need no change; adjust and test where they referred to the volume.
+4. Move procedure for an existing install (the dry-run VM; documented in the runbook, run once): `radioctl backup`; stop the stack; copy the volume into the directory with the `db` image (`docker run --rm -v radio-atlantida_pgdata:/from:ro -v /srv/radio/pgdata:/to postgres:17.11 bash -c 'cp -a /from/. /to/'`), keeping owner and modes; start; check `radioctl status` and the panel; only then remove the old volume (`docker volume rm radio-atlantida_pgdata`), by hand, after a typed confirmation if it is a `radioctl` command. A dump restore into the empty directory is the fallback.
+5. Docs: runbook (data locations; the "Never" warning: also never delete `/srv/radio/pgdata`; `docker volume prune` no longer reaches the database; the move procedure), `README.md` if it names the volume, `docs/dry-run.md` (the VM moves once, then the rehearsal runs on the directory), this plan's §1 "Data locations", §1.1 "Named volumes", the D2 service table (`db` row), and 6.8 step 1.
+6. Tests: bats for the first-run guard (non-empty directory, old volume present), the old-volume warning and stop, `status`; distro test for the directory; compose check for the bind mount; then the dry run in `radio-dryrun`: move the VM's database with the procedure, `update`, `rollback`, `maintenance`, `restore-drill`, a VM reboot (boot check), and `docker volume prune -a -f` with the stack stopped leaves the database intact.
+
+**Done when:** a fresh install creates the database in `/srv/radio/pgdata`; the dry-run VM was moved with the procedure and passed the checks in task 6; CI is green.
 
 ## 7. Phase D5 — Update tool (`radioctl` inside WSL)
 
