@@ -205,7 +205,7 @@ Tasks:
    - Monitoring (11.11): `MONITORING_ENABLED` (default `true`; switches Grafana only), `GRAFANA_PORT` (default `3000`, always on `127.0.0.1`), `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_DB_PASSWORD`.
    - Backups: `BACKUP_DAILY_KEEP` (14), `BACKUP_UPDATE_KEEP` (14), `BACKUP_BOUNDARY_KEEP` (3).
    - Not in `.env` (fixed in the compose file, because they are facts of the service names and port mapping, not deployment choices): `HTTP_ADDR`, `LIVE_UDP_ADDR`, `LOKI_URL`, `BACKEND_CALLBACK_URL`, `BACKEND_EMERGENCY_URL`, `BACKEND_OUTPUT_URL`, all image pins. The stream server (host, port, mount, TLS, format) is not in `.env` either: it is a backend setting (D4, 6.8). `GRAFANA_URL` is derived by the tool (D2 task 4). `LIVE_UDP_BIND` and `LIVE_PUBLIC_IPS` are written by the tool and the boot unit into `runtime/network.env` (6.5).
-5. `release.env` with placeholders until the first release (`BACKEND_TAG=1.0.0`, digests empty). CI fails on an empty digest from D7 on.
+5. `release.env` with placeholders until the first release (`BACKEND_TAG=1.0.0`, digests empty). `scripts/check-release.sh` only warns on an empty digest while the backend tag `v${BACKEND_TAG}` does not exist, and fails once it does (9.4).
 6. `install/versions.env` with placeholders and a comment per value (filled in D4).
 7. `docs/`: filled by the `docs` sync agent (§0), not by hand.
 8. `README.md`: a placeholder pointing to the runbook written in D7.
