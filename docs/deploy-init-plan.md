@@ -2,7 +2,8 @@
 
 Status: Phases D1–D7 done (deploy commits c55eb5e … 13b62cd; §0.1). Not yet installed on the production machine: see "Remaining before the first production install" (§0.1; checked 2026-11-15: no `v1.0.0` tags yet, `release.env` digests empty). Deviations from the plan text are listed at the end of each phase.
 Based on: `tech-design.md` v7-26 (§1.1, §3.1, §6.3, §7.1, §8, §9, §10), `base.md`, backend plans `backend-init-plan.md`, `radio-atlantida-docs/archive/backend/phase-12-plan.md` (live voice), `radio-atlantida-docs/archive/backend/phase-13-plan.md` (release pipeline), `radio-atlantida-docs/archive/backend/phase-21-plan.md` (stream metadata, mount charset), `phase-22-plan.md` (cue fades), `safety-on-air-state-plan.md`, `logs-loki-plan.md`; frontend plans `frontend-init-plan.md`, `f12-release-plan.md`, `radio-atlantida-docs/archive/frontend/f13-grafana-link-plan.md`
-Last updated: 2026-11-13
+Last updated: 2026-11-15
+Alternative hosts: the same stack on Linux and macOS (ops container, `scheduler` service, `install.sh`) is planned and implemented in `unix-host-plan.md`; Windows with WSL2 stays the primary host described here.
 
 ## 0. How to use this plan
 
@@ -11,9 +12,10 @@ Last updated: 2026-11-13
   - `docs/tech-design.md`: the authority on how the system is built (v7-25 or later). §9.1 and §9.2 are the specification for this repository.
   - `docs/backend-init-plan.md`, `docs/frontend-init-plan.md`: the build conventions.
   - `docs/deploy-init-plan.md`: this plan.
+  - `docs/unix-host-plan.md`: the Linux and macOS hosts (this repository's own document, like `docs/runbook.md` and `docs/dry-run.md`).
 - The **source of truth for the dev stack** is the code of `radio-atlantida-backend` (public repository), not a plan: `docker-compose.dev.yml`, `dev/liquidsoap/radio.liq`, `dev/grafana/`, `dev/loki/`, `dev/alloy/`. File references below (`file:line`) are to the backend at commit `5856a45` and the frontend at its current `main`, both untagged so far.
 - This repository contains **no application code**. It runs prebuilt images from GitHub Container Registry and holds the stack definition, the production Liquidsoap script, configuration copies, the Windows host installer, and the update tool.
-- Work one phase at a time. Each phase ends with a passing validation run. Commits and PRs are made by the developer (one PR per phase).
+- Work one phase at a time. Each phase ends with a passing validation run. An AI agent commits locally only when the developer asks; it never pushes, tags (including `ops-v*`), or changes GitHub settings. Pushes, PRs, and tags are made by the developer.
 - Section 11 lists decisions and open points. **ASK** items must be confirmed by the developers before the phase that needs them. **DEFAULT** items are applied unless the developers say otherwise.
 - Section 12 lists **cross-repo tasks** (B1, B6, and B9 matter most). Phases that depend on one say so; they must not be worked around in this repository.
 - Every statement about Windows and WSL behaviour that could not be tested on the developer's Mac is marked **(verify on Windows)**; each one is part of the Windows acceptance run in D4.
@@ -76,9 +78,13 @@ Last updated: 2026-11-13
 - Logs: `json-file` with `max-size: 10m`, `max-file: 3` for every container. The application log goes to Loki (design §10.1); Docker's copy is a fallback.
 - Resource limits are not set in v1 (DEFAULT); the WSL VM has a memory limit (6.4).
 
-**Bash** (`bin/radioctl`, `install/*.sh`)
+**Shell** (`bin/`, `install/`, `ops/`, the entry points)
 
-- Bash 5, `set -Eeuo pipefail`, `shellcheck` clean, small functions named as verbs, `"$var"` quoting everywhere.
+- Three dialects, by where the script runs (unix-host-plan §2, 5.3):
+  - **Bash 5**, `set -Eeuo pipefail`: scripts that run inside the WSL distribution or the ops image (`bin/radioctl`, `bin/radioctl-scheduler`, `bin/lib/`, `install/setup-distro.sh`, `install/install-linux.sh`, `install/lib/host-setup.sh`, `ops/smoke.sh`).
+  - **POSIX sh**, `set -eu`: the host entry points that must run before any tool is installed (`install.sh`, `update.sh`, `bin/radioctl-ops`); the bats tests run `radioctl-ops` under busybox sh.
+  - **Bash 3.2 and BSD tools**, `set -euo pipefail` without `-E`: anything that runs on a Mac host (`install/install-macos.sh`, `ops/build.sh`). Bash 3.2 runs an inherited ERR trap in every failing command substitution, so `-E` is not used; no bash 4+ features and no GNU-only forms (`sed -i` without a suffix argument, `date -d`, `readlink -f`). `scripts/check-macos.sh` and `tests/radioctl/macos.bats` check this.
+- `shellcheck` clean, small functions named as verbs, `"$var"` quoting everywhere.
 - Secrets are never printed or logged; `.env` is read with a parser that does not `source` it (no code execution from `.env`). The GHCR token goes to `docker login --password-stdin`.
 - Every external command's output goes to the run log; the console shows the steps and the result.
 - No interactive prompt without a `--yes`-style non-interactive answer for tests; destructive steps always need the typed word (`RESTORE`, `MAINTENANCE`, `CUTOVER`), which tests pass on stdin.
@@ -92,18 +98,26 @@ Last updated: 2026-11-13
 
 ## 2. Repository layout
 
-As implemented (2026-11-13, deploy commit 13b62cd):
+As implemented (2026-11-15; the Linux and macOS parts are from `unix-host-plan.md`):
 
 ```
 radio-atlantida-deploy/
-  .github/workflows/ci.yml            # every push to main and every PR; jobs lint, compose, release, backend-sync, liquidsoap, radioctl, distro, versions, install, windows (D7)
+  .github/workflows/ci.yml            # every push to main and every PR; jobs lint, compose, release, backend-sync, liquidsoap, radioctl, distro, versions, install, windows (D7), linux-install, macos, ops (unix-host-plan)
+  .github/workflows/ops-release.yml   # tag ops-vX.Y.Z: builds, smoke tests, and pushes the ops image (manifest list); its summary prints the ops.env values
   .claude/agents/deploy.md            # the subagent definition for this repository
+  CLAUDE.md                           # rules for AI agents in this repository
+  ops.env                             # OPS_TAG, OPS_DIGEST of the published ops image (empty until the first ops-vX.Y.Z)
   release.env                         # BACKEND_TAG, BACKEND_DIGEST, FRONTEND_TAG, FRONTEND_DIGEST (committed, §10.1)
   install.bat                         # entry point of the host install: runs install.ps1, which elevates itself
   install.ps1                         # Windows half of the install (D4)
+  install.sh                          # Linux and macOS install entry point (POSIX sh): runs install/install-linux.sh or install/install-macos.sh
   install/
     versions.env                      # pinned Ubuntu 24.04 rootfs URL + SHA-256, Docker apt key fingerprint, docker-ce, containerd, Compose and buildx apt versions, minimum WSL version
+    versions-macos.env                # macOS: Colima, Lima, Docker CLI, Compose, buildx release files with SHA-256 per architecture
     setup-distro.sh                   # Linux half of the install, run as root inside the distribution (D4)
+    install-linux.sh                  # Linux host install (unix-host-plan U3)
+    install-macos.sh                  # macOS host install: Colima profile, launchd daemon, pmset (unix-host-plan U4; bash 3.2)
+    lib/host-setup.sh                 # the host setup shared by setup-distro.sh and install-linux.sh
     wsl.conf                          # /etc/wsl.conf of the distribution
     radio-keepalive                   # /usr/local/bin/radio-keepalive (keeps the distribution running; logs/keepalive.log)
     systemd/
@@ -113,7 +127,12 @@ radio-atlantida-deploy/
       radio-backup.service, .timer    # radioctl backup, daily 04:30 Asia/Yerevan (D6)
       radio-restore-drill.service, .timer  # radioctl restore-drill, 05:30 Asia/Yerevan on the 1st (D6)
   update.bat                          # thin wrapper: wsl.exe -d radio-atlantida -u radio ... bin/radioctl %*
+  update.sh                           # Linux and macOS wrapper (POSIX sh): bin/radioctl-ops as the station user
   bin/radioctl                        # update, rollback, restore, maintenance, cutover, first-run, status, logs, compose, backup, restore-drill, network, boot-check (D4-D6)
+  bin/lib/platform/                   # wsl.sh, linux.sh, macos.sh: the per-platform parts of radioctl
+  bin/radioctl-ops                    # runs radioctl in the ops container on Linux and macOS (POSIX sh)
+  bin/radioctl-scheduler              # entrypoint of the scheduler service (backup, restore drill, boot check)
+  ops/                                # the ops image: Dockerfile, versions.env (base image, supercronic), build.sh, smoke.sh
   config/
     backend-source.env                # the backend commit config/ was taken from (written by check-backend-sync.sh --update, D3)
     liquidsoap/
@@ -122,9 +141,12 @@ radio-atlantida-deploy/
     grafana/                          # = backend dev/grafana/ (role.sql, provisioning/datasources/, provisioning/dashboards/, dashboards/*.json)
     loki/loki.yaml                    # = backend dev/loki/loki.yaml
     alloy/config.alloy                # = backend dev/alloy/config.alloy
+    scheduler/crontab                 # the scheduler service's jobs (Linux and macOS)
+    stream-defaults.json              # default stream output settings (this repository's own)
   docs/
     runbook.md                        # the operator runbook (D7; maintained in this repository)
     dry-run.md                        # the Mac dry run (D7; maintained in this repository)
+    unix-host-plan.md                 # the Linux and macOS hosts (maintained in this repository)
     base.md, tech-design.md, backend-init-plan.md, frontend-init-plan.md, deploy-init-plan.md   # pushed copies (§0)
   docker-compose.yml                  # the production stack (D2)
   .env.example                        # every per-machine variable, placeholders, comments
@@ -134,17 +156,20 @@ radio-atlantida-deploy/
     check-compose.sh                  # compose renders and keeps its rules (9.1 item 1)
     check-config.sh                   # Loki, Alloy, Grafana configuration in the pinned images (pinned yq for the YAML)
     check-release.sh                  # release.env (9.1 item 2)
-    check-versions.sh                 # install/versions.env pins exist upstream (9.1 item 7)
+    check-versions.sh                 # install/versions.env, ops/versions.env, install/versions-macos.env pins exist upstream; ops.env format (9.1 item 7)
+    check-macos.sh                    # macOS only: bash 3.2 and sh parse, plist lint, Colima profile keys, host override
     check-shell.sh                    # shellcheck (pinned image) on every bash file
     check-line-endings.sh             # line endings, BOM, case-only path duplicates
     lib/backend-source.sh             # the backend ref rule, shared by the scripts and CI
     lib/contract.sh                   # the Liquidsoap contract header regexes, shared with radioctl
+    lib/colima-keys.awk               # the Colima template keys compared with tests/fixtures/colima-keys.txt
   tests/
-    radioctl/                         # bats tests (air, backup, commands, guard, network, update), helpers.bash, stubs/ (docker, git, ip, systemctl), Dockerfile, run.sh
+    radioctl/                         # bats tests (air, backup, commands, guard, macos, network, ops, pgdata, platform, scheduler, update), helpers.bash, stubs/, stubs-macos/, Dockerfile, run.sh
     install/                          # install.Tests.ps1 (Pester), PSScriptAnalyzerSettings.psd1, Dockerfile + run.sh (PowerShell 7), run-windows.ps1 (Windows PowerShell 5.1)
     distro/                           # run.sh, check.sh: setup-distro.sh twice in ubuntu:24.04, systemd-analyze verify, --with-apt
     liquidsoap/                       # compose.yml, run.sh, tlsproxy.conf, backend-proxy.conf: the runtime smoke test with the backend's dev/liqsmoke (D3)
-    fixtures/                         # applied.env, network-nat.env, network-mirrored.env
+    linux-install/                    # run.sh (the full Linux install test; throwaway hosts only), container.sh, Dockerfile
+    fixtures/                         # applied.env, network-nat.env, network-mirrored.env, scheduler.yml, host.override.yml, colima-keys.txt
     dryrun/                           # compose.override.yml, tlsproxy.conf (the Mac dry run)
   .gitattributes  .gitignore  .editorconfig  LICENSE
   README.md                           # developer overview: layout, tests and CI, config sync, a release, radioctl switches (D7)
